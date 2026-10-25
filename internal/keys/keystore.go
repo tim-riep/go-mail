@@ -61,10 +61,10 @@ var DefaultKDFParams = KDFParams{MemoryKiB: 64 * 1024, Passes: 3, Threads: 4}
 // from a hostile file that would make it allocate gigabytes.
 const (
 	MinKDFMemoryKiB = 64 * 1024
-	MaxKDFMemoryKiB = 1024 * 1024
+	MaxKDFMemoryKiB = 256 * 1024
 	MinKDFPasses    = 3
-	MaxKDFPasses    = 32
-	MaxKDFThreads   = 64
+	MaxKDFPasses    = 10
+	MaxKDFThreads   = 16
 )
 
 func (p KDFParams) check() error {

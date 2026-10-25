@@ -11,6 +11,7 @@ package keys
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"errors"
@@ -85,11 +86,11 @@ const WordlistSHA256 = "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed
 //go:embed english.txt
 var wordlistData []byte
 
-// wordlist is the parsed list; wordIndex maps a word to its index.
-var (
-	wordlist  []string
-	wordIndex map[string]int
-)
+// wordlist is the parsed list. Lookups in both directions go through
+// Word and LookupWord, which scan the whole list with constant-time
+// selects: the index of a seed word is 11 bits of the seed, so neither a
+// slice index nor a map lookup may depend on it.
+var wordlist []string
 
 func init() {
 	sum := sha256.Sum256(wordlistData)
@@ -101,10 +102,6 @@ func init() {
 		panic("keys: embedded BIP-39 word list: " + err.Error())
 	}
 	wordlist = words
-	wordIndex = make(map[string]int, len(words))
-	for i, w := range words {
-		wordIndex[w] = i
-	}
 }
 
 // Wordlist returns a copy of the BIP-39 English word list.
@@ -112,18 +109,51 @@ func Wordlist() []string {
 	return append([]string(nil), wordlist...)
 }
 
-// LookupWord returns the index of w in the BIP-39 word list.
+// maxWordLen is the longest word in the BIP-39 English list.
+const maxWordLen = 8
+
+// LookupWord returns the index of w in the BIP-39 word list. It compares
+// w with every word, so the running time does not depend on which word
+// matches (it does depend on the length of w, which the caller's own
+// handling of the string reveals anyway).
 func LookupWord(w string) (int, bool) {
-	i, ok := wordIndex[w]
-	return i, ok
+	if len(w) == 0 || len(w) > maxWordLen {
+		return 0, false
+	}
+	var buf [maxWordLen]byte
+	copy(buf[:], w)
+	idx, found := 0, 0
+	for i, cand := range wordlist {
+		var cb [maxWordLen]byte
+		copy(cb[:], cand)
+		eq := subtle.ConstantTimeCompare(buf[:], cb[:]) & subtle.ConstantTimeEq(int32(len(cand)), int32(len(w)))
+		idx = subtle.ConstantTimeSelect(eq, i, idx)
+		found |= eq
+	}
+	return idx, found == 1
 }
 
 // Word returns the word at index i (0 to 2047) of the BIP-39 word list.
+// It selects the word from the whole list in constant time with respect
+// to i.
 func Word(i int) (string, bool) {
 	if i < 0 || i >= len(wordlist) {
 		return "", false
 	}
-	return wordlist[i], true
+	var out [maxWordLen]byte
+	n := 0
+	for j, cand := range wordlist {
+		eq := subtle.ConstantTimeEq(int32(j), int32(i))
+		var cb [maxWordLen]byte
+		copy(cb[:], cand)
+		for k := range out {
+			out[k] = byte(subtle.ConstantTimeSelect(eq, int(cb[k]), int(out[k])))
+		}
+		n = subtle.ConstantTimeSelect(eq, len(cand), n)
+	}
+	w := string(out[:n])
+	Wipe(out[:])
+	return w, true
 }
 
 // parseWordlist parses a BIP-39 word list: exactly 2048 lines of lowercase
@@ -172,9 +202,10 @@ func (s *Seed) Words() ([]string, error) {
 	bits := make([]byte, 0, SeedSize+1)
 	bits = append(bits, s[:]...)
 	bits = append(bits, sum[0])
+	defer Wipe(bits)
 	words := make([]string, SeedWords)
 	for i := range words {
-		words[i] = wordlist[bitsAt(bits, i*11)]
+		words[i], _ = Word(bitsAt(bits, i*11))
 	}
 	return words, nil
 }
@@ -196,8 +227,9 @@ func SeedFromWords(words []string) (*Seed, error) {
 		return nil, fmt.Errorf("%w: got %d", ErrWordCount, len(words))
 	}
 	var bits [SeedSize + 1]byte
+	defer Wipe(bits[:])
 	for i, w := range words {
-		idx, ok := wordIndex[w]
+		idx, ok := LookupWord(w)
 		if !ok {
 			return nil, fmt.Errorf("%w: word %d", ErrUnknownWord, i+1)
 		}

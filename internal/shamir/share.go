@@ -101,6 +101,7 @@ func (s *Share) Words() []string {
 	}
 	payload := s.Bytes()
 	bits := append(payload, checksum(payload)...)
+	defer wipe(bits)
 	words := make([]string, ShareWords)
 	for i := range words {
 		w, _ := keys.Word(bitsAt(bits, i*11))
@@ -131,6 +132,7 @@ func ShareFromWords(words []string) (*Share, error) {
 	}
 	const total = ShareSize + shareChecksumSize
 	var bits [total + 1]byte // 41 bytes of payload and checksum, 2 padding bits
+	defer wipe(bits[:])
 	for i, w := range words {
 		idx, ok := keys.LookupWord(w)
 		if !ok {
@@ -148,12 +150,9 @@ func ShareFromWords(words []string) (*Share, error) {
 	}
 	payload := bits[:ShareSize]
 	if subtle.ConstantTimeCompare(bits[ShareSize:total], checksum(payload)) != 1 {
-		wipe(bits[:])
 		return nil, ErrChecksum
 	}
-	s, err := ShareFromBytes(payload)
-	wipe(bits[:])
-	return s, err
+	return ShareFromBytes(payload)
 }
 
 // Zero overwrites the share.

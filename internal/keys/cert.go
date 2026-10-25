@@ -169,6 +169,11 @@ func DecodeGenerationCert(data []byte) (*GenerationCert, error) {
 	if !r.Has(6) {
 		return nil, fmt.Errorf("%w: missing signature", ErrCert)
 	}
+	if r.Has(5) && r.U32(5) == 0 {
+		// An explicit "revokes 0" encodes the same certificate as an absent
+		// field; only the absent form is canonical.
+		return nil, fmt.Errorf("%w: revokes 0", ErrGeneration)
+	}
 	pub, err := ecdh.X25519().NewPublicKey(r.Bytes(3))
 	if err != nil {
 		return nil, fmt.Errorf("%w: unwrap key: %v", ErrCert, err)

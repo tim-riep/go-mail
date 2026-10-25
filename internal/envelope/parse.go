@@ -56,16 +56,16 @@ func Parse(data []byte) (*File, error) {
 	if n > MaxHeaderSize {
 		return nil, fmt.Errorf("%w: %d", ErrHeaderSize, n)
 	}
-	if n > len(raw)-pos-4 {
+	if uint64(n) > uint64(len(raw)-pos-4) {
 		return nil, fmt.Errorf("%w: header", ErrTruncated)
 	}
-	f.headerBytes = raw[pos+4 : pos+4+n]
+	f.headerBytes = raw[pos+4 : pos+4+int(n)]
 	hdr, err := decodeHeader(f.headerBytes)
 	if err != nil {
 		return nil, err
 	}
 	f.Header = hdr
-	pos += 4 + n
+	pos += 4 + int(n)
 
 	// Recipient section.
 	n, ok = readLen(raw, pos)
@@ -75,16 +75,16 @@ func Parse(data []byte) (*File, error) {
 	if n > MaxRecipientsSize {
 		return nil, fmt.Errorf("%w: %d", ErrRecipientsSize, n)
 	}
-	if n > len(raw)-pos-4 {
+	if uint64(n) > uint64(len(raw)-pos-4) {
 		return nil, fmt.Errorf("%w: recipient section", ErrTruncated)
 	}
 	f.recipientPos = pos + 4
-	f.recipientBytes = raw[pos+4 : pos+4+n]
+	f.recipientBytes = raw[pos+4 : pos+4+int(n)]
 	f.Recipients, err = decodeRecipients(f.recipientBytes)
 	if err != nil {
 		return nil, err
 	}
-	pos += 4 + n
+	pos += 4 + int(n)
 
 	// Blocks, then the trailer. A length field whose value equals the
 	// number of remaining bytes is the trailer length: a block is always
@@ -95,11 +95,11 @@ func Parse(data []byte) (*File, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: block or trailer length", ErrTruncated)
 		}
-		rest := len(raw) - pos - 4
-		if n == rest {
+		rest := uint64(len(raw) - pos - 4)
+		if uint64(n) == rest {
 			break
 		}
-		if n > rest {
+		if uint64(n) > rest {
 			return nil, fmt.Errorf("%w: block %d", ErrTruncated, len(f.blocks))
 		}
 		if n < TagSize || n > MaxBlockSize {
@@ -111,8 +111,8 @@ func Parse(data []byte) (*File, error) {
 		if k := len(f.blocks); k > 0 && len(f.blocks[k-1]) != MaxBlockSize {
 			return nil, fmt.Errorf("%w: block %d is short but not last", ErrBlockSize, k-1)
 		}
-		f.blocks = append(f.blocks, raw[pos+4:pos+4+n])
-		pos += 4 + n
+		f.blocks = append(f.blocks, raw[pos+4:pos+4+int(n)])
+		pos += 4 + int(n)
 	}
 	if len(f.blocks) == 0 {
 		return nil, ErrNoBlocks
@@ -125,7 +125,7 @@ func Parse(data []byte) (*File, error) {
 		return nil, fmt.Errorf("%w: %d", ErrTrailerSize, n)
 	}
 	if n > 0 {
-		f.trailerBytes = raw[pos+4 : pos+4+n]
+		f.trailerBytes = raw[pos+4 : pos+4+int(n)]
 		f.Trailer, err = decodeTrailer(f.trailerBytes)
 		if err != nil {
 			return nil, err
@@ -134,12 +134,15 @@ func Parse(data []byte) (*File, error) {
 	return f, nil
 }
 
-// readLen reads the uint32 length field at pos.
-func readLen(raw []byte, pos int) (int, bool) {
+// readLen reads the uint32 length field at pos. The value stays unsigned
+// until it has been checked against the limits: converting it to int
+// first would turn values of 2^31 and above negative on 32-bit platforms
+// and defeat the checks.
+func readLen(raw []byte, pos int) (uint32, bool) {
 	if pos < 0 || len(raw)-pos < 4 {
 		return 0, false
 	}
-	return int(binary.BigEndian.Uint32(raw[pos:])), true
+	return binary.BigEndian.Uint32(raw[pos:]), true
 }
 
 // FileHash returns the SHA-256 over the file up to the trailer length
@@ -190,8 +193,8 @@ func (f *File) recipientRanges() [][2]int {
 	var out [][2]int
 	for range f.Recipients {
 		n, _ := readLen(f.raw, pos)
-		out = append(out, [2]int{pos + 4, pos + 4 + n})
-		pos += 4 + n
+		out = append(out, [2]int{pos + 4, pos + 4 + int(n)})
+		pos += 4 + int(n)
 	}
 	return out
 }

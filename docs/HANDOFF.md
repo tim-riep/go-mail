@@ -19,6 +19,7 @@ Prüfen:
 go vet ./...
 go test -race ./...
 go test -cover ./internal/...
+GOARCH=386 go test ./internal/...      # 32-bit: Längenfelder ab 2^31 (Fund der unabhängigen Prüfung)
 go test -run '^$' -fuzz '^FuzzDecode$' -fuzztime 5m ./internal/rec/   # je Fuzz-Ziel
 ```
 
@@ -112,7 +113,7 @@ var ErrWordlist, ErrWordCount, ErrUnknownWord, ErrChecksum, ErrGeneration, ErrZe
 - `RootKey` nur kurz im Speicher halten und mit `keys.Wipe` löschen; `UserRoot.Zero` nach der Ableitung aufrufen. Der Seed wird nie gespeichert.
 - Signaturdomänen sind Konstanten (`DomainGeneration`, `DomainPlatformCert`, `DomainIdentitySuccession`; `envelope` nutzt die Dateiartnamen). Nie dieselbe Domäne für zwei Strukturen verwenden.
 - `Decode*` prüft Struktur, nicht Signatur; `Verify` immer aufrufen.
-- Der Schlüsselspeicher enthält nur die aktuelle Generation. Beim Öffnen werden KDF-Parameter aus dem Kopf innerhalb fester Grenzen übernommen; schwächere als die Spezifikation nie.
+- Der Schlüsselspeicher enthält nur die aktuelle Generation. Beim Öffnen werden KDF-Parameter aus dem Kopf innerhalb fester Grenzen übernommen (64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads); schwächere als die Spezifikation nie.
 - Die Passphrase ist `[]byte` (damit sie überschreibbar ist) und darf nicht leer sein.
 
 ### Grenzen
@@ -182,8 +183,9 @@ var ErrMagic, ErrVersion, ErrSuite, ErrTruncated, ErrTooLarge, ErrHeader, ErrHea
 - Jede Datei bekommt einen neuen Dateischlüssel und einen neuen Nonce-Präfix (beide zieht der Schreiber). Nie eine Datei durch Verändern einer bestehenden erzeugen; immer neu versiegeln (3.3 Regel 1).
 - `FileID` im Kopf muss der ID im Dateinamen entsprechen; das prüft die Ablage, nicht `envelope`. Ebenso prüft die Ablage `MailboxID` und `Epoch` gegen den Ort der Datei und die Epochenkette (2.4).
 - `OpenOptions.ExpectedSuite` kommt aus der signierten `epoch.rec` der Datei-Epoche; `CheckSuiteTransition` beim Prüfen der Epochenkette aufrufen.
-- Signaturpolitik: Mail-Dateien mit `AllowUnsigned`, alle anderen mit `ResolveSigner`. Der Resolver setzt Abschnitt 7 um: unbekannter Schlüssel, fehlendes Zertifikat, Widerruf, kompromittierte Generation führen zu einem Fehler. `Extra` muss beim Prüfen gleich dem beim Signieren sein; Phase 3 legt für Metadaten den Datensatz fest (Postfach-ID, Epoche, Mail-ID, Empfangszeit, Ingest-Generation, Hashes der Mail- und Metadaten-Datei, Versionszähler).
+- Signaturpolitik: Mail-Dateien mit `AllowUnsigned`, alle anderen mit `ResolveSigner`. `envelope` koppelt `AllowUnsigned` nicht an die Dateiart, weil Abschnitt 7 für Index-Dateien keine Signatur nennt; die Ablage muss die Politik je Dateiart setzen und darf `AllowUnsigned` nie pauschal verwenden. Der Resolver setzt Abschnitt 7 um: unbekannter Schlüssel, fehlendes Zertifikat, Widerruf, kompromittierte Generation führen zu einem Fehler. `Extra` muss beim Prüfen gleich dem beim Signieren sein; Phase 3 legt für Metadaten den Datensatz fest (Postfach-ID, Epoche, Mail-ID, Empfangszeit, Ingest-Generation, Hashes der Mail- und Metadaten-Datei, Versionszähler).
 - Eine Mail-Datei (unsigniert) schützt ihren Empfängerteil nicht gegen Änderungen an fremden Einträgen. Der Client prüft deshalb den SHA-256 der Mail-Datei aus den signierten Metadaten (`FileHash` liefert den Hash bis vor den Trailer; für den Hash der ganzen Datei SHA-256 über die Bytes nehmen und in Phase 3 festlegen, welcher gemeint ist).
+- `SealOptions.Rand` und der Reader von `Keystore.Seal` sind für Testvektoren gedacht. Im Betrieb immer `nil` übergeben (crypto/rand); ein fester Reader würde Nonce-Präfix und Dateischlüssel wiederverwenden.
 - `Parse` braucht die ganze Datei; Dateien sind auf `MaxFileSize` begrenzt. Für Dateien aus dem Dateisystem die Größe vor dem Lesen prüfen.
 - Streaming beim Schreiben: `NewWriter` schreibt sofort Präambel, Kopf und Empfängerteil; erst `Close` macht die Datei gültig. Bei Abbruch die Datei verwerfen (passt zum `spool/`-Verfahren in 5.2).
 - Der Schreiber überschreibt `Header.NoncePrefix` und `Header.ChunkSize`.
@@ -220,7 +222,7 @@ Alle nicht abgedeckten Zeilen sind Fehlerzweige, die Fehler nur weiterreichen od
 
 ## Fuzzing
 
-Fuzz-Ziele: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`. Jedes prüft: kein Panic, Annahme nur mit byte-identischer Rückkodierung, Entschlüsselung manipulierter Dateien scheitert (oder liefert bei fremden Empfängereinträgen denselben Klartext). Gefundene Fälle legt `go test` unter `testdata/fuzz/<Ziel>/` ab und sie laufen danach als Regressionstests; nach den Läufen der Phase 0 lagen keine vor (siehe Abschlussbericht).
+Fuzz-Ziele: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`. Jedes prüft: kein Panic, Annahme nur mit byte-identischer Rückkodierung, Entschlüsselung manipulierter Dateien scheitert (oder liefert bei fremden Empfängereinträgen denselben Klartext). Gefundene Fälle legt `go test` unter `testdata/fuzz/<Ziel>/` ab und sie laufen danach als Regressionstests. In Phase 0 fand `keys.FuzzDecodeGenerationCert` nach zwei Minuten ein Zertifikat mit ausdrücklich kodiertem `revokes = 0`, das angenommen wurde, aber nicht byte-identisch zurückkodierte; der Decoder lehnt diese Form jetzt ab, der Fall liegt unter `internal/keys/testdata/fuzz/FuzzDecodeGenerationCert/`.
 
 ## Offene Punkte für die nächsten Phasen
 

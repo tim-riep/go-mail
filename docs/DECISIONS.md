@@ -91,7 +91,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 ### D14 Seed und Wortliste
 - Stelle: 2.2 Seed-Format.
 - Frage: Welche Eingaben werden beim Dekodieren der Wörter akzeptiert?
-- Entscheidung: Genau 24 Wörter, jedes exakt wie in der Liste (Kleinschreibung, keine umgebenden Leerzeichen). Prüfsumme sind die ersten 8 Bit von SHA-256 über die 32 Byte Entropie. Andere Wortzahlen (12, 15, 18, 21) werden abgelehnt. Die Normalisierung von Benutzereingaben (Groß-/Kleinschreibung, Leerraum) ist Aufgabe der Kommandozeile in einer späteren Phase.
+- Entscheidung: Genau 24 Wörter, jedes exakt wie in der Liste (Kleinschreibung, keine umgebenden Leerzeichen). Prüfsumme sind die ersten 8 Bit von SHA-256 über die 32 Byte Entropie. Andere Wortzahlen (12, 15, 18, 21) werden abgelehnt. Die Normalisierung von Benutzereingaben (Groß-/Kleinschreibung, Leerraum) ist Aufgabe der Kommandozeile in einer späteren Phase. Die Zuordnung zwischen Wort und Index (`keys.Word`, `keys.LookupWord`) durchläuft die ganze Liste mit konstantzeitigen Auswahloperationen, weil der Index 11 Bit des Seeds ist; ein Slice-Index oder eine Map wären geheimnisabhängige Speicherzugriffe (Hinweis der unabhängigen Prüfung).
 - Begründung: 2.2 legt 24 Wörter fest; eine tolerante Eingabe würde zusätzliche Fehlerquellen schaffen.
 
 ### D15 Prüfung der Wortliste beim Start
@@ -115,7 +115,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 ### D18 Generationszertifikat
 - Stelle: 2.2 Generationen und Registrierung (JSON-Beispiel).
 - Frage: Welche Felder, was genau wird signiert, welche Regeln?
-- Entscheidung: Datensatz `gomail/v1/rec/generation` mit `gen`, `identity_pub`, `unwrap_pub`, `created` (int64 ms), optional `revokes`, `sig`. Signiert wird mit dem Root über `"gomail/v1/sig/generation" || 0x00 || kanonischer Datensatz ohne sig`. Regeln: `gen >= 1`; Generation 1 hat kein `revokes`; Generation n > 1 hat `revokes = n-1` und nichts anderes. `VerifyGenerationChain` verlangt die lückenlose Folge 1..n, alle vom Root signiert. `created` wird nicht geprüft (keine Vorgabe).
+- Entscheidung: Datensatz `gomail/v1/rec/generation` mit `gen`, `identity_pub`, `unwrap_pub`, `created` (int64 ms), optional `revokes`, `sig`. Signiert wird mit dem Root über `"gomail/v1/sig/generation" || 0x00 || kanonischer Datensatz ohne sig`. Regeln: `gen >= 1`; Generation 1 hat kein `revokes`; Generation n > 1 hat `revokes = n-1` und nichts anderes. Ein ausdrücklich kodiertes `revokes = 0` wird abgelehnt, weil es dieselbe Bedeutung wie das fehlende Feld hätte und die Kodierung sonst nicht eindeutig wäre (Fund des Fuzzers, Regressionsfall unter `internal/keys/testdata/fuzz/`). `VerifyGenerationChain` verlangt die lückenlose Folge 1..n, alle vom Root signiert. `created` wird nicht geprüft (keine Vorgabe).
 - Begründung: Die Domänen-Trennung folgt 3.4; das Nullbyte nach dem Label entspricht 2.2. `user_id` und `root_pub` sind nicht Teil des Zertifikats, weil es ohnehin nur unter dem Root-Schlüssel der `user.rec` gültig ist.
 
 ### D19 `user.rec` nicht in Phase 0
@@ -139,7 +139,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 ### D22 Schlüsselspeicher: Grenzen der KDF-Parameter
 - Stelle: 2.2, "Version und alle KDF-Parameter stehen im Kopf der Datei".
 - Frage: Parameter aus einer fremden Datei können den Client zu Gigabyte-Reservierungen zwingen. Welche Werte werden beim Öffnen akzeptiert?
-- Entscheidung: Speicher 64 MiB bis 1 GiB, Durchläufe 3 bis 32, Threads 1 bis 64. Untergrenzen sind die Werte der Spezifikation, Obergrenzen schützen vor einer feindlichen Datei. Die Prüfung erfolgt vor dem Aufruf von Argon2. Zum Schreiben werden immer die Werte der Spezifikation benutzt. Version und KDF-Kennung müssen 1 sein.
+- Entscheidung: Speicher 64 MiB bis 256 MiB, Durchläufe 3 bis 10, Threads 1 bis 16. Untergrenzen sind die Werte der Spezifikation, Obergrenzen schützen vor einer feindlichen Datei (nach der unabhängigen Prüfung von 1 GiB/32/64 gesenkt). Die Prüfung erfolgt vor dem Aufruf von Argon2. Zum Schreiben werden immer die Werte der Spezifikation benutzt. Version und KDF-Kennung müssen 1 sein.
 - Begründung: Fail closed vor jeder Reservierung; schwächere Parameter als in der Spezifikation werden nie akzeptiert. Siehe SPEC-ISSUES S07.
 
 ### D23 Schlüsselspeicher: Dateioperationen
