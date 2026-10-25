@@ -418,3 +418,41 @@ func TestNilRecord(t *testing.T) {
 		t.Fatal("nil record must not encode")
 	}
 }
+
+func TestMiscAccessors(t *testing.T) {
+	r := New(testSchema)
+	if r.Schema() != testSchema {
+		t.Fatal("Schema()")
+	}
+	var nilRec *Record
+	if nilRec.Schema() != nil {
+		t.Fatal("nil Schema()")
+	}
+	if New(nil).Err() == nil {
+		t.Fatal("New(nil) must record an error")
+	}
+	if _, err := Decode(nil, nil); !errors.Is(err, ErrSchema) {
+		t.Fatal("Decode with nil schema")
+	}
+	for k, name := range map[Kind]string{U8: "u8", U32: "u32", I64: "i64", Bytes: "bytes", String: "string", List: "list", Kind(0): "kind(0)"} {
+		if k.String() != name {
+			t.Fatalf("%v", k)
+		}
+	}
+	if _, err := NewSchema("t"); err == nil {
+		t.Fatal("schema without fields")
+	}
+	if _, err := NewSchema("t", Field{Num: 1, Kind: U8, MaxLen: -1}); err == nil {
+		t.Fatal("negative limit")
+	}
+	if _, err := NewSchema("t", Field{Num: 1, Kind: Bytes, Size: 1, Elem: elemSchema}); err == nil {
+		t.Fatal("bytes with elem")
+	}
+	if _, err := NewSchema("t", Field{Num: 1, Kind: U8, Elem: elemSchema}); err == nil {
+		t.Fatal("u8 with elem")
+	}
+	long := strings.Repeat("a", MaxTypeLen+1)
+	if _, err := NewSchema(long, Field{Num: 1, Kind: U8}); err == nil {
+		t.Fatal("type too long")
+	}
+}
