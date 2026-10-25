@@ -183,10 +183,13 @@ func (s *Schema) field(num uint8) *Field {
 	return nil
 }
 
-// prefix returns the type string followed by NUL.
-func (s *Schema) prefix() []byte {
+// Prefix returns the bytes every record of s begins with: the type string
+// followed by NUL.
+func (s *Schema) Prefix() []byte {
 	return append([]byte(s.Type), 0)
 }
+
+func (s *Schema) prefix() []byte { return s.Prefix() }
 
 // minElemSize is the smallest possible encoding of an element of s: its
 // length prefix, its type string and the NUL.

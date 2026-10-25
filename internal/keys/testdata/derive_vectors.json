@@ -1,0 +1,224 @@
+{
+ "comment": "HKDF derivation of specification 2.2 and 2.3 from three fixed seeds. secret is the 32 derived bytes (Ed25519 seed or X25519 scalar), public the public key.",
+ "seeds": [
+  {
+   "name": "zero",
+   "seed": "0000000000000000000000000000000000000000000000000000000000000000",
+   "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+   "user": {
+    "root": {
+     "secret": "cc1b3c85e385554a4ca4cb2ce2683be5f2b2d42dc08e36b9d26d2f073284c6b3",
+     "public": "5588a0a211ebe5429fc0789002307887d3664f41e5a40ca1532b6ded68b54c38"
+    },
+    "identity": [
+     {
+      "gen": 1,
+      "secret": "19788dbbee64f06c54b22999f85bb9abcae8a2323dd7b41505997a20ed365c5d",
+      "public": "9cfef7f9cad5ff14bb74255256e5a2f34c03faeff12db623164f73712d6dd806"
+     },
+     {
+      "gen": 2,
+      "secret": "5005abfac39e1dae88af4fe8d6598266348856b4bfaa8c0165e3cc5362f59428",
+      "public": "8becb221a14b1f981e4753ff87cda62c90799f1fcf50256fdab9b77f0a4d470e"
+     }
+    ],
+    "unwrap": [
+     {
+      "gen": 1,
+      "secret": "e1d842b30aeb8e3cd9aa977734ea2aa3bf37b4ff65b27ae3abe33222bb86294e",
+      "public": "2af1d8294542076506d27580d0bb3ca5eccf27816580c6a9bbd7028f8cddf35e"
+     },
+     {
+      "gen": 2,
+      "secret": "7803587a6134345a3f2619528032428560fe56ba53abfbcb7f86a39d3e6eb487",
+      "public": "004d9a95a7ff0512b0754603e6747626f531efcc5ca58781c62fa6738e293f4f"
+     }
+    ]
+   },
+   "platform": {
+    "identity": [
+     {
+      "gen": 1,
+      "secret": "91a8c40d8b27990f5232d1fb522cdc0a8db9e59ee892266c0babda6f787b4b4b",
+      "public": "e05140f51207d9ee07e5b3e0b183d2526499dc3d963c61e966c6bb59d912afa1"
+     },
+     {
+      "gen": 2,
+      "secret": "78a62da0b436a66d263d1df380991da0d15e178aad68daccf064115726bd855b",
+      "public": "ccba80215c80cb0e8bb7d04304fa0228b57ee98adae8c0de719d3125a8568dec"
+     }
+    ],
+    "admin": [
+     {
+      "gen": 1,
+      "secret": "6d4c4e56df02c9e676cd5de47b42ea7c955828dcd556745b389d68c6d12f38e6",
+      "public": "b893931ef9f812c95df5268a682163192ad4abadf76b6f0e6e6e02ea10ab2737"
+     },
+     {
+      "gen": 2,
+      "secret": "679772ccc0c141a14f53b0ce7cb3ca1ca2e6569ea907815175f60e41c414b540",
+      "public": "68b53fc9fbaf706f2040db3ae2f911af0114e05b8cc07d117d80da7bc3585e01"
+     }
+    ],
+    "ingest": [
+     {
+      "gen": 1,
+      "secret": "7eb6d6496f5e59b51fe2ce411a1e0d7637fa6f75a5c2fcf47b10df73a93aa926",
+      "public": "6b14509e9e5f642182ec7e06f10c9560745cb73685b69bb805719526a676b26c"
+     },
+     {
+      "gen": 2,
+      "secret": "876c00c20b5e3cd06bf749414c6fc345e899baec289521f33baff3f4f5c4a80b",
+      "public": "1fc115657eb47f415e9902c62be73097c7063bfa8f346f62192bc78f72ac3b03"
+     }
+    ]
+   }
+  },
+  {
+   "name": "counter",
+   "seed": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+   "words": "absurd avoid scissors anxiety gather lottery category door army half long cage bachelor another expect people blade school educate curtain scrub monitor lady beyond",
+   "user": {
+    "root": {
+     "secret": "dc0e05bc1de6965c9c65c4b4662ea2d99e7412fd3c59f05df59b69488b834d06",
+     "public": "559ffae74f8242bc3afa1c59f11f693254f25d9cf0c4a6bef5633981fdd21e1b"
+    },
+    "identity": [
+     {
+      "gen": 1,
+      "secret": "34f8641dc548ec5b93eb3bb75ba807d060ad540d2385a66c97af2a82480cdc30",
+      "public": "21906994084f635f5d6128c11272afef01aa45f946fc81dc8ba029a9c73943d5"
+     },
+     {
+      "gen": 2,
+      "secret": "81bc11608c815fc265cfb0fc921cd847d17eef5684eabf6f063fb976ef388d98",
+      "public": "6c17653ecacc55bf4712c63cb821bedd9fa367ac24c9fffb3dc63e7a085b8642"
+     }
+    ],
+    "unwrap": [
+     {
+      "gen": 1,
+      "secret": "2c65d9f5f3a6f910e488a87aa45ce886d242544ee2f1badb59e909c453a9447a",
+      "public": "176d2748594ddac19154b6ac0289ca691ae9bf446b6c86008571953b922d6d00"
+     },
+     {
+      "gen": 2,
+      "secret": "99685f6373816c018e730e814e97f0923d0d639a8be21d1088a5b7c6c403b5bc",
+      "public": "75b0cb71506e05ea13eebe21aa30a4b245d1bf7674ae8e120ee5b704efcf7451"
+     }
+    ]
+   },
+   "platform": {
+    "identity": [
+     {
+      "gen": 1,
+      "secret": "ae25a4f1998f507decbe4d68f30e0b633e7e61bbd7f813ba115ddb82af4ac57b",
+      "public": "cd29484ec37820db1c989ce59e3f37984876f67d081316ea4bcc05e75d155b70"
+     },
+     {
+      "gen": 2,
+      "secret": "8ff8f95a5b40535dba7ba560e6d878744c55ca14eefd9f4305b2861f1f9bd2bc",
+      "public": "163acf8a1e2d92ac4c179e1ddc569b30cb9697fb261d686782ab2df0b2d4092a"
+     }
+    ],
+    "admin": [
+     {
+      "gen": 1,
+      "secret": "1e6480e60c16a7bff932c2695f685c20dd049024c6827b2b99d027db99d31f19",
+      "public": "1ca3cf96791892a2b1b7c43bbbc135d68969c99935803ebfb2a73c686cb7b2ee"
+     },
+     {
+      "gen": 2,
+      "secret": "b902ae4829e97e2ecd58f234f1fc97be735a4464a52b3797fb0cec4507434271",
+      "public": "902ee4f0e542b014b9b83fdbff2ac4076c02531379b710c143a7b626e1884c7f"
+     }
+    ],
+    "ingest": [
+     {
+      "gen": 1,
+      "secret": "99e1c08c106d9f90896f8946e9660aa9f56416f834d192fd6ac42c1b703da286",
+      "public": "b4bc62f2950e5ac3e6f246f0dd364b6b7012a9f4ab11889ff9e1a8be56d85e40"
+     },
+     {
+      "gen": 2,
+      "secret": "adf0f666f9d93e584615f02295990f1776bab05f465d4e923add91b05973233f",
+      "public": "276155ec8181cfe30528e548a3b625527d2f732cadddd6add7a0ad953288945f"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sha256-of-label",
+   "seed": "141449f4163b93f1fde35709d9baf84b0ebe89e9db64f55cd62cb6ea3f3e486e",
+   "words": "beef pelican laptop cluster rice wedding wasp helmet antenna soccer safe noodle typical eager polar hold vocal trade menu horse physical palace canvas simple",
+   "user": {
+    "root": {
+     "secret": "48f613c1f5e148e728b4877336170de757202b8849d5435b5d44ea95ea8576fc",
+     "public": "7faa5d44330ad17a67c03a29efbd691f4a24a8927c1af7dab4bb175236a98177"
+    },
+    "identity": [
+     {
+      "gen": 1,
+      "secret": "31d834baf895d5e675c3f4e355ede6564507055ae7b07fe66f9060f3bb06dc1b",
+      "public": "773ae9edbccdcd734d14fae7bb451e42fdbcea87cf566f45366bd9976cb357be"
+     },
+     {
+      "gen": 2,
+      "secret": "309437b36cfd7233de4d415f8b18055e48caeb81e154e18b58a09325fefe2628",
+      "public": "d9bfbed1713c8b36705163274eda57ea0999ebbc699219aef194ef6a25a4f701"
+     }
+    ],
+    "unwrap": [
+     {
+      "gen": 1,
+      "secret": "2f2fc6c06e0030339db7fdc3b9f6db35a94758c89c83f711e289ae57ba51c3bf",
+      "public": "e6951c1a9f714dc5dfbf4335d33c62e675383bfe4c90fc8402c04c92dc9bbf33"
+     },
+     {
+      "gen": 2,
+      "secret": "2acf998074b245b2f72f6908ff88d93dd5e749f2f6cfe64a52a419c1d3a08059",
+      "public": "14d9081a1d18c5f1d3db558c655268a962db3a2493a56293a6ce198c7e902563"
+     }
+    ]
+   },
+   "platform": {
+    "identity": [
+     {
+      "gen": 1,
+      "secret": "8f9c0d0f10c095631eb9990bb8888ba476d610968244f288ef9c82bffb437767",
+      "public": "b207dc05ffcf2569a476debd46e52ca03d0ddb6fecd39cfde499550487fb37f6"
+     },
+     {
+      "gen": 2,
+      "secret": "7cfea53d3e77b6311e91f602dab8dfc780298f55a099b1bf61dfc13dcd40ea27",
+      "public": "6fe300b7e796d2df10e7817eceda8288a9952778a5d3c8238fb56c90d3cf1450"
+     }
+    ],
+    "admin": [
+     {
+      "gen": 1,
+      "secret": "823187b3b2cbfb0ee80903a3a6538d86666df0311d743a800998cf61321f88f2",
+      "public": "ae7ffbd63ca8a36bf1f0d23a0862aa3d284a439afbf7cde8b1d1b4be0e7d374e"
+     },
+     {
+      "gen": 2,
+      "secret": "1c261dd786990397226e845a817ab652c542139315152667adfb36029c8e5fca",
+      "public": "1323189cedfd6d3b997c9f65aba547806819e3bfb429fc3a5a319b3439bd0bd0"
+     }
+    ],
+    "ingest": [
+     {
+      "gen": 1,
+      "secret": "7ff775e5842e59cfa770cd856529eb9bda0f6c865fdac46184081f40062ce4f7",
+      "public": "f8f934a68e3b965a471a2064abb9916c1248e47d71bec94fb7a3bee875fa2ec6"
+     },
+     {
+      "gen": 2,
+      "secret": "23f21a700ce52c6d326b3a46765d318dc42021e45f4c62fe0e5bd57d4c21c4ba",
+      "public": "48e6f0520ad8c9aa8f8ccc9ecdeb5939280ab01546138fec6cba57ccf8990084"
+     }
+    ]
+   }
+  }
+ ]
+}
