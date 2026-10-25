@@ -59,3 +59,21 @@ func TestWriterOutputErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestRandomExhaustedAfterNoncePrefix(t *testing.T) {
+	seven := make([]byte, 7)
+	if _, err := Seal(testHeader(KindMail), []Recipient{testRecipient(t)}, nil, &SealOptions{Rand: bytesReader(seven)}); !errors.Is(err, ErrRandom) {
+		t.Fatalf("expected ErrRandom, got %v", err)
+	}
+}
+
+func TestVerifySignatureExtraTooLong(t *testing.T) {
+	f, err := Parse(seal(t, testHeader(KindMeta), []byte("x"), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := ingestKey.Public()
+	if err := f.VerifySignature(pub.(edPublicKey), make([]byte, MaxExtraSize+1)); !errors.Is(err, ErrSigner) {
+		t.Fatalf("expected ErrSigner, got %v", err)
+	}
+}

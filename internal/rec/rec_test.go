@@ -456,3 +456,47 @@ func TestMiscAccessors(t *testing.T) {
 		t.Fatal("type too long")
 	}
 }
+
+func TestDecodeListElementTruncation(t *testing.T) {
+	// A first element large enough to pass the minimum-size estimate, then
+	// a second element whose length field is missing or lies.
+	big := mustEncode(t, New(elemSchema).SetU32(1, 1).SetString(2, strings.Repeat("x", 60)))
+	v := []byte{0, 0, 0, 2}
+	v = binary.BigEndian.AppendUint32(v, uint32(len(big)))
+	v = append(v, big...)
+	short := append(append([]byte(nil), v...), 1, 2, 3) // 3 bytes: no length field
+	if _, err := Decode(testSchema, append(minimal(), field(7, short)...)); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("missing element length: %v", err)
+	}
+	lying := append(append([]byte(nil), v...), 0, 0, 1, 0, 'x') // claims 256 bytes
+	if _, err := Decode(testSchema, append(minimal(), field(7, lying)...)); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("lying element length: %v", err)
+	}
+}
+
+func TestEncodeSizeLimits(t *testing.T) {
+	bigElem := MustSchema("gomail/test/big", Field{Num: 1, Kind: Bytes, MaxLen: MaxValueLen})
+	s := MustSchema("gomail/test/biglist", Field{Num: 1, Kind: List, Elem: bigElem, MaxCount: 3})
+	half := make([]byte, MaxValueLen/2+100)
+	r := New(s).SetList(1, []*Record{New(bigElem).SetBytes(1, half), New(bigElem).SetBytes(1, half)})
+	if _, err := r.Encode(); !errors.Is(err, ErrTooLong) {
+		t.Fatalf("list value above MaxValueLen: %v", err)
+	}
+	two := MustSchema("gomail/test/two", Field{Num: 1, Kind: Bytes, MaxLen: MaxValueLen}, Field{Num: 2, Kind: Bytes, MaxLen: MaxValueLen})
+	r2 := New(two).SetBytes(1, half).SetBytes(2, half)
+	if _, err := r2.Encode(); !errors.Is(err, ErrTooLong) {
+		t.Fatalf("record above MaxRecordSize: %v", err)
+	}
+}
+
+func TestSetOnNilAndFailedRecord(t *testing.T) {
+	var r *Record
+	if r.SetU8(1, 1) != nil {
+		t.Fatal("Set on nil must return nil")
+	}
+	f := New(testSchema).SetU8(8, 1) // unknown field: sticky error
+	f.SetU8(1, 1)
+	if _, err := f.Encode(); !errors.Is(err, ErrUnknownField) {
+		t.Fatal("first error must stick")
+	}
+}

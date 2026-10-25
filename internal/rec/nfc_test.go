@@ -158,3 +158,13 @@ func TestDecomposeDepthGuard(t *testing.T) {
 		t.Fatal("depth guard must return the rune unchanged")
 	}
 }
+
+func TestNormalizeHangulLVT(t *testing.T) {
+	// A precomposed LVT syllable decomposes to three jamo and recomposes.
+	if got := string(normalizeNFC([]rune{0xac01})); got != rs(0xac01) {
+		t.Fatalf("got %+q", got)
+	}
+	if d := decompose(nil, 0xac01, 0); len(d) != 3 || d[2] != 0x11a8 {
+		t.Fatalf("decomposition %U", d)
+	}
+}
