@@ -247,7 +247,7 @@ func (w *Writer) emit(b []byte) error {
 }
 
 // Write buffers content and emits every block that is known not to be
-// the last one.
+// the last one. At most one block of plaintext is held in memory.
 func (w *Writer) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, ErrClosed
@@ -260,16 +260,25 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, w.err
 	}
 	w.total += int64(len(p))
-	w.buf = append(w.buf, p...)
-	for len(w.buf) > ChunkSize {
-		if err := w.block(w.buf[:ChunkSize], false); err != nil {
-			return 0, err
-		}
-		n := copy(w.buf, w.buf[ChunkSize:])
-		wipe(w.buf[n:])
-		w.buf = w.buf[:n]
+	if w.buf == nil {
+		w.buf = make([]byte, 0, ChunkSize)
 	}
-	return len(p), nil
+	written := 0
+	for len(p) > 0 {
+		// A full buffer followed by more data is not the last block.
+		if len(w.buf) == ChunkSize {
+			if err := w.block(w.buf, false); err != nil {
+				return written, err
+			}
+			wipe(w.buf)
+			w.buf = w.buf[:0]
+		}
+		n := min(ChunkSize-len(w.buf), len(p))
+		w.buf = append(w.buf, p[:n]...)
+		p = p[n:]
+		written += n
+	}
+	return written, nil
 }
 
 // block encrypts and emits one block.
