@@ -1,0 +1,63 @@
+{
+ "comment": "Shamir splits with injected randomness: 2 bytes identifier, then (threshold-1) coefficient bytes per secret byte. Any threshold of the shares reconstructs the secret.",
+ "splits": [
+  {
+   "name": "3-of-5",
+   "secret": "9c553c70e9d6e1bda4d400e4c7506d3296821a5a227acde61263866755389446",
+   "threshold": 3,
+   "count": 5,
+   "random": "0714212e3b4855626f7c8996a3b0bdcad7e4f1fe0b1825323f4c596673808d9aa7b4c1cedbe8f5020f1c293643505d6a7784919eabb8c5d2dfecf90613202d3a4754",
+   "shares": [
+    {
+     "index": 1,
+     "bytes": "010714030193260b63f6c5968eabc71797f8a37a2199b1ed493d69fa151d709154aa0b8355",
+     "words": "absurd december absorb add crash aisle more suffer notable inspire vault connect legend faculty trigger creek rapid heart exercise stadium pattern modify seat clever present foster step end champion pride"
+    },
+    {
+     "index": 2,
+     "bytes": "0107140302661805458e7d85b588a282b1f68032811aa2e334a8a7c42e65f8725fa49e2683",
+     "words": "absurd december absorb age ghost actor bike soul mad proof chunk air buyer divorce skate cash pepper boost clay exhibit drill cream tide episode pig van patch tomorrow super alpha"
+    },
+    {
+     "index": 3,
+     "bytes": "0107140303696b3256916ef28687b195c2c973259215911427b7b4f3dd6aeb656c5bad3190",
+     "words": "absurd december absorb almost note odor fog column verb crouch unaware clog clutch ridge north dress much patrol unknown hazard differ rely pulse pulse forum hat goat dish bless country"
+    },
+    {
+     "index": 4,
+     "bytes": "0107140304ce5509565899370e346399b4825f0c2debc1c3bdcb1a58b9438c3074fc42ad76",
+     "words": "absurd december absorb another torch lucky floor basket damage immune body cricket else convince cost runway scrub bulb index cruise merit peace cotton attend wisdom betray frown piano key cross"
+    },
+    {
+     "index": 5,
+     "bytes": "0107140305c1263e45478a403d3b708ec7bdac1b3ee4f234aed4096f4a4c9f27470371ba65",
+     "words": "absurd december absorb argue bar busy bench vanish dizzy truth switch budget knock stock hollow symptom vendor pistol relax barrel visa chaos lady trophy address miss off one absurd catch"
+    }
+   ]
+  },
+  {
+   "name": "2-of-3",
+   "secret": "9c553c70e9d6e1bda4d400e4c7506d3296821a5a227acde61263866755389446",
+   "threshold": 2,
+   "count": 3,
+   "random": "0714212e3b4855626f7c8996a3b0bdcad7e4f1fe0b1825323f4c596673808d9aa7b4",
+   "shares": [
+    {
+     "index": 1,
+     "bytes": "0107140201bd7b0738bcb48ec12d42a3547a9abad6677c11420748f2aa4b05f5e7d8a233f2",
+     "words": "absurd december above address stumble logic title notable mom annual expose effort element essence twice smooth lab meat limb music click cereal blind rude suffer bag witness boil wasp mass"
+    },
+    {
+     "index": 2,
+     "bytes": "0107140202de094ae043123f45ade35d9fa6dfd8e16f650c6a681eb37ea0af607c5417c135",
+     "words": "absurd december above aisle they pistol library girl dismiss coin juice robot whip husband glory combine govern globe old dice dawn expect rural auto favorite safe estate fly slim dial"
+    },
+    {
+     "index": 3,
+     "bytes": "0107140203ff2771a8167050392475fe2f1b150f059e9b07724d2c8c32f9c913fcd98d6681",
+     "words": "absurd december above among venue rhythm park sock expand since buddy wisdom vast melody despair record only describe nation flip segment language cattle legend sunset hen parrot tennis ice pair"
+    }
+   ]
+  }
+ ]
+}

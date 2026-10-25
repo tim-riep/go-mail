@@ -112,6 +112,20 @@ func Wordlist() []string {
 	return append([]string(nil), wordlist...)
 }
 
+// LookupWord returns the index of w in the BIP-39 word list.
+func LookupWord(w string) (int, bool) {
+	i, ok := wordIndex[w]
+	return i, ok
+}
+
+// Word returns the word at index i (0 to 2047) of the BIP-39 word list.
+func Word(i int) (string, bool) {
+	if i < 0 || i >= len(wordlist) {
+		return "", false
+	}
+	return wordlist[i], true
+}
+
 // parseWordlist parses a BIP-39 word list: exactly 2048 lines of lowercase
 // ASCII letters, strictly ascending, separated by LF, with at most one
 // trailing LF.
