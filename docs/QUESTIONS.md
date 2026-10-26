@@ -1,0 +1,39 @@
+# Fragen an den Auftraggeber (Haltepunkte)
+
+Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, die Stelle, das Problem und einen Vorschlag. Bis zur Antwort wird an allem weitergearbeitet, was nicht davon abhängt; wo ein Paket die Stelle berührt, baut es die strengste Lesart und markiert sie mit `TODO(Qn)`.
+
+## Q1 Wiederherstellungsempfänger: Ableitung, Kennung, Wiederaufnahme (K3)
+
+- Haltepunkt 1 (Dateiformat, signierter Datensatz, Prüfregel im Client).
+- Stelle: K3 (Mechanismus entschieden), 2.4 „Wiederherstellungsempfänger“, 3.1 Empfängertyp 4, K2 Regel 1.
+- Problem: Festgelegt ist, dass der Wiederherstellungsschlüssel ein eigener Seed ist (`gomailctl recovery keygen --shares 3-of-5`), als Mitglied der Art 2 in `epoch.rec` steht und je Epoche `members/recovery.wrap` (Empfängertyp 4) bekommt. Nicht festgelegt sind: (a) die HKDF-Labels für den Entpackschlüssel des Wiederherstellungsempfängers (2.2 nennt nur Benutzer- und Plattformlabels), (b) welche `id` und `gen` der Mitgliedseintrag und der Empfängereintrag tragen, (c) wie der öffentliche Schlüssel zum eintragenden Mitglied kommt, (d) wie „sich selbst neu als Mitglied aufnehmen“ (K3 Punkt 4) ohne das Anlegen einer Epoche (K2 Regel 1) möglich sein soll.
+- Vorschlag: (a) Der Seed wird wie ein Benutzer-Seed abgeleitet (`gomail/v1/user/identity` und `gomail/v1/user/unwrap`, Generation 1); ein eigenes Label ist nicht nötig, weil der Seed nie als Benutzer registriert wird. (b) `id` ist eine zufällige 16-Byte-Kennung, die `recovery keygen` erzeugt, `gen` ist 1. (c) `recovery keygen` schreibt eine Datei `recovery.pub` (Datensatz `gomail/v1/rec/recovery-pub`: Kennung, öffentlicher Entpack- und Identitätsschlüssel, keine Signatur), die ein Mitglied mit `gomailctl mailbox set <id> --recovery recovery.pub` einträgt (neue Epoche `recovery-changed`, Fingerabdruck wird angezeigt und bestätigt). (d) Für M1 kann der Wiederherstellungsempfänger nur lesen (`gomailctl mailbox recover <id> --shares` rekonstruiert den Seed, entpackt und liest); die Wiederaufnahme als Mitglied erledigt ein verbleibendes Mitglied mit `share`. Der Fall „kein Mitglied mehr vorhanden“ bleibt bis nach M1 offen, weil er K2 Regel 1 widerspricht.
+- Bis zur Antwort: Welle 2 baut Mitgliedereinträge der Art 2 und `recovery.wrap` nach (a) und (b) hinter einer internen API; kein Befehl wird ausgeliefert, bevor die Frage entschieden ist (`TODO(Q1)`).
+
+## Q2 Einladungen: signierter Datensatz oder JSON
+
+- Haltepunkt 1 (Dateiformat).
+- Stelle: 3.7 Kurzname `invite` („Einladungscode mit Ablaufzeit, Admin-Schlüssel“); 4 `invites/<code>.json`; 2.1 „signiert Adresszuordnungen und Einladungen“.
+- Problem: Seit 1.3 verlangt 3.7 eine Signatur und eine Ablaufzeit, Abschnitt 4 nennt weiter eine JSON-Datei. Ein signierter Datensatz nach 3.6 ist kein JSON. Phase 1 schreibt unsigniertes JSON ohne Ablauf (D53, S17).
+- Vorschlag: `invites/<code>.rec` mit `gomail/v1/rec/invite` (Code, erstellt, gültig bis, Generation des Admin-Schlüssels, Signatur unter `invite`); `register` prüft Signatur und Ablauf gegen `admin-<gen>.cert`; Standardablauf 7 Tage; Abschnitt 4 nennt dann `.rec`.
+- Bis zur Antwort: unverändert (JSON, unsigniert). `gomail-server invite create` braucht nach dem Vorschlag den Admin-Schlüssel wie `address add`.
+
+## Q3 `gomailctl mailbox set --server-search off` ohne Volltextindex
+
+- Haltepunkt 1 (Dateiformat) und 4 (Umfang).
+- Stelle: 8 „Postfächer mit hochsensiblen Begriffen“, 9.2.
+- Problem: Der Schalter soll die Begriffslisten des Servers abschalten; dann sucht der Client „nur noch über den Volltextindex“, der nicht Teil von M1 ist. Der Server müsste den Schalter lesen können, also stünde er unverschlüsselt in `mailbox.rec` (unsigniert) oder in der signierten `epoch.rec`.
+- Vorschlag: Nicht Teil von M1 (der Schalter hätte ohne Volltext nur die Wirkung „keine Suche“); Eintrag in `SPEC-ISSUES.md` als offen. Soll er trotzdem kommen: Feld `server_search` in `epoch.rec` (signiert, Mitglied legt es fest), der Server schreibt bei `off` nur den Marker `unprocessed` und keine Begriffslisten.
+
+## Q4 Schlüssel und Zeitstempel des Baumkopfs
+
+- Haltepunkt 1 (signierter Datensatz, Prüfregel im Client).
+- Stelle: 2.7 „Der Server signiert regelmäßig den Baumkopf“, 3.7 letzter Absatz (Format `note`), 2.3 Aktualitätsgrenze 24 Stunden, 2.1 (die Plattform hat nur Identität, Admin und Ingest).
+- Problem: Nicht festgelegt ist, mit welchem Schlüssel der Server den Kopf signiert und woher der Client das Alter des Kopfs kennt (eine `note` hat keinen Zeitstempel).
+- Vorschlag: Der Server signiert mit dem Ingest-Schlüssel (der einzige, den er hat) als `note`-Signer mit Namen `gomail-log`; der Kopf ist ein Checkpoint im Format `origin\n<größe>\n<hash base64>\n` mit einer Erweiterungszeile `time <ms seit 1970 UTC>` (Uhr des Servers), die Zeugen bei der Gegensignatur mitprüfen (nicht in der Zukunft, nicht älter als ihr letzter Kopf). Der Client prüft das Alter über diese Zeile gegen seine Uhr. Zeugen signieren als `note`-Signer mit ihrem eigenen Schlüssel; ihre öffentlichen Schlüssel stehen in `platform/witnesses.rec`, signiert von der Plattformidentität, und werden dem Client wie die Identität hinterlegt (`identity-<gen>.pin` erhält die Zeugenliste).
+- Bis zur Antwort: Das Log bekommt den Signierschlüssel als Parameter; Welle 2 baut mit dem Vorschlag, der Schlüssel ist an einer Stelle austauschbar.
+
+## Q5 Grund der Epoche 1 und der Epoche nach erschöpftem Vorrat
+
+- Kein Haltepunkt im engen Sinn (klarstellend), hier nur zur Kenntnis; Entscheidung in `DECISIONS.md`.
+- 2.4 nennt sechs Gründe; keiner heißt „erste Epoche“ oder „sofortiger Beginn nach leerem Vorrat“. Umgesetzt wird: Epoche 1 und die Epoche nach erschöpftem Vorrat tragen `regular` (geplant, mit fünf Minuten Vorlauf wie bisher); `member-added` gilt in M1 immer als sofort (K-Anhang: „geplant oder sofort“, es wird nur die sofortige Form gebaut).
