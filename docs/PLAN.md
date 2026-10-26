@@ -1,6 +1,6 @@
 # go-mail: Proof of Concept
 
-Version 1.2, Stand: 26.10.2026 (Änderungen in Abschnitt 13)
+Version 1.3, Stand: 26.10.2026 (Änderungen in den Abschnitten 13 bis 15)
 
 go-mail ist der erste Baustein der Go-Business-Cloud. Der PoC nimmt Mails per SMTP an und legt sie als einzelne, immer verschlüsselte Dateien in einem Dateisystem ab. Der Server kann Mails empfangen, ablegen und für die Suche vorbereiten, hält aber zu keinem Zeitpunkt einen Schlüssel, mit dem er gespeicherte Daten lesen könnte.
 
@@ -91,7 +91,11 @@ Das Nullbyte trennt Label und Generation eindeutig. Labels enthalten selbst nie 
 1. Die erste Generation ist 1. Jede neue Generation ist genau um 1 höher. Lücken oder Sprünge werden abgelehnt.
 2. Eine neue Generation entsteht nur mit dem Seed: Der Client berechnet daraus kurzzeitig den Root, leitet Identität und Entpackschlüssel der neuen Generation ab und erstellt ein Generationszertifikat, signiert mit dem Root. Das Zertifikat erklärt im selben Schritt die vorherige Generation für widerrufen.
 3. Das Zertifikat wird in `user.rec` übernommen und in das Transparenzlog eingetragen (siehe 2.7). Erst ab diesem Logeintrag gilt die neue Generation.
-4. Signaturen einer widerrufenen Generation werden nur akzeptiert, wenn sie nachweislich vor dem Widerruf im Log standen.
+4. Signaturen einer widerrufenen Generation werden je nach Art des signierten Objekts unterschiedlich behandelt:
+    - **Datensätze im Transparenzlog** (`epoch.rec`, Adresszuordnungen, Zertifikate): gültig, wenn sie nachweislich vor dem Widerruf im Log standen.
+    - **Dateien außerhalb des Logs** (Verpackungen, `folders.gml`, geänderte Metadaten, Vermerke): nach dem Widerruf nie gültig, weil ihr Zeitpunkt nicht belegbar ist. `gomailctl device lost` stellt alle eigenen Dateien dieser Art mit der neuen Generation neu aus.
+    - **Übernahme durch andere Mitglieder.** Eine Datei außerhalb des Logs, die ein anderes Mitglied signiert hat, darf ein Client mit seiner eigenen Identität neu signieren, wenn er sie geprüft hatte, solange die Generation des Unterzeichners noch gültig war. Belegt wird das durch seinen eigenen lokalen Zustand (`state.json`). Das gilt vor allem für die eigene Verpackung: Wer sie einmal erfolgreich geprüft hat, signiert sie sofort selbst gegen. Dadurch verliert ein Mitglied nie den Zugriff, nur weil das Mitglied, das es aufgenommen hat, später ein Gerät verliert oder das Postfach verlässt.
+    - Dateien, die kein Client vor dem Widerruf geprüft hat, werden nicht übernommen. Genau diese könnten von einem gestohlenen Gerät stammen.
 5. Beim nächsten Sync verpacken die Clients der anderen Mitglieder alle Epochen für die neue Generation neu und löschen die Verpackungen für die widerrufene.
 
 Weil alle Generationen aus dem Seed ableitbar sind, gefährdet eine Rotation die Wiederherstellung nicht: Wer den Seed hat, kann jede Generation neu berechnen.
@@ -108,6 +112,8 @@ Weil alle Generationen aus dem Seed ableitbar sind, gefährdet eine Rotation die
 Gegen ein kompromittiertes, entsperrtes Gerät schützt das nicht. Wer dort Code ausführen kann, liest alles, worauf der Benutzer Zugriff hat. Hardware-Schlüssel (FIDO2, YubiKey, TPM) und eigene Schlüssel pro Gerät sind nicht Teil des PoC und für später vorgesehen.
 
 **Sicherung des Seeds.** `gomailctl keygen` gibt die 24 Wörter aus und fragt danach drei zufällig gewählte Wörter ab. Erst wenn das gelingt, ist die Registrierung möglich. Danach wird der Seed auf dem Gerät gelöscht.
+
+**Eingabe von Wörtern.** Die Kommandozeile normalisiert jede Eingabe von Seed- oder Anteilswörtern nach NFKD, wandelt in Kleinbuchstaben und trennt an beliebigem Leerraum. Danach muss jedes Wort exakt in der Wortliste stehen. Abkürzungen auf die ersten vier Buchstaben werden nicht angenommen. Diese Nachsicht gilt nur in der Kommandozeile, `keys` und `shamir` nehmen ausschließlich die exakte Form an.
 
 **Wiederherstellung.** `gomailctl keygen --shares 2-of-3` teilt den Seed zusätzlich per Shamir auf Vertrauenspersonen auf. Die Plattform bekommt keinen Anteil. Für Geschäftspostfächer wird diese Option empfohlen, siehe offene Entscheidung 1.
 
@@ -441,6 +447,9 @@ Der Kurzname ist ASCII ohne Schrägstrich. Bei Datensätzen ist er der Datensatz
 | `epoch` | `epoch.rec` | Identität des erzeugenden Mitglieds |
 | `address` | Adresszuordnung | Admin-Schlüssel |
 | `checkpoint` | Vermerk eines Clients zum Baumkopf | Identität des Benutzers |
+| `user` | `user.rec`, bindet Benutzer-ID an den öffentlichen Root und die Liste der Generationen | Benutzer-Root |
+| `invite` | Einladungscode mit Ablaufzeit | Admin-Schlüssel |
+| `wrap-accept` | Gegensignatur eines Mitglieds über seine eigene Verpackung (siehe 2.2, Generationen) | Identität des Mitglieds |
 | `mail`, `meta`, `pending`, `wrap`, `index` | `.gml`-Dateien nach 3.4 | Ingest-Schlüssel oder Identität des Benutzers |
 
 Kurznamen sind eindeutig und kommen in genau einer Zeile vor. Ein neuer signierter Typ braucht einen neuen Kurznamen. Signaturen über den Baumkopf des Transparenzlogs und von Zeugen folgen dem Format von `golang.org/x/mod/sumdb/note` und fallen nicht unter diese Regel.
@@ -472,14 +481,14 @@ data/
     heads/<n>.sig                signierte Baumköpfe
   mailboxes/
     <postfach-id>/
-      mailbox.rec               Name (verschlüsselt), aktuelle Epoche
-      folders.gml                Ordnernamen, verschlüsselt mit meta
+      mailbox.rec               aktuelle Epoche
       epochs/
         <n>/
           epoch.rec             Nummer, Beginn, Grund
           content.pub
           meta.pub
           members/<user-id>.wrap
+          folders.gml            Name des Postfachs und Ordnerliste, für meta dieser Epoche, signiert
       mail/
         <ordner-id>/
           <mail-id>.gml          Mail, für content der Epoche
@@ -497,6 +506,8 @@ data/
 
 Alle IDs sind zufällig (128 Bit, base32). Ordnernamen stehen nur verschlüsselt in `folders.gml`.
 
+**Name und Ordnerliste pro Epoche.** Jede Epoche hat ihre eigene `folders.gml`, verschlüsselt für den `meta`-Schlüssel genau dieser Epoche. Wer eine Epoche anlegt, auch im Vorrat, schreibt die aktuelle Ordnerliste mit hinein. Ändert ein Mitglied die Ordner, schreibt sein Client die Liste neu für die aktuelle und alle bereits angelegten künftigen Epochen. Ein Client liest die Liste der neuesten Epoche, auf die er Zugriff hat. Eine Vertretung mit Zugriff auf einen vergangenen Zeitraum sieht damit die Ordner dieses Zeitraums, und das Löschen alter Epochen nimmt nie Name oder Ordner der neueren mit.
+
 **Was im Dateisystem sichtbar bleibt:** Anzahl und Größe der Dateien, Zeitstempel, Mitgliedschaften, Zuordnung von Adressen zu Postfächern, Anzahl der Mail-IDs pro Suchmarke.
 
 ---
@@ -508,7 +519,7 @@ Alle IDs sind zufällig (128 Bit, base32). Ordnernamen stehen nur verschlüsselt
 - Port 2525, ohne TLS, ohne Anmeldung
 - **ausschließlich an `127.0.0.1` oder ein isoliertes Testnetz gebunden.** Ein öffentlich erreichbarer Betrieb ist im PoC ausgeschlossen, weil Inhalte auf dem Transportweg ungeschützt sind und jeder Mails einspeisen könnte.
 - Befehle: `EHLO`, `HELO`, `MAIL FROM`, `RCPT TO`, `DATA`, `RSET`, `NOOP`, `QUIT`
-- maximale Größe 25 MB (`SIZE` in `EHLO`), maximal 100 Empfänger
+- maximale Größe 25 MiB (26.214.400 Byte, `SIZE` in `EHLO`), maximal 100 Empfänger
 - unbekannte Empfänger: `550 5.1.1`
 - Zeilenenden CRLF, Zeilen höchstens 1.000 Zeichen, Dot-Unstuffing beim Lesen
 - Zeitlimits nach RFC 5321: 5 Minuten pro Befehl, 10 Minuten für `DATA`
@@ -720,7 +731,15 @@ Dass Suchen über Epochen hinweg nicht verknüpfbar sind, gilt nur, solange die 
 
 Im PoC arbeiten `gomailctl` und `gomail-server` auf demselben Datenverzeichnis. Der Client schreibt dorthin ausschließlich verschlüsselte Dateien und öffentliche Schlüssel. Seine privaten Schlüssel liegen getrennt im lokalen Schlüsselspeicher (siehe 2.2), auf den der Serverprozess keinen Zugriff hat.
 
-Für die Entwicklung reicht dafür ein getrennter Betriebssystembenutzer. Als **Nachweis** der Trennung taugt das nicht, weil Root auf derselben Maschine auch den Client angreifen kann. Für die Abnahme des PoC laufen Client und Server deshalb auf getrennten Maschinen, und das Datenverzeichnis wird dem Client nur über das Netz bereitgestellt (etwa per SSHFS oder NFS). Eine API zwischen Client und Server folgt später.
+Für die Entwicklung reicht dafür ein getrennter Betriebssystembenutzer. Als **Nachweis** der Trennung taugt das nicht, weil Root auf derselben Maschine auch den Client angreifen kann. Für die Abnahme des PoC laufen Client und Server deshalb auf getrennten Maschinen, und das Datenverzeichnis wird dem Client über das Netz bereitgestellt. Eine API zwischen Client und Server folgt später.
+
+**Bedingungen für den Netzbetrieb:**
+
+- **NFSv4** mit Sperrunterstützung. SSHFS ist ausgeschlossen, weil es keine Sperren über Maschinen hinweg kennt.
+- Sperren ausschließlich über POSIX-Satzsperren (`fcntl`, unter Linux als OFD-Sperren), nie über `flock`. Nur diese werden von NFSv4 über Maschinen hinweg durchgesetzt.
+- Server und Client laufen unter verschiedenen Betriebssystembenutzern, die beide der Gruppe `gomail` angehören. Im Datenverzeichnis gelten deshalb Dateirechte 0640 bzw. 0660 und Verzeichnisrechte 2770 (setgid, damit neue Dateien die Gruppe erben). Das ist zulässig, weil das Datenverzeichnis keine privaten Schlüssel enthält.
+- Der Schlüsselspeicher des Clients bleibt auf der Client-Maschine mit 0600, der Ingest-Schlüssel auf der Server-Maschine mit 0600.
+- Beim Start prüfen Server und Client, dass eine Testsperre von der jeweils anderen Seite wirksam ist, und verweigern andernfalls den Betrieb.
 
 ### 9.2 Befehle
 
@@ -865,3 +884,14 @@ Grundlage sind die offenen Punkte aus Phase 0 (`docs/SPEC-ISSUES.md`) und die En
 | D05, D06 | Listenelemente mit Längenpräfix und eigenem Typ-String festgeschrieben | 3.6 | keine, entspricht der Umsetzung |
 | D33 | `info` als Verkettung fester Breiten, AAD über den Kopf ohne Längenfeld festgeschrieben | 3.2, 3.3 | keine, entspricht der Umsetzung |
 | Größe | Obergrenze in MiB statt MB | 3.3 | keine, entspricht der Umsetzung |
+
+## 15. Änderungen in Version 1.3
+
+| Punkt | Änderung | Abschnitt | Auswirkung auf den Code |
+|---|---|---|---|
+| S11 | Nachsichtige Worteingabe nur in der Kommandozeile, Vorschlag aus Phase 1 übernommen | 2.2 | keine, entspricht der Umsetzung |
+| S13 | Regeln für Signaturen widerrufener Generationen nach Art des Objekts, Vorschlag aus Phase 1 übernommen und um die Übernahme durch andere Mitglieder ergänzt | 2.2 | `client`: Gegensignatur der eigenen Verpackung (`wrap-accept`), Übernahme fremd signierter Dateien |
+| S20 | Name und Ordnerliste pro Epoche statt an Epoche 1 | 4 | `store`, `client`: `folders.gml` je Epoche, Name aus `mailbox.rec` in `folders.gml` verschieben |
+| MiB in 5.1 | Größengrenze für SMTP in MiB | 5.1 | keine, falls bereits so umgesetzt |
+| Kurznamen | `user`, `invite`, `wrap-accept` ergänzt | 3.7 | `keys`: drei Kurznamen ergänzen |
+| Netzbetrieb | NFSv4, `fcntl`-Sperren, Gruppe `gomail`, Prüfung beim Start | 9.1 | `store`: Sperren und Rechte anpassen |
