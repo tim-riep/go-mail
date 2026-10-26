@@ -40,6 +40,27 @@ func FuzzParseAndOpen(f *testing.F) {
 	}
 	f.Add([]byte("GOML\x01\x01"))
 	f.Add([]byte{})
+	// The phase 0 vector files (framing without element type bytes) stay
+	// in the corpus as rejection cases.
+	old, err := filepath.Glob(filepath.Join("testdata", "phase0", "*.gml"))
+	if err != nil || len(old) == 0 {
+		f.Fatalf("phase 0 files: %v", err)
+	}
+	for _, name := range old {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(data)
+	}
+	// Element sequences the parser must reject.
+	seed, err := os.ReadFile(filepath.Join("testdata", "one-byte-signed.gml"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(append(append([]byte(nil), seed...), 0))
+	f.Add(append(append([]byte(nil), seed...), ElemBlock, 0, 0, 0, 0))
+	f.Add(seed[:len(seed)-1])
 	priv, _ := hexKey(v.RecipientPriv)
 	key := RecipientKey{Type: RecipientEpochContent, Gen: v.RecipientGen, PrivateKey: priv}
 	idb, _ := hex.DecodeString(v.RecipientID)

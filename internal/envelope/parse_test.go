@@ -34,19 +34,39 @@ func split(t testing.TB, data []byte) parts {
 
 func u32(n int) []byte { return binary.BigEndian.AppendUint32(nil, uint32(n)) }
 
+// elem frames payload as one element with the given type byte.
+func elem(typ byte, payload []byte) []byte { return element(typ, payload) }
+
+// build frames the blocks as ElemBlock* ElemLastBlock and the trailer, if
+// any, as ElemTrailer: the only sequence the parser accepts.
 func (p parts) build() []byte {
+	var elems [][]byte
+	for i, b := range p.blocks {
+		typ := byte(ElemBlock)
+		if i == len(p.blocks)-1 {
+			typ = ElemLastBlock
+		}
+		elems = append(elems, elem(typ, b))
+	}
+	if p.trailer != nil {
+		elems = append(elems, elem(ElemTrailer, p.trailer))
+	}
+	return p.buildElems(elems...)
+}
+
+// buildElems writes preamble, header and recipient section followed by
+// the given raw elements, so tests can build any element sequence.
+func (p parts) buildElems(elems ...[]byte) []byte {
 	var out []byte
 	out = append(out, p.preamble...)
 	out = append(out, u32(len(p.header))...)
 	out = append(out, p.header...)
 	out = append(out, u32(len(p.recipients))...)
 	out = append(out, p.recipients...)
-	for _, b := range p.blocks {
-		out = append(out, u32(len(b))...)
-		out = append(out, b...)
+	for _, e := range elems {
+		out = append(out, e...)
 	}
-	out = append(out, u32(len(p.trailer))...)
-	return append(out, p.trailer...)
+	return out
 }
 
 func (p parts) with(f func(p *parts)) parts {
@@ -96,8 +116,8 @@ func TestParseRejectsStructure(t *testing.T) {
 		}
 		return l
 	}()).Encode()
-	typeFour := entry
-	typeFour.Type = 4
+	typeFive := entry
+	typeFive.Type = 5
 	genZero := entry
 	genZero.Gen = 0
 
@@ -127,19 +147,21 @@ func TestParseRejectsStructure(t *testing.T) {
 		{"recipients truncated", small[:6+4+len(p.header)+4+3], ErrTruncated},
 		{"recipients empty", p.with(func(p *parts) { p.recipients = nil }).build(), ErrRecipients},
 		{"recipients empty list", p.with(func(p *parts) { p.recipients = emptyList }).build(), ErrRecipients},
-		{"recipients 33 entries", p.with(func(p *parts) { p.recipients = manyRecs }).build(), ErrRecipients},
+		{"recipients five entries", p.with(func(p *parts) { p.recipients = manyRecs }).build(), ErrRecipients},
 		{"recipients duplicate", p.with(func(p *parts) { p.recipients = recs(entry, entry) }).build(), ErrRecipients},
-		{"recipients type 4", p.with(func(p *parts) { p.recipients = recs(typeFour) }).build(), ErrRecipients},
+		{"recipients type 5", p.with(func(p *parts) { p.recipients = recs(typeFive) }).build(), ErrRecipients},
+		{"recipients type 0", p.with(func(p *parts) { e := entry; e.Type = 0; p.recipients = recs(e) }).build(), ErrRecipients},
 		{"recipients gen 0", p.with(func(p *parts) { p.recipients = recs(genZero) }).build(), ErrRecipients},
 		{"recipients is header record", p.with(func(p *parts) { p.recipients = p.header }).build(), ErrRecipients},
-		{"no blocks", p.with(func(p *parts) { p.blocks = nil }).build(), ErrNoBlocks},
-		{"no blocks signed", ps.with(func(p *parts) { p.blocks = nil }).build(), ErrNoBlocks},
+		{"no blocks", p.with(func(p *parts) { p.blocks = nil }).build(), ErrTruncated},
+		{"no blocks signed", ps.with(func(p *parts) { p.blocks = nil }).build(), ErrElement},
 		{"block shorter than tag", p.with(func(p *parts) { p.blocks = [][]byte{make([]byte, 15)} }).build(), ErrBlockSize},
 		{"block longer than chunk", p.with(func(p *parts) { p.blocks = [][]byte{make([]byte, MaxBlockSize+1)} }).build(), ErrBlockSize},
 		{"short block followed by block", p.with(func(p *parts) { p.blocks = [][]byte{p.blocks[0], p.blocks[0]} }).build(), ErrBlockSize},
 		{"empty block after full block", p.with(func(p *parts) { p.blocks = [][]byte{make([]byte, MaxBlockSize), make([]byte, TagSize)} }).build(), ErrEmptyBlock},
-		{"block truncated", small[:len(small)-4-1-10], ErrTruncated},
-		{"missing trailer length", small[:len(small)-4], nil}, // the last block is taken for a trailer, leaving no blocks
+		{"block truncated", small[:len(small)-10], ErrTruncated},
+		{"last block missing", small[:len(small)-5-len(p.blocks[0])], ErrTruncated},
+		{"element length only", append(append([]byte(nil), small...), ElemTrailer, 0, 0, 0), ErrTruncated},
 		{"trailer length beyond limit", p.with(func(p *parts) { p.trailer = make([]byte, MaxTrailerSize+1) }).build(), ErrTrailerSize},
 		{"trailer garbage", p.with(func(p *parts) { p.trailer = []byte("garbage trailer") }).build(), ErrTrailer},
 		{"trailer is header record", p.with(func(p *parts) { p.trailer = p.header }).build(), ErrTrailer},
@@ -153,13 +175,20 @@ func TestParseRejectsStructure(t *testing.T) {
 			tr.Signer.Gen = 0
 			p.trailer, _ = tr.encode()
 		}).build(), ErrTrailer},
-		{"data after trailer", append(append([]byte(nil), signed...), 0), nil},
-		{"data after unsigned file", append(append([]byte(nil), small...), 1, 2, 3, 4), nil},
-		{"trailer length claims less than rest", func() []byte {
+		{"data after trailer", append(append([]byte(nil), signed...), 0), ErrElement},
+		{"block element after trailer", append(append([]byte(nil), signed...), ElemBlock), ErrElement},
+		{"data after unsigned file", append(append([]byte(nil), small...), 1, 2, 3, 4), ErrElement},
+		{"unknown element after unsigned file", append(append([]byte(nil), small...), 0), ErrElementType},
+		{"trailer length claims less than record", func() []byte {
 			d := append([]byte(nil), signed...)
-			binary.BigEndian.PutUint32(d[ps.trailerPos(signed):], uint32(len(ps.trailer)-1))
+			binary.BigEndian.PutUint32(d[ps.trailerPos(signed)+1:], uint32(len(ps.trailer)-1))
+			return d[:len(d)-1]
+		}(), ErrTrailer},
+		{"trailer length claims more than rest", func() []byte {
+			d := append([]byte(nil), signed...)
+			binary.BigEndian.PutUint32(d[ps.trailerPos(signed)+1:], uint32(len(ps.trailer)+1))
 			return d
-		}(), nil},
+		}(), ErrTruncated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,8 +206,9 @@ func TestParseRejectsStructure(t *testing.T) {
 	}
 }
 
+// trailerPos is the offset of the trailer element's type byte.
 func (p parts) trailerPos(data []byte) int {
-	return len(data) - 4 - len(p.trailer)
+	return len(data) - elemHeaderSize - len(p.trailer)
 }
 
 func TestParseTooManyBlocksAndTooLarge(t *testing.T) {
@@ -389,4 +419,20 @@ func TestSignatureNegatives(t *testing.T) {
 	if err := fu.VerifySignature(nil, nil); !errors.Is(err, ErrUnsigned) {
 		t.Fatal("unsigned file must report ErrUnsigned")
 	}
+}
+
+// fiveEntries encodes a recipient section with more entries than the
+// schema allows, bypassing the schema's count limit.
+func fiveEntries(t testing.TB, entries []RecipientEntry) []byte {
+	t.Helper()
+	var l []*rec.Record
+	for _, e := range entries {
+		l = append(l, rec.New(RecipientSchema).SetU8(1, uint8(e.Type)).SetBytes(2, e.ID[:]).SetU32(3, e.Gen).SetBytes(4, e.Enc).SetBytes(5, e.WrappedKey))
+	}
+	loose := rec.MustSchema(RecipientsSchema.Type, rec.Field{Num: 1, Name: "entries", Kind: rec.List, Elem: RecipientSchema, MaxCount: 64, Required: true})
+	b, err := rec.New(loose).SetList(1, l).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

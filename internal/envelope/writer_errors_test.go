@@ -45,8 +45,9 @@ func TestWriterOutputErrors(t *testing.T) {
 		t.Fatalf("Close must report the earlier error, got %v", err)
 	}
 	// Failure while writing the last block or trailer in Close: the
-	// complete file is 466 bytes, the last block ends 131 bytes before
-	// its end, so these two limits fail in the block and in the trailer.
+	// complete file is 468 bytes, the last block ends 132 bytes before
+	// its end (trailer element: type byte, length, 127-byte record), so
+	// these two limits fail in the block and in the trailer.
 	full, _ := Seal(testHeader(KindMail), []Recipient{testRecipient(t)}, []byte("short"), &SealOptions{Signer: testSigner()})
 	for _, n := range []int{len(full) - 140, len(full) - 5} {
 		w, err := NewWriter(&failingWriter{n: n, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, &SealOptions{Signer: testSigner()})

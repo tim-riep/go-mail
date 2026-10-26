@@ -345,7 +345,7 @@ func TestSealRejects(t *testing.T) {
 		{"too many recipients", testHeader(KindMail), many, nil, ErrRecipients},
 		{"duplicate recipient", testHeader(KindMail), []Recipient{r, r}, nil, ErrRecipients},
 		{"recipient type 0", testHeader(KindMail), []Recipient{{Type: 0, ID: r.ID, Gen: 1, PublicKey: r.PublicKey}}, nil, ErrRecipients},
-		{"recipient type 4", testHeader(KindMail), []Recipient{{Type: 4, ID: r.ID, Gen: 1, PublicKey: r.PublicKey}}, nil, ErrRecipients},
+		{"recipient type 5", testHeader(KindMail), []Recipient{{Type: 5, ID: r.ID, Gen: 1, PublicKey: r.PublicKey}}, nil, ErrRecipients},
 		{"recipient gen 0", testHeader(KindMail), []Recipient{{Type: r.Type, ID: r.ID, Gen: 0, PublicKey: r.PublicKey}}, nil, ErrRecipients},
 		{"nil public key", testHeader(KindMail), []Recipient{{Type: r.Type, ID: r.ID, Gen: 1}}, nil, ErrRecipients},
 		{"low-order public key", testHeader(KindMail), []Recipient{{Type: r.Type, ID: r.ID, Gen: 1, PublicKey: lowOrder}}, nil, ErrWrap},
@@ -443,12 +443,18 @@ func TestSuiteTransition(t *testing.T) {
 }
 
 func TestMultipleRecipients(t *testing.T) {
+	// All four recipient types at once: the maximum of four entries.
 	metaKey := x25519Key(t, "epoch meta")
 	userKey := x25519Key(t, "user unwrap")
+	recoveryKey := x25519Key(t, "recovery")
 	recs := []Recipient{
 		testRecipient(t),
 		{Type: RecipientEpochMeta, ID: epochID, Gen: 1, PublicKey: metaKey.PublicKey()},
 		{Type: RecipientUserUnwrap, ID: id16("user"), Gen: 3, PublicKey: userKey.PublicKey()},
+		{Type: RecipientRecovery, ID: id16("recovery"), Gen: 1, PublicKey: recoveryKey.PublicKey()},
+	}
+	if len(recs) != MaxRecipients {
+		t.Fatalf("test expects MaxRecipients == 4, have %d", MaxRecipients)
 	}
 	pt := pattern(100)
 	data, err := Seal(testHeader(KindWrap), recs, pt, &SealOptions{Rand: fixedRand(3), Signer: testSigner()})
@@ -459,6 +465,7 @@ func TestMultipleRecipients(t *testing.T) {
 		testRecipientKey(t),
 		{Type: RecipientEpochMeta, ID: epochID, Gen: 1, PrivateKey: metaKey},
 		{Type: RecipientUserUnwrap, ID: id16("user"), Gen: 3, PrivateKey: userKey},
+		{Type: RecipientRecovery, ID: id16("recovery"), Gen: 1, PrivateKey: recoveryKey},
 	} {
 		_, got, err := Open(data, OpenOptions{ExpectedSuite: Suite1, Key: k, ResolveSigner: resolveIngest})
 		if err != nil || !bytes.Equal(got, pt) {
@@ -509,8 +516,7 @@ func replaceTrailer(t testing.TB, data []byte, f *File, sig []byte) []byte {
 		t.Fatal(err)
 	}
 	out := append([]byte(nil), data[:f.trailerOffset]...)
-	out = binary.BigEndian.AppendUint32(out, uint32(len(tb)))
-	return append(out, tb...)
+	return append(out, element(ElemTrailer, tb)...)
 }
 
 func TestKindNames(t *testing.T) {

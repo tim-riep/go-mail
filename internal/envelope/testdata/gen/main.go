@@ -4,7 +4,10 @@
 //	go run ./testdata/gen
 //
 // Keys, header fields and the randomness for nonce prefix and file key
-// are fixed, so header and content blocks are reproducible. The HPKE
+// are fixed, so header and content blocks are reproducible. The files
+// use the element framing of specification 1.1 (type byte, length,
+// payload after the recipient section); the phase 0 files without type
+// bytes are kept under testdata/phase0 as rejection cases. The HPKE
 // encapsulation in the recipient section draws its ephemeral key from
 // crypto/rand inside crypto/hpke and cannot be injected; the recipient
 // section and the signature (which covers it) therefore differ between
@@ -157,21 +160,23 @@ func headerOf(data []byte) []byte {
 	return data[10 : 10+n]
 }
 
-// blocksOf walks the block section of a parsed file by the same rule the
-// parser uses (a length equal to the remaining bytes is the trailer).
+// blocksOf walks the element sequence after the recipient section by
+// its type bytes (ElemBlock* ElemLastBlock ElemTrailer?) and returns the
+// block payloads.
 func blocksOf(data []byte, f *envelope.File) [][]byte {
 	pos := 10 + int(binary.BigEndian.Uint32(data[6:10]))
 	pos += 4 + int(binary.BigEndian.Uint32(data[pos:]))
 	var blocks [][]byte
-	for {
-		n := int(binary.BigEndian.Uint32(data[pos:]))
-		rest := len(data) - pos - 4
-		if n == rest {
-			return blocks
+	for pos < len(data) {
+		typ := data[pos]
+		n := int(binary.BigEndian.Uint32(data[pos+1:]))
+		payload := data[pos+5 : pos+5+n]
+		if typ == envelope.ElemBlock || typ == envelope.ElemLastBlock {
+			blocks = append(blocks, payload)
 		}
-		blocks = append(blocks, data[pos+4:pos+4+n])
-		pos += 4 + n
+		pos += 5 + n
 	}
+	return blocks
 }
 
 func check(err error) {

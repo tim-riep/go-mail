@@ -3,6 +3,11 @@
 // section with the file key wrapped by HPKE for each recipient, the
 // content as a sequence of AES-256-GCM blocks in the STREAM construction,
 // and an optional trailer with an Ed25519 signature over the ciphertext.
+// After the recipient section every part of the file is an element
+// "type (1 byte) || length (uint32 big endian) || payload"; the type byte
+// says whether the element is a block (ElemBlock), the last block
+// (ElemLastBlock) or the trailer (ElemTrailer), so the structure can be
+// parsed without any key (3.1, version 1.1).
 //
 // Everything read from a file is untrusted. Parse checks every length
 // against the limits below before allocating, rejects any structural
@@ -37,7 +42,7 @@ const (
 	MaxHeaderSize     = 4 * 1024
 	MaxRecipientsSize = 16 * 1024
 	MaxTrailerSize    = 1024
-	MaxRecipients     = 32
+	MaxRecipients     = 4
 	MaxExtraSize      = 4096 // kind-specific signed fields
 
 	ChunkSize      = 65536
@@ -46,9 +51,17 @@ const (
 	TagSize        = 16
 	MaxBlockSize   = ChunkSize + TagSize // ciphertext of one block
 
+	// Element type bytes (3.1). After the recipient section the file is a
+	// sequence of elements matching ElemBlock* ElemLastBlock ElemTrailer?.
+	ElemBlock     = 0x01 // a full block, nonce flag 0x00
+	ElemLastBlock = 0x02 // the last block, nonce flag 0x01
+	ElemTrailer   = 0x03 // the signature trailer
+
+	elemHeaderSize = 1 + 4 // type byte and length
+
 	// MaxFileSize is the largest file Parse accepts.
 	MaxFileSize = PreambleSize + 4 + MaxHeaderSize + 4 + MaxRecipientsSize +
-		MaxBlocks*(4+MaxBlockSize) + 4 + MaxTrailerSize
+		MaxBlocks*(elemHeaderSize+MaxBlockSize) + elemHeaderSize + MaxTrailerSize
 
 	FileKeySize = 32
 
@@ -73,8 +86,9 @@ var (
 	ErrRecipients      = errors.New("envelope: invalid recipient section")
 	ErrRecipientsSize  = errors.New("envelope: recipient section length exceeds the limit")
 	ErrBlockSize       = errors.New("envelope: invalid block length")
-	ErrNoBlocks        = errors.New("envelope: file has no content block")
 	ErrEmptyBlock      = errors.New("envelope: empty block in non-empty content")
+	ErrElementType     = errors.New("envelope: unknown element type")
+	ErrElement         = errors.New("envelope: invalid element sequence")
 	ErrTrailer         = errors.New("envelope: invalid trailer")
 	ErrTrailerSize     = errors.New("envelope: trailer length exceeds the limit")
 	ErrNoRecipient     = errors.New("envelope: no recipient entry for this key")
@@ -147,9 +161,10 @@ const (
 	RecipientEpochContent RecipientType = 1
 	RecipientEpochMeta    RecipientType = 2
 	RecipientUserUnwrap   RecipientType = 3
+	RecipientRecovery     RecipientType = 4
 )
 
-func (t RecipientType) valid() bool { return t >= RecipientEpochContent && t <= RecipientUserUnwrap }
+func (t RecipientType) valid() bool { return t >= RecipientEpochContent && t <= RecipientRecovery }
 
 // SignerType says which kind of key signed the trailer.
 type SignerType uint8
@@ -344,11 +359,11 @@ func decodeTrailer(data []byte) (*Trailer, error) {
 }
 
 // SignedSchema is the canonical structure that is signed (3.4): the
-// SHA-256 over the file up to the trailer length (preamble, header,
-// recipient section and all blocks, including their length fields), the
-// signer, and optional kind-specific fields supplied by the caller as an
-// embedded canonical record. The signature domain is
-// "gomail/v1/sig/<kind>".
+// SHA-256 over every byte of the file before the trailer element
+// (preamble, header, recipient section and all block elements with their
+// type bytes and length fields), the signer, and optional kind-specific
+// fields supplied by the caller as an embedded canonical record. The
+// signature domain is "gomail/v1/sig/<kind>".
 var SignedSchema = rec.MustSchema("gomail/v1/rec/signed",
 	rec.Field{Num: 1, Name: "file_hash", Kind: rec.Bytes, Size: sha256.Size, Required: true},
 	rec.Field{Num: 2, Name: "signer_type", Kind: rec.U8, Required: true},

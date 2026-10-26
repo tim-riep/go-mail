@@ -61,7 +61,7 @@ type SealOptions struct {
 	// bytes), in that order. nil means crypto/rand. HPKE draws its
 	// ephemeral keys from crypto/rand regardless.
 	Rand io.Reader
-	// Signer adds a signed trailer. nil writes a trailer length of 0.
+	// Signer adds a signed trailer element. nil writes no trailer.
 	Signer *Signer
 }
 
@@ -281,7 +281,9 @@ func (w *Writer) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-// block encrypts and emits one block.
+// block encrypts and emits one block element. The element type and the
+// flag in the nonce always agree: ElemLastBlock carries flag 0x01, every
+// ElemBlock flag 0x00.
 func (w *Writer) block(pt []byte, last bool) error {
 	if w.count >= MaxBlocks {
 		w.err = fmt.Errorf("%w: more than %d blocks", ErrTooLarge, MaxBlocks)
@@ -289,13 +291,24 @@ func (w *Writer) block(pt []byte, last bool) error {
 	}
 	ct := w.aead.Seal(nil, blockNonce(w.prefix, w.count, last), pt, w.aad)
 	w.count++
-	var out []byte
-	out = binary.BigEndian.AppendUint32(out, uint32(len(ct)))
-	out = append(out, ct...)
-	return w.emit(out)
+	typ := byte(ElemBlock)
+	if last {
+		typ = ElemLastBlock
+	}
+	return w.emit(element(typ, ct))
 }
 
-// Close writes the last block (with the end flag) and the trailer.
+// element frames payload as "typ || uint32 length || payload".
+func element(typ byte, payload []byte) []byte {
+	out := make([]byte, 0, elemHeaderSize+len(payload))
+	out = append(out, typ)
+	out = binary.BigEndian.AppendUint32(out, uint32(len(payload)))
+	return append(out, payload...)
+}
+
+// Close writes the last block (with the end flag) and, if a signer is
+// set, the trailer element. The signed hash covers every byte written
+// before the trailer element.
 func (w *Writer) Close() error {
 	if w.closed {
 		return ErrClosed
@@ -310,7 +323,7 @@ func (w *Writer) Close() error {
 	wipe(w.buf)
 	w.buf = nil
 	if w.signer == nil {
-		return w.emit([]byte{0, 0, 0, 0})
+		return nil
 	}
 	var fileHash [sha256.Size]byte
 	w.hash.Sum(fileHash[:0])
@@ -330,8 +343,5 @@ func (w *Writer) Close() error {
 		w.err = err
 		return err
 	}
-	var out []byte
-	out = binary.BigEndian.AppendUint32(out, uint32(len(tb)))
-	out = append(out, tb...)
-	return w.emit(out)
+	return w.emit(element(ElemTrailer, tb))
 }

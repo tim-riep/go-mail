@@ -18,9 +18,9 @@ type File struct {
 	preamble       []byte   // raw[:6]
 	headerBytes    []byte   // the header record
 	recipientBytes []byte   // the recipient section record
-	blocks         [][]byte // ciphertext of every block, in order
+	blocks         [][]byte // ciphertext of every block, in order; the last one is the ElemLastBlock
 	recipientPos   int      // offset of the recipient section record in raw
-	trailerOffset  int      // offset of the trailer length field
+	trailerOffset  int      // offset of the trailer element, or len(raw) when unsigned
 	trailerBytes   []byte   // the trailer record, or nil
 }
 
@@ -28,6 +28,13 @@ type File struct {
 // needs no keys and verifies nothing cryptographic; see Decrypt and
 // VerifySignature. On any deviation from the format it returns an error
 // and no file.
+//
+// After the recipient section the file is a sequence of elements, each
+// "type || uint32 length || payload" (3.1). Exactly the sequence
+// ElemBlock* ElemLastBlock ElemTrailer? followed by the end of the file
+// is accepted. Every ElemBlock is a full block; the ElemLastBlock may be
+// shorter and is empty only when it is the only block (3.3, rules 3 to
+// 7).
 func Parse(data []byte) (*File, error) {
 	if len(data) > MaxFileSize {
 		return nil, fmt.Errorf("%w: %d bytes", ErrTooLarge, len(data))
@@ -86,53 +93,76 @@ func Parse(data []byte) (*File, error) {
 	}
 	pos += 4 + int(n)
 
-	// Blocks, then the trailer. A length field whose value equals the
-	// number of remaining bytes is the trailer length: a block is always
-	// followed by at least the four bytes of the trailer length, so it can
-	// never satisfy that condition. See DECISIONS.md on this rule.
-	for {
-		n, ok = readLen(raw, pos)
+	// Elements: ElemBlock* ElemLastBlock ElemTrailer? then end of file.
+	// The type byte decides what an element is; the length never does.
+	for pos < len(raw) {
+		if f.trailerBytes != nil {
+			return nil, fmt.Errorf("%w: data after the trailer", ErrElement)
+		}
+		typ := raw[pos]
+		switch typ {
+		case ElemBlock, ElemLastBlock:
+			if f.lastSeen() {
+				return nil, fmt.Errorf("%w: block after the last block", ErrElement)
+			}
+		case ElemTrailer:
+			if !f.lastSeen() {
+				return nil, fmt.Errorf("%w: trailer before the last block", ErrElement)
+			}
+		default:
+			return nil, fmt.Errorf("%w: 0x%02x", ErrElementType, typ)
+		}
+		n, ok = readLen(raw, pos+1)
 		if !ok {
-			return nil, fmt.Errorf("%w: block or trailer length", ErrTruncated)
+			return nil, fmt.Errorf("%w: element length", ErrTruncated)
 		}
-		rest := uint64(len(raw) - pos - 4)
-		if uint64(n) == rest {
-			break
+		rest := uint64(len(raw) - pos - elemHeaderSize)
+		if typ == ElemTrailer {
+			if n > MaxTrailerSize {
+				return nil, fmt.Errorf("%w: %d", ErrTrailerSize, n)
+			}
+			if uint64(n) > rest {
+				return nil, fmt.Errorf("%w: trailer", ErrTruncated)
+			}
+			f.trailerBytes = raw[pos+elemHeaderSize : pos+elemHeaderSize+int(n)]
+			f.Trailer, err = decodeTrailer(f.trailerBytes)
+			if err != nil {
+				return nil, err
+			}
+			pos += elemHeaderSize + int(n)
+			continue
 		}
-		if uint64(n) > rest {
-			return nil, fmt.Errorf("%w: block %d", ErrTruncated, len(f.blocks))
-		}
-		if n < TagSize || n > MaxBlockSize {
+		// A block element (3.3, rules 3 to 6).
+		if n > MaxBlockSize || n < TagSize {
 			return nil, fmt.Errorf("%w: block %d has %d bytes", ErrBlockSize, len(f.blocks), n)
+		}
+		if typ == ElemBlock && n != MaxBlockSize {
+			return nil, fmt.Errorf("%w: block %d is not full but not last", ErrBlockSize, len(f.blocks))
+		}
+		if typ == ElemLastBlock && n == TagSize && len(f.blocks) > 0 {
+			return nil, ErrEmptyBlock
 		}
 		if len(f.blocks) >= MaxBlocks {
 			return nil, fmt.Errorf("%w: more than %d blocks", ErrTooLarge, MaxBlocks)
 		}
-		if k := len(f.blocks); k > 0 && len(f.blocks[k-1]) != MaxBlockSize {
-			return nil, fmt.Errorf("%w: block %d is short but not last", ErrBlockSize, k-1)
+		if uint64(n) > rest {
+			return nil, fmt.Errorf("%w: block %d", ErrTruncated, len(f.blocks))
 		}
-		f.blocks = append(f.blocks, raw[pos+4:pos+4+int(n)])
-		pos += 4 + int(n)
-	}
-	if len(f.blocks) == 0 {
-		return nil, ErrNoBlocks
-	}
-	if k := len(f.blocks); k > 1 && len(f.blocks[k-1]) == TagSize {
-		return nil, ErrEmptyBlock
-	}
-	f.trailerOffset = pos
-	if n > MaxTrailerSize {
-		return nil, fmt.Errorf("%w: %d", ErrTrailerSize, n)
-	}
-	if n > 0 {
-		f.trailerBytes = raw[pos+4 : pos+4+int(n)]
-		f.Trailer, err = decodeTrailer(f.trailerBytes)
-		if err != nil {
-			return nil, err
+		f.blocks = append(f.blocks, raw[pos+elemHeaderSize:pos+elemHeaderSize+int(n)])
+		pos += elemHeaderSize + int(n)
+		if typ == ElemLastBlock {
+			f.trailerOffset = pos
 		}
+	}
+	if !f.lastSeen() {
+		return nil, fmt.Errorf("%w: last block is missing", ErrTruncated)
 	}
 	return f, nil
 }
+
+// lastSeen reports whether the ElemLastBlock has been parsed. It is set
+// by recording where the trailer would start.
+func (f *File) lastSeen() bool { return f.trailerOffset != 0 }
 
 // readLen reads the uint32 length field at pos. The value stays unsigned
 // until it has been checked against the limits: converting it to int
@@ -145,8 +175,9 @@ func readLen(raw []byte, pos int) (uint32, bool) {
 	return binary.BigEndian.Uint32(raw[pos:]), true
 }
 
-// FileHash returns the SHA-256 over the file up to the trailer length
-// field: the value signed in the trailer.
+// FileHash returns the SHA-256 over every byte of the file before the
+// trailer element: the value signed in the trailer (3.4). For an
+// unsigned file it covers the whole file.
 func (f *File) FileHash() [sha256.Size]byte {
 	return sha256.Sum256(f.raw[:f.trailerOffset])
 }
@@ -169,19 +200,21 @@ func (f *File) Bytes() []byte {
 	out = append(out, hdr...)
 	out = binary.BigEndian.AppendUint32(out, uint32(len(recs)))
 	out = append(out, recs...)
-	for _, b := range f.blocks {
-		out = binary.BigEndian.AppendUint32(out, uint32(len(b)))
-		out = append(out, b...)
+	for i, b := range f.blocks {
+		typ := byte(ElemBlock)
+		if i == len(f.blocks)-1 {
+			typ = ElemLastBlock
+		}
+		out = append(out, element(typ, b)...)
 	}
 	if f.Trailer == nil {
-		return append(out, 0, 0, 0, 0)
+		return out
 	}
 	tb, err := f.Trailer.encode()
 	if err != nil {
 		return nil
 	}
-	out = binary.BigEndian.AppendUint32(out, uint32(len(tb)))
-	return append(out, tb...)
+	return append(out, element(ElemTrailer, tb)...)
 }
 
 // recipientRanges returns the byte ranges [start, end) of the value bytes
