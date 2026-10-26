@@ -52,9 +52,9 @@ func main() {
 			SetU32(1, 1).SetBytes(2, fill(32, 0x10)).SetBytes(3, fill(32, 0x30)).SetI64(4, 1761400000001).SetBytes(6, fill(64, 0x50))},
 		{"generation certificate, generation 2 (revokes 1)", rec.New(keys.GenerationCertSchema).
 			SetU32(1, 2).SetBytes(2, fill(32, 0x11)).SetBytes(3, fill(32, 0x31)).SetI64(4, 1761400000002).SetU32(5, 1).SetBytes(6, fill(64, 0x51))},
-		{"platform certificate (ingest, generation 1, signed by identity generation 1)", rec.New(keys.PlatformCertSchema).
-			SetU8(1, 2).SetU32(2, 1).SetBytes(3, fill(32, 0x60)).SetI64(4, 1761400000000).SetU32(5, 1).SetBytes(6, fill(64, 0x70))},
-		{"identity succession to generation 2", rec.New(keys.IdentitySuccessionSchema).
+		{"platform certificate (ingest, generation 1, issued by identity generation 1, valid from 1761400000000)", rec.New(keys.PlatformCertSchema).
+			SetU8(1, 2).SetU32(2, 1).SetBytes(3, fill(32, 0x60)).SetU32(4, 1).SetI64(5, 1761400000000).SetBytes(6, fill(64, 0x70))},
+		{"platform succession to generation 2", rec.New(keys.PlatformSuccessionSchema).
 			SetU32(1, 2).SetBytes(2, fill(32, 0x80)).SetI64(3, 1761400000000).SetBytes(4, fill(64, 0x90))},
 		{"key store header (Argon2id 64 MiB, 3 passes, 4 threads)", rec.New(keys.KeystoreHeaderSchema).
 			SetU8(1, 1).SetU8(2, 1).SetU32(3, 65536).SetU32(4, 3).SetU8(5, 4).SetBytes(6, fill(16, 0xa0)).SetBytes(7, fill(12, 0xb0))},

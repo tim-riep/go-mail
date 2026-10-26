@@ -16,7 +16,7 @@ import (
 var phase0Schemas = []*rec.Schema{
 	keys.GenerationCertSchema,
 	keys.PlatformCertSchema,
-	keys.IdentitySuccessionSchema,
+	keys.PlatformSuccessionSchema,
 	keys.KeystoreHeaderSchema,
 	keys.KeystoreContentSchema,
 	envelope.HeaderSchema,
