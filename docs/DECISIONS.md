@@ -393,3 +393,13 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 ### D65 Haltepunkte in `docs/QUESTIONS.md`
 - Stelle: K7; Orchestrierungsauftrag Abschnitt 4.
 - Entscheidung: Jede Frage, die nach K7 anzuhalten ist, steht mit Vorschlag in `docs/QUESTIONS.md` (Q1 Wiederherstellungsempfänger, Q2 Einladungen, Q3 `--server-search`, Q4 Schlüssel und Zeit des Baumkopfs, Q6 Vertretung als Mitgliedsart). Pakete, die eine solche Stelle berühren, bauen die strengste Lesart und markieren sie mit `TODO(Qn)`; kein Befehl, der davon abhängt, wird vor der Antwort ausgeliefert.
+
+### D66 Kopffeld 8 `version`
+- Stelle: 3.1 (Version 1.4), 7, 16 Zeile K6; SPEC-ISSUES S22.
+- Entscheidung: `envelope.Header.Version` (uint32), im Schema optional. Regel beim Kodieren und Dekodieren: `meta` verlangt Feld 8 mit Wert ≥ 1, alle anderen Arten verbieten Feld 8 auch mit Wert 0; der Schreiber lehnt einen Kopf anderer Art mit Version ab, statt sie wegzulassen. Fehler: `ErrHeader` zusammen mit `ErrHeaderVersion` (`ErrVersion` bleibt die Formatversion der Präambel). `SignedSchema` ist unverändert; mit Feld 8 stammen alle Werte von `meta-signed` aus dem Kopf oder aus Hashes über Chiffrat, sodass die Ingest-Signatur ohne Schlüssel prüfbar ist (Abschnitt 7). `envelope` prüft `created` nicht (D31); der Client vergleicht nach dem Entschlüsseln Version und Empfangszeit des Inhalts mit dem Kopf (`client.checkMeta`, `ErrMismatch`). Vektoren: die fünf signierten `meta`-Dateien neu (Kopf +9 Byte), die fünf unsignierten byte-identisch, die alten signierten unter `testdata/v12/` als Ablehnungsfälle. Der Generator behält Dateien, deren deterministische Teile unverändert sind, weil HPKE nicht reproduzierbar ist (D44).
+- Begründung: Wörtliche Umsetzung von 3.1; die strengste Lesart beim Schreiber verhindert, dass ein Aufrufer unbemerkt eine Version verliert.
+
+### D67 Fehler von `envelope` und SMTP-Größe
+- Stelle: `envelope` Paketkommentar („jeder Fehler umhüllt einen exportierten Fehler“); 5.1 (25 MiB seit Version 1.3).
+- Entscheidung: `ErrArgument` (Aufruffehler wie ein `nil`-Writer), `ErrInternal` (mit 32-Byte-Schlüssel unerreichbare Fehler der Schlüsselableitung, nie `ErrDecrypt`), `ErrWrite` (umhüllt zusätzlich den Fehler des `io.Writer`). `smtpd.DefaultMaxSize` ist 26.214.400 Byte (D54 insoweit geändert; Header 1.000.000 Byte und 1.000 Byte/s bleiben dezimal).
+- Begründung: Fund der Verifikation von Auftrag 01; `errors.Is` muss für jeden Fehler des Pakets funktionieren.
