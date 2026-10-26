@@ -1,6 +1,6 @@
 # go-mail: Proof of Concept
 
-Version 1.3, Stand: 26.10.2026 (Änderungen in den Abschnitten 13 bis 15)
+Version 1.4, Stand: 26.10.2026 (Änderungen in den Abschnitten 13 bis 16)
 
 go-mail ist der erste Baustein der Go-Business-Cloud. Der PoC nimmt Mails per SMTP an und legt sie als einzelne, immer verschlüsselte Dateien in einem Dateisystem ab. Der Server kann Mails empfangen, ablegen und für die Suche vorbereiten, hält aber zu keinem Zeitpunkt einen Schlüssel, mit dem er gespeicherte Daten lesen könnte.
 
@@ -189,13 +189,33 @@ Jedes Postfach besteht aus einer Folge von **Epochen**. Eine Epoche hat drei Sch
 
 Zufällig statt abgeleitet, damit gelöschte Epochen wirklich unlesbar werden.
 
-**Epochenwechsel:**
+**Epochenwechsel und Gründe.** Jede `epoch.rec` trägt genau einen Grund:
 
-- regulär monatlich
-- sofort beim Entfernen eines Mitglieds
-- auf Wunsch zu Beginn und Ende einer Vertretung
+| Grund | Anlass | Wirkung |
+|---|---|---|
+| `regular` | monatlicher Vorrat | geplant, mit Vorlauf |
+| `member-added` | Aufnahme eines Mitglieds oder Beginn einer Vertretung | geplant oder sofort |
+| `member-removed` | Entzug eines Mitglieds | sofort |
+| `delegation-ended` | Ende einer Vertretung | sofort |
+| `recovery-changed` | Wiederherstellungsempfänger eingetragen, gewechselt oder entfernt | sofort |
+| `generation-revoked` | ein Mitglied hat eine Generation widerrufen (`device lost`) | sofort |
 
-Epochen werden fortlaufend nummeriert. `epoch.rec` hält Nummer, Beginn, Grund, die erlaubte Algorithmen-Suite, die öffentlichen Schlüssel, die Liste der Mitglieder mit ihrer Generation und den SHA-256 der vorherigen `epoch.rec`. Das Mitglied, das die Epoche erzeugt, signiert sie mit seiner Identität.
+Epochen werden fortlaufend nummeriert. `epoch.rec` hält Nummer, Beginn, Grund, die erlaubte Algorithmen-Suite, die öffentlichen Schlüssel, die Liste der Mitglieder mit ihrer Generation, die Liste `discards` und den SHA-256 der vorherigen `epoch.rec`. Das Mitglied, das die Epoche erzeugt, signiert sie mit seiner Identität.
+
+**Verwerfen des Vorrats.** Eine Epoche mit sofortiger Wirkung verwirft alle Epochen des Vorrats, deren Beginn nach ihrem eigenen liegt. Sie führt deren Nummern in ihrem signierten Feld `discards`. Es gibt keinen eigenen Vermerk und keine eigene Datei dafür. Regeln:
+
+1. `discards` enthält **genau** alle Epochen der Kette mit späterem Beginn als die neue Epoche, keine mehr und keine weniger. Der Client prüft die Vollständigkeit. Fehlt eine, wird die neue Epoche abgelehnt.
+2. Bei Epochen mit geplanter Wirkung ist `discards` leer.
+3. Verworfene Epochen verwenden Server und Client nie. Eine Mail für eine verworfene Epoche wird abgelehnt.
+4. Die Kette bleibt über die Hashes durchgehend. Beim Vergleich der Beginnzeiten entlang der Kette (Beginn sinkt nie) werden verworfene Epochen übersprungen.
+5. Danach legt der Client den Vorrat ohne das entfernte Mitglied neu an.
+
+**Vorlauf und Uhren.** Für eine neuere Epoche zu früh zu verschlüsseln schadet nie, für eine ältere zu spät zu verschlüsseln ist ein Leck. Daraus folgen:
+
+1. Epochen mit geplanter Wirkung beginnen frühestens fünf Minuten nach dem Anlegen. So hat der Server sie sicher gesehen, bevor sie gilt.
+2. Epochen mit sofortiger Wirkung beginnen ohne Vorlauf. Der Server verwendet eine solche Epoche, sobald er sie unter der Postfachsperre sieht, auch wenn ihr Beginn nach seiner Uhr noch bis zu fünf Minuten in der Zukunft liegt.
+3. Der Client nimmt Mails für eine Epoche mit sofortiger Wirkung an, deren Empfangszeit bis zu fünf Minuten vor ihrem Beginn liegt. Für die Vorgängerin lehnt er jede Mail ab, deren Empfangszeit nach diesem Beginn liegt.
+4. Server und Clients müssen ihre Uhr per NTP abgleichen. Weicht die Uhr des Servers um mehr als fünf Minuten ab, können Mails abgelehnt werden. Das ist ein Verlust, kein Leck, und fällt beim Lesen auf.
 
 **Schutz gegen Zurückspielen.** Die Epochen bilden so eine signierte Kette. Der Client merkt sich lokal die höchste Epoche, die er je gesehen hat, und prüft bei jedem Start die Kette ab dort. Erkannt werden damit:
 
@@ -332,7 +352,8 @@ Zulässige Reihenfolge: beliebig viele `0x01`, genau ein `0x02`, danach höchste
 | 4 | `file_id` | 16 Byte, gleich der ID im Dateinamen |
 | 5 | `nonce_prefix` | 7 Byte, zufällig |
 | 6 | `chunk_size` | uint32, im PoC fest 65536 |
-| 7 | `created` | int64, Millisekunden seit 1970 UTC |
+| 7 | `created` | int64, Millisekunden seit 1970 UTC. Bei Art `meta` immer die Empfangszeit der Mail, unverändert über alle Versionen |
+| 8 | `version` | uint32. Bei Art `meta` Pflicht und mindestens 1, bei allen anderen Arten verboten |
 
 `file_id` bindet den Inhalt an genau eine Datei. Vertauscht jemand zwei Mails desselben Postfachs, schlägt die Entschlüsselung fehl.
 
@@ -498,7 +519,7 @@ data/
       checkpoints/
         <user-id>-<device-id>.rec   zuletzt gesehener Baumkopf, signiert vom Client
       index/
-        <n>/postings.gml         Suchmarken und Mail-IDs
+        <n>/<device-id>-<lfd>.gml  Indexsegmente: Suchmarken und Mail-IDs, unveränderlich, vom Client signiert
         <n>/fulltext.gml         Volltextindex des Clients, für meta der Epoche
   spool/                         laufende Annahmen, bereits für das Postfach verschlüsselt
   work/                          ausgelagerte Vorverarbeitung, flüchtiger Schlüssel
@@ -594,12 +615,12 @@ Beim Login verarbeitet der Client für jedes seiner Postfächer `pending/`:
 
 1. Begriffslisten entschlüsseln und Signatur prüfen
 2. Für Einträge `unprocessed`: Metadaten der Mail laden und Begriffe selbst erzeugen
-3. Marken berechnen und in `index/<n>/postings.gml` einfügen
+3. Marken berechnen und als neues, unveränderliches Segment `index/<n>/<device-id>-<laufnummer>.gml` atomar schreiben, verschlüsselt für den `meta`-Schlüssel und signiert mit der Dateiart `index`
 4. Verarbeitete Dateien in `pending/` löschen
 
 **Wenn sich kein Client anmeldet,** wächst `pending/` weiter, etwa um einige hundert Byte pro Mail. Das ist für Monate unkritisch. Der Server überwacht pro Postfach Alter und Größe von `pending/` und meldet Postfächer, in denen seit 30 Tagen kein Mitglied aktiv war. Löschen darf er dort nichts, weil er nicht weiß, was die Dateien enthalten.
 
-`postings.gml` ist eine Zuordnung `marke → [mail-id]`. Die Datei ist zusätzlich für den `meta`-Schlüssel verschlüsselt, damit die Struktur nicht offen auf der Platte liegt. Im PoC liest der Client sie direkt, in einer späteren Ausbaustufe wird sie durch eine Server-API ersetzt, die nur Marken entgegennimmt.
+Ein Segment ist eine Zuordnung `marke → [mail-id]`. Es ist für den `meta`-Schlüssel verschlüsselt, damit die Struktur nicht offen auf der Platte liegt. Mehrere Clients schreiben unabhängig voneinander eigene Segmente, nie dieselbe Datei. Beim Lesen werden die Treffer aller Segmente einer Epoche pro Marke zusammengeführt und doppelte Mail-IDs entfernt. Ab 16 Segmenten pro Epoche fasst der nächste Client sie unter der Postfachsperre zu einem zusammen und löscht die alten. Im PoC liest der Client die Segmente direkt, in einer späteren Ausbaustufe tritt eine Server-API an ihre Stelle, die nur Marken entgegennimmt.
 
 ### 6.3 Suchen
 
@@ -632,7 +653,9 @@ Volltext über Betreff und Inhalt läuft ausschließlich im Client. Der Index wi
 
 ### Was die Ingest-Signatur aussagt
 
-Signiert wird eine kanonische Struktur aus Postfach-ID, Epoche, Mail-ID, Empfangszeit, Generation des Ingest-Schlüssels, SHA-256 der verschlüsselten Mail-Datei und SHA-256 der verschlüsselten Metadaten. Hashes von Klartext werden bewusst nicht aufgenommen, weil sie offen im Trailer stünden und der Server damit vermutete Inhalte bestätigen könnte. Eine gültige Signatur belegt damit:
+Signiert wird der Datensatz `meta-signed`. Alle seine Werte stammen aus dem Klartextkopf der Metadatendatei oder sind Hashes über Chiffrat: Postfach-ID, Epoche, `file_id`, `created` als Empfangszeit, `version`, Generation des Unterzeichners, SHA-256 der verschlüsselten Metadatendatei vor dem Trailer und SHA-256 der vollständigen Mail-Datei. Damit kann auch der Server jede Metadaten-Signatur ohne Schlüssel prüfen. Hashes von Klartext werden bewusst nicht aufgenommen, weil sie offen im Trailer stünden und der Server damit vermutete Inhalte bestätigen könnte. Nach dem Entschlüsseln prüft der Client zusätzlich, dass Version und Empfangszeit im Inhalt mit denen im Kopf übereinstimmen.
+
+Dieselbe Struktur gilt für Benutzersignaturen nach einer Flag-Änderung. Die Empfangszeit bleibt dabei unverändert, der Zeitpunkt der Änderung steht bei Bedarf nur im verschlüsselten Inhalt. Eine gültige Signatur belegt damit:
 
 - dass ein Inhaber des zertifizierten Ingest-Schlüssels genau diese Mail zu diesem Zeitpunkt für dieses Postfach angenommen hat
 - dass Mail und Metadaten seitdem nicht verändert oder vertauscht wurden
@@ -895,3 +918,14 @@ Grundlage sind die offenen Punkte aus Phase 0 (`docs/SPEC-ISSUES.md`) und die En
 | MiB in 5.1 | Größengrenze für SMTP in MiB | 5.1 | keine, falls bereits so umgesetzt |
 | Kurznamen | `user`, `invite`, `wrap-accept` ergänzt | 3.7 | `keys`: drei Kurznamen ergänzen |
 | Netzbetrieb | NFSv4, `fcntl`-Sperren, Gruppe `gomail`, Prüfung beim Start | 9.1 | `store`: Sperren und Rechte anpassen |
+
+## 16. Änderungen in Version 1.4
+
+Grundlage sind die Vorlagen aus Schritt 0 von Phase 2 und `docs/PHASE2-KLAERUNGEN.md`.
+
+| Punkt | Änderung | Abschnitt | Auswirkung auf den Code |
+|---|---|---|---|
+| K6, S22 | Kopf erhält Feld 8 `version`, Pflicht bei `meta`, sonst verboten. `created` bei `meta` ist immer die Empfangszeit. `meta-signed` besteht nur aus Kopffeldern und Hashes | 3.1, 7 | `envelope`: Kopf und Decoder, die fünf signierten `meta`-Vektoren neu. Die unsignierten Vektoren bleiben byte-identisch |
+| K8, D50 | Vorlauf nur bei geplanten Epochen. Sofortige Epochen ohne Vorlauf, Server nutzt sie bis fünf Minuten vor Beginn, Client nimmt sie bis fünf Minuten vor Beginn an. NTP ist Pflicht | 2.4 | `ingest`, `client`: Epochenwahl und Prüfregel |
+| K1, D49 | Verwerfen des Vorrats über das signierte Feld `discards` der sofortigen Epoche, mit Vollständigkeitsprüfung. Kettenregel überspringt verworfene Epochen. Gründe als feste Liste | 2.4 | `store`, `client`: `epoch.rec` erweitern, Kettenprüfung anpassen |
+| K5 | Index als unveränderliche Segmente pro Gerät, Dateiart `index` ohne neue Domäne | 4, 6.2 | `search` |
