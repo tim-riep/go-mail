@@ -1,0 +1,13 @@
+# Auftrag 01b: Nacharbeit zu Auftrag 01 (Funde der Verifikation)
+
+Nacharbeit auf dem Branch `worktree-agent-afbc2552f6faa2d61` im Worktree `/home/user/go-mail/.claude/worktrees/agent-afbc2552f6faa2d61`. Feste Vorgaben: `docs/tasks/00-vorgaben.md` (im Hauptverzeichnis `/home/user/go-mail/docs/tasks/`). Lies zusätzlich `docs/PLAN.md` Abschnitt 3.3, 3.4, 7 und `docs/tasks/01-envelope-version.md`.
+
+## Funde und geforderte Änderungen
+
+1. **(mittel) Client vergleicht die Version im Inhalt nicht mit dem Kopf.** Abschnitt 7: „Nach dem Entschlüsseln prüft der Client zusätzlich, dass Version und Empfangszeit im Inhalt mit denen im Kopf übereinstimmen.“ `internal/client/read.go`, Prüfung bei `m.MailID != id || m.Folder != folder || m.Received != h.Created`: ergänze `|| m.Version != h.Version` (Fehler `ErrMismatch` wie bei den anderen Abweichungen, Warnung ohne Inhalt). Negativtest in `internal/client/tamper_test.go`: Metadaten mit `Header.Version = 2`, Inhalt `Version = 1`, `extra` aus dem Inhalt, gültig mit dem Ingest-Schlüssel signiert → `List` zeigt die Mail nicht und warnt, `Read` liefert `ErrMismatch`. Ändere in `client` nur diese Zeile und den Test.
+2. **(niedrig) Test für „höchstens 800 Blöcke“ erzwingt die Regel nicht** (`internal/envelope/parse_test.go`, `TestParseTooManyBlocksAndTooLarge`: 801 volle Blöcke überschreiten schon `MaxFileSize`). Ergänze einen Fall mit 800 vollen `0x01`-Blöcken und einem kurzen `0x02`-Block (unter `MaxFileSize`), der mit `ErrTooLarge` an der Blockzahl scheitert; der bestehende Fall bleibt.
+3. **(niedrig) Bindung von `signer_type`, `signer_id`, `signer_gen` in die signierte Struktur ist nur über die Vektoren gepinnt.** Test in `internal/envelope`: Resolver liefert denselben öffentlichen Schlüssel für zwei Generationen (und für beide Signierer-Typen und zwei IDs); ein Trailer, dessen `signer_gen` (bzw. Typ, ID) nach dem Signieren umetikettiert wurde, muss mit `ErrSignature` scheitern, nicht mit `ErrSigner`.
+4. **(niedrig) Paketkommentar „Every error of this package wraps one of them“ gilt nicht für `nil writer` und `contentAEAD`.** Umhülle beide mit einem passenden exportierten Fehler (`ErrWrap` bzw. `ErrDecrypt`/neuer `ErrInternal`? wähle den kleinsten Eingriff; `nil writer` kann `ErrHeader`? nein: nimm einen neuen `ErrArgument`), sodass der Kommentar stimmt.
+
+## Fertig-Kriterien
+`gofmt -l .` leer, `go vet ./...`, `go test -race ./...`, `GOARCH=386 go test ./...` auf dem ganzen Modul; Abdeckung `envelope` ≥ 90 %, `client` ≥ 85 %; keine Vektoren geändert (`git diff --stat` für alle `testdata` gegenüber dem letzten Commit leer). Ein Commit `envelope, client: rework after verification (task 01b)` auf demselben Branch. Bericht: Commit-ID, je Fund was geändert wurde, Abdeckung.
