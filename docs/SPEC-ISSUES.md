@@ -6,7 +6,7 @@ Keiner der Punkte ist ein Sicherheitsproblem, das den Bau hätte anhalten müsse
 
 Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01, S02, S04, S06 (Lesepfad ab Phase 1), S07, S08, S09 und S12, jeweils unten mit Commit oder Verweis markiert.
 
-Stand Phase 1, Schritt 0 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt. Offen sind S11 und S13 (Vorschläge unten, Entscheidung durch den Auftraggeber) und die Punkte ab S15.
+Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (Schritt 0, Commit d8d7afa). S11 und S13 tragen unten einen Vorschlag und warten auf die Entscheidung des Auftraggebers; bis dahin ist jeweils die strengste Lesart umgesetzt (DECISIONS D60). Neu aus Phase 1 sind S15 bis S23.
 
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
@@ -83,6 +83,13 @@ Stand Phase 1, Schritt 0 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind
 - Problem: Nicht festgelegt, ob Eingaben mit Großbuchstaben, zusätzlichem Leerraum oder Unicode-Varianten angenommen werden. BIP-39 empfiehlt NFKD-Normalisierung der Eingabe.
 - Phase 0: `keys.SeedFromWords` verlangt die Wörter exakt wie in der Liste (DECISIONS D14).
 - Vorschlag: In 2.2 die Eingabenormalisierung der Kommandozeile festlegen (Trimmen, Kleinschreibung, Trennung an Leerraum).
+- Phase 1: Offen, zur Entscheidung vorgelegt. `gomailctl keygen` vergleicht die drei abgefragten Wörter exakt, entfernt wird nur das Zeilenende (`TODO(S11)`, DECISIONS D60). Betroffen sind in Phase 1 nur diese Abfrage, später die Eingabe des Seeds (neues Gerät, Wiederherstellung, `device lost`) und der Shamir-Anteile.
+- Vorschlag Phase 1: Eine Regel für jede Eingabe von Wörtern (Seed und Shamir-Anteile), nur in der Kommandozeile, `keys` und `shamir` bleiben strikt:
+  1. Die Eingabe wird nach Unicode NFKD normalisiert (wie BIP-39 es für Eingaben empfiehlt), dann werden Groß- in Kleinbuchstaben umgewandelt.
+  2. Getrennt wird an jedem Leerraum (Leerzeichen, Tabulator, Zeilenumbruch, auch mehrfach); führender und folgender Leerraum fällt weg. Bei der Abfrage einzelner Wörter muss genau ein Wort übrig bleiben.
+  3. Jedes Wort muss danach exakt in der Liste stehen. Abkürzungen auf die ersten vier Buchstaben (in BIP-39 eindeutig) werden **nicht** angenommen: eine Abkürzung wäre ein zweiter Weg zum selben Seed und eine weitere Fehlerquelle, und die Wörter werden ohnehin selten getippt.
+  4. Ein unbekanntes Wort wird mit seiner Position gemeldet, ohne es auszugeben; die Prüfsumme deckt vertauschte oder falsche, aber gültige Wörter.
+  Damit akzeptiert `keygen` etwa " Abandon " für "abandon", aber nie ein anderes Wort. Kein Format ändert sich.
 
 ## S12 Suite 2 ändert die Größen im Empfängerteil
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 senkt die Höchstzahl der Empfänger auf 4; vier Einträge der Suite 2 (je etwa 1,2 KiB) passen in die 16 KiB. Die Feldgrößen je Suite sind erst beim Einführen von Suite 2 festzulegen.
@@ -96,11 +103,72 @@ Stand Phase 1, Schritt 0 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind
 - Problem: Ob eine Signatur einer widerrufenen Generation "nachweislich vor dem Widerruf im Log stand", lässt sich erst mit dem Transparenzlog (Phase 6) prüfen. Phase 0 kann nur die Kette der Generationszertifikate prüfen.
 - Phase 0: `VerifyGenerationChain` prüft Lückenlosigkeit und Signaturen; die zeitliche Einordnung bleibt offen.
 - Vorschlag: Kein Änderungsbedarf an der Spezifikation; Hinweis für Phase 2 und 6 (siehe HANDOFF).
+- Phase 1: Offen, zur Entscheidung vorgelegt. Bei der Umsetzung zeigt sich eine Lücke in 2.2 Punkt 4: "nur akzeptiert, wenn sie nachweislich vor dem Widerruf im Log standen" lässt sich nur für Datensätze prüfen, die ins Log kommen (`user.rec`, `epoch.rec`, Zertifikate, Nachfolgen, Adresszuordnungen, Vermerke). Verpackungen (`members/<user>.wrap`), Metadaten nach einer Flag-Änderung, `folders.gml` und der Name in `mailbox.rec` sind ebenfalls mit der Identität eines Benutzers signiert, kommen aber nie ins Log. Wörtlich genommen wären sie nach einem Widerruf für immer ungültig, auch die, die ein Mitglied vor dem Verlust seines Geräts für andere Mitglieder erstellt hat. Umgesetzt ist vorläufig genau das, also die strengste Lesart (`TODO(S13)`, DECISIONS D60); in Phase 1 gibt es nur Generation 1, die Regel greift also noch nicht.
+- Vorschlag Phase 1:
+  1. **Datensätze im Log:** Eine Signatur einer widerrufenen Generation gilt genau dann, wenn der signierte Datensatz im Log vor dem Eintrag steht, der die Generation widerruft (Vergleich der Log-Indizes, Inklusionsbeweis für beide). Umgesetzt über `translog.CheckRevokedSignature`, das heute schon aufgerufen wird.
+  2. **Dateien außerhalb des Logs:** Signaturen einer widerrufenen Generation gelten nie. Stattdessen erneuert der Client bei `gomailctl device lost` mit der neuen Generation alles, was die alte signiert hat: neue Verpackungen für alle Mitglieder, die er verpackt hat (nicht nur für sich selbst, das verlangt 2.2 Punkt 5 schon), neue Versionen geänderter Metadaten, neue `folders.gml` und einen neu versiegelten Namen. Bis das geschehen ist, kann ein anderes Mitglied dieselben Dateien mit seiner Identität neu ausstellen.
+  3. Damit ein kompromittiertes Gerät in der Zeit bis zum Widerruf nichts Dauerhaftes anrichten kann, nehmen Clients beim Abgleich nur Verpackungen an, deren Mitglied in der signierten `epoch.rec` steht (umgesetzt), und verlangen nach einem Widerruf die neue Verpackung, bevor sie weitere Mails dieser Epoche anzeigen.
+  4. In 2.2 Punkt 4 und in Abschnitt 7 sollte diese Trennung ausdrücklich stehen.
+  Kein Format ändert sich; Phase 2 baut damit `device lost`, Phase 3 die Log-Prüfung.
 
 ## S14 Signaturdomäne der Plattformdatensätze verdoppelt das Präfix
-- Erledigt in Phase 1, Schritt 0: Version 1.2 legt in 3.7 Kurznamen für alle Signaturen fest; `keys` ist umgestellt, Vektoren neu erzeugt (DECISIONS D47).
+- Erledigt in Phase 1, Schritt 0 (Commit d8d7afa): Version 1.2 legt in 3.7 Kurznamen für alle Signaturen fest; `keys` ist umgestellt, Vektoren neu erzeugt (DECISIONS D47).
 - Stelle: 2.3 (Version 1.1), "mit dem Präfix `"gomail/v1/sig/" || Datensatztyp || 0x00`".
 - Problem: Der Datensatztyp ist laut Tabelle der volle Typ-String, die signierte Nachricht beginnt also mit `gomail/v1/sig/gomail/v1/rec/platform-cert`. Das ist eindeutig, aber vermutlich nicht beabsichtigt; für das Generationszertifikat in 2.2 ist keine Domäne genannt (Phase 0 nutzt `generation`).
 - Phase 0.1: Wörtlich umgesetzt (DECISIONS D46).
 - Vorschlag: Entweder bestätigen oder in 2.3 einen Kurznamen (`platform-cert`, `platform-succ`) nennen und in 2.2 die Domäne des Generationszertifikats festlegen.
 
+
+## S15 Einheiten in 5.1 bis 5.3
+- Stelle: 5.1 "maximale Größe 25 MB", "1 KB/s gemittelt über 60 Sekunden"; 5.2 und 5.3 "Header, begrenzt auf 1 MB".
+- Problem: Seit Version 1.2 nennt 3.3 die Größe in MiB; in 5.1 bis 5.3 bleibt offen, ob MB und KB dezimal oder binär gemeint sind.
+- Phase 1: Dezimal, wie bei SMTP üblich (`SIZE 25000000`, 1.000.000 Byte Header, 1.000 Byte je Sekunde), DECISIONS D54.
+- Vorschlag: In 5.1 "25.000.000 Byte (SIZE)", "1.000 Byte/s" und in 5.2 "1.000.000 Byte" schreiben.
+
+## S16 `user.rec` ist laut Abschnitt 7 signiert, 3.7 hat dafür keinen Kurznamen
+- Stelle: 7 Tabelle "`user.rec` signiert von Identität des Benutzers"; 3.7 Tabelle der Kurznamen; 2.2 JSON-Beispiel ohne Signatur auf oberster Ebene.
+- Problem: Die Tabelle in 3.7 soll alle Signaturen erfassen, enthält aber keinen Kurznamen für `user.rec`. Das JSON-Beispiel in 2.2 hat nur die Signaturen der Generationen durch den Root. Ohne eine Signatur über `user_id` und `root_pub` bindet nur das Log die Benutzer-ID an den Root.
+- Phase 1: `user.rec` ohne eigene Signatur; die Generationen sind durch den Root geschützt, die Bindung an die ID übernimmt später das Log (DECISIONS D59).
+- Vorschlag: Entweder in 7 "signiert von der Identität" streichen (die Generationszertifikate sind die Signaturen) oder in 3.7 einen Kurznamen `user` ergänzen und festlegen, welche Generation signiert.
+
+## S17 Einladungen: signiert oder nicht?
+- Stelle: 2.1 "platform/admin/<gen> signiert Adresszuordnungen und Einladungen"; 4 `invites/<code>.json`; 3.7 ohne Kurzname für Einladungen.
+- Problem: Eine signierte Einladung bräuchte einen Kurznamen; als JSON-Datei ist sie keine kanonische Struktur.
+- Phase 1: Unsignierte JSON-Datei mit Erstellzeit; der Code ist eine zufällige ID und wird beim Registrieren atomar verbraucht (DECISIONS D53).
+- Vorschlag: In 2.1 "und Einladungen" streichen oder einen Datensatz `gomail/v1/rec/invite` mit Kurzname `invite` festlegen.
+
+## S18 `epoch.rec` nennt weder Postfach noch Unterzeichner
+- Stelle: 2.4 Inhalt von `epoch.rec`.
+- Problem: Ohne Postfach-ID lässt sich eine `epoch.rec` (vor allem Epoche 1, die keinen Vorgänger nennt) in ein anderes Postfach desselben Mitglieds verschieben. Ohne Angabe des Unterzeichners muss der Prüfer alle Mitglieder durchprobieren.
+- Phase 1: Postfach-ID und Unterzeichner (ID, Generation) sind Felder des Datensatzes (DECISIONS D49).
+- Vorschlag: Beide Felder in 2.4 aufnehmen.
+
+## S19 "Sofortiger Beginn" einer Epoche und Uhrzeiten
+- Stelle: 2.4 Vorrat, "Der nächste Client erzeugt dann eine Epoche mit sofortigem Beginn"; Schutz gegen Zurückspielen, dritter Punkt.
+- Problem: Der Beginn kommt von der Uhr des Clients, die Empfangszeit von der Uhr des Servers, und zwischen dem Erzeugen und dem Sichtbarwerden der neuen `epoch.rec` vergeht Zeit. Eine Mail, die der Server in dieser Lücke annimmt, wird für die alte Epoche verschlüsselt, obwohl die neue laut ihrem Beginn schon gilt; der Client meldet sie dann als Zurückspielen.
+- Phase 1: Die Epoche beginnt fünf Minuten nach dem Erzeugen (DECISIONS D50). Die Empfangszeit ist der Beginn von `DATA`.
+- Vorschlag: In 2.4 "mit Beginn wenige Minuten nach dem Erzeugen" schreiben und die zulässige Uhrabweichung zwischen Client und Server nennen.
+
+## S20 Name und Ordner hängen an Epoche 1
+- Stelle: 4 `mailbox.rec` "Name (verschlüsselt)", `folders.gml` "verschlüsselt mit meta"; 2.5, 2.6.
+- Problem: Nicht festgelegt ist, für welche Epoche Name und Ordnerliste verschlüsselt werden. Phase 1 nimmt Epoche 1. Ein Mitglied, das nur spätere Epochen bekommt (Vertretung, "nur ab jetzt"), kann den Namen dann nicht lesen; wird Epoche 1 gelöscht (2.6), ist er für alle verloren. Außerdem muss der Server den Posteingang kennen, ohne `folders.gml` lesen zu können.
+- Phase 1: Name und `folders.gml` für Epoche 1, signiert vom anlegenden Mitglied; die ID des Posteingangs steht offen in `mailbox.rec` (DECISIONS D56).
+- Vorschlag: Name und Ordnerliste bei jedem Epochenwechsel für die neue Epoche neu versiegeln (sie sind klein) oder einen eigenen, dauerhaften Postfachschlüssel dafür einführen; die Posteingangs-ID in 4 als offenes Feld von `mailbox.rec` nennen.
+
+## S21 Mehrere Dateien und Postfächer atomar verschieben
+- Stelle: 5.2 Schritt 4 "werden Mail, Metadaten und Marker atomar in das jeweilige Postfach verschoben", `spool/<postfach-id>/<mail-id>.gml`.
+- Problem: Drei Dateien in zwei Verzeichnissen, bei mehreren Empfängern in mehreren Postfächern, lassen sich nicht mit einer Umbenennung verschieben. Bricht der Server mittendrin ab, liegt ein Teil im Postfach. Die Regel "beim Start den gesamten Inhalt von spool/ löschen" räumt das nicht auf.
+- Phase 1: Transaktion je Annahme unter `spool/<txn-id>/<postfach-id>/` mit Journal; das Löschen des Journals ist der Commit, `Recover` macht nicht abgeschlossene Umbenennungen rückgängig, bevor `spool/` geleert wird (DECISIONS D52).
+- Vorschlag: In 5.2 das Journal und den Commit-Punkt beschreiben und den Spool-Pfad anpassen.
+
+## S22 Signierte Felder der Metadaten sind ohne Schlüssel nicht prüfbar
+- Stelle: 3.4 "sodass auch der Server Signaturen ohne Schlüssel prüfen kann"; 7 signierte Felder einschließlich Empfangszeit, "Metadaten tragen einen Versionszähler, der ... mitsigniert wird".
+- Problem: Postfach, Epoche, Mail-ID stehen im Kopf, der Hash der Metadaten ist der Datei-Hash, der Hash der Mail-Datei lässt sich ohne Schlüssel berechnen. Versionszähler (und bei Benutzersignaturen die ursprüngliche Empfangszeit) stehen aber nur im verschlüsselten Inhalt. Wer sie für die signierte Struktur braucht, muss entschlüsseln; der Server kann die Signatur also nicht prüfen.
+- Phase 1: Nur der Client prüft; er entschlüsselt, baut die Felder und prüft die Signatur, bevor er einen Wert verwendet (DECISIONS D51).
+- Vorschlag: Entweder festhalten, dass nur Clients Metadaten-Signaturen prüfen, oder Version und Empfangszeit lesbar machen (etwa im Dateinamen `<mail-id>.<version>.meta.gml` oder in einem offenen Feld des Trailers).
+
+## S23 Begriffe aus 5.4 im Einzelnen
+- Stelle: 5.4 Tabelle.
+- Problem: Offen ist, ob `to` auch `Cc` umfasst, ob `day` und `month` aus dem `Date`-Header oder der Empfangszeit kommen, wann eine Mail einen Anhang hat und wie die Wurzel eines Threads bestimmt wird.
+- Phase 1: `to` aus `To` und `Cc`; `day` und `month` aus der signierten Empfangszeit in UTC; Anhang bei `multipart/mixed` auf oberster Ebene; Wurzel ist der erste Eintrag von `References`, sonst `In-Reply-To`, sonst die eigene `Message-ID` (DECISIONS D55).
+- Vorschlag: Diese Regeln in 5.4 aufnehmen; sie bestimmen, welche Marken ein Client in Phase 5 sucht.

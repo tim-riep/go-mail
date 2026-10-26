@@ -1,26 +1,39 @@
-# Übergabe nach Phase 0.1
+# Übergabe nach Phase 1
 
-Stand: Phase 0 (kryptografisches Fundament) ist umgesetzt und getestet; Phase 0.1 hat `envelope` und `rec` auf die Version 1.1 der Spezifikation gebracht (Elementrahmen mit Typbytes, Empfängertyp 4, höchstens vier Empfänger, NFC über `golang.org/x/text`). Dieses Dokument richtet sich an die nächste Phase. Es beschreibt die öffentliche API der vier Pakete, die Invarianten, die Aufrufer einhalten müssen, bekannte Grenzen und offene Punkte. Entscheidungen stehen in `docs/DECISIONS.md`, Spezifikationslücken in `docs/SPEC-ISSUES.md`. Die Spezifikation ist `docs/PLAN.md` in Version 1.1 (Abschnitt 13 listet die Änderungen gegenüber 1.0).
+Stand: Phase 1 ist umgesetzt: der erste durchgehende Ablauf mit Registrierung, Postfach, Empfang per SMTP und Lesen, alles verschlüsselt und geprüft, beschränkt auf Postfächer mit genau einem Mitglied (Meilensteine 2 und 3 aus Spezifikation 11). Grundlage ist `docs/PLAN.md` in Version 1.2 (Abschnitt 14 listet die Änderungen gegenüber 1.1). Dieses Dokument richtet sich an Phase 2 und ist die verbindliche Beschreibung der Pakete, ihrer Invarianten und Grenzen. Entscheidungen stehen in `docs/DECISIONS.md` (Phase 1 ab D47), offene Punkte der Spezifikation in `docs/SPEC-ISSUES.md`, der Ablauf von Hand in `docs/RUNBOOK.md`.
+
+**Zwei Entscheidungen stehen aus** (SPEC-ISSUES S11 und S13, Vorschläge dort): die Normalisierung eingegebener Seed-Wörter und die Gültigkeit von Signaturen widerrufener Generationen. Umgesetzt ist jeweils die strengste Lesart, markiert mit `TODO(S11)` und `TODO(S13)`; kein Dateiformat hängt davon ab.
 
 ## Überblick
 
 ```
 internal/rec       kanonische Kodierung (3.6), strikter Decoder, NFC-Prüfung
-internal/keys      Seed, BIP-39, HKDF (2.2, 2.3), Zertifikate, Schlüsselspeicher
+internal/keys      Seed, BIP-39, HKDF (2.2, 2.3), Zertifikate, Signaturdomänen (3.7), Schlüsselspeicher
 internal/shamir    Aufteilung über GF(256), Anteile als 30 Wörter (2.3)
 internal/envelope  Dateiformat .gml (3): HPKE-Verpackung, STREAM-Inhalt, Signatur
+internal/store     Datenverzeichnis (4): atomares Schreiben, Sperren, alle Datensätze von Phase 1
+internal/translog  Schnittstelle zum Transparenzlog (2.7); einzige Umsetzung Unverified
+internal/smtpd     SMTP-Zustandsmaschine mit den Grenzen aus 5.1
+internal/ingest    Annahme, Spool-Transaktion, Metadaten, Marker, Vorverarbeitung (5.2 bis 5.4)
+internal/client    Schlüsselerzeugung, Registrierung, Postfach, Vorrat, Lesepfade mit allen Prüfungen (2.4, 7)
+internal/ceremony  Entwicklungszeremonie (2.3, nur --dev)
+internal/testenv   Plattform, Benutzer und Postfächer für Tests (nur Tests)
+internal/e2e       Ende-zu-Ende-Tests und Lauf der Programme nach RUNBOOK
+cmd/gomail-server  serve, invite create, address add
+cmd/gomailctl      keygen, register, mailbox create, sync, list, read, inspect
+cmd/gomail-ceremony init --dev
 ```
 
-Abhängigkeiten: `envelope -> keys -> rec`, `shamir -> keys`. Nur Standardbibliothek, `golang.org/x/crypto/argon2` und `golang.org/x/text/unicode/norm` (v0.43.0, in `go.mod` festgelegt). Go 1.26 (getestet mit 1.26.10).
+Abhängigkeiten: `envelope -> keys -> rec`, `shamir -> keys`, `store -> envelope, keys, rec`, `translog -> store`, `ingest -> smtpd, store, envelope, translog`, `client -> store, envelope, keys, translog`, `ceremony -> store, keys, translog`. `smtpd` hängt von keinem Paket des Projekts ab. Nur Standardbibliothek, `golang.org/x/crypto/argon2` und `golang.org/x/text/unicode/norm` (v0.43.0); `x/mod` kommt erst mit dem Log. Go 1.26 (getestet mit 1.26.10).
 
 Prüfen:
 
 ```
 go vet ./...
 go test -race ./...
+GOARCH=386 go test ./...             # -race gibt es auf 386 nicht
 go test -cover ./internal/...
-GOARCH=386 go test ./internal/...      # 32-bit: Längenfelder ab 2^31 (Fund der unabhängigen Prüfung); -race gibt es auf 386 nicht
-go test -run '^$' -fuzz '^FuzzDecode$' -fuzztime 5m ./internal/rec/   # je Fuzz-Ziel
+go test -run '^$' -fuzz '^FuzzDecodeRecords$' -fuzztime 5m ./internal/store/   # je Fuzz-Ziel
 ```
 
 Testvektoren liegen unter `internal/<paket>/testdata/`, die Generatoren unter `internal/<paket>/testdata/gen/` (`go run ./testdata/gen` im Paketverzeichnis). Die `.gml`-Dateien aus Phase 0 (Rahmen ohne Typbytes) liegen unter `internal/envelope/testdata/phase0/` und müssen abgelehnt werden.
@@ -200,45 +213,204 @@ var ErrMagic, ErrVersion, ErrSuite, ErrTruncated, ErrTooLarge, ErrHeader, ErrHea
 - Nur Suite 1. Suite 2 braucht andere Feldgrößen im Empfängerteil; vier Einträge passen in `MaxRecipientsSize` (S12).
 - HPKE-Kapselungen sind nicht reproduzierbar; deterministische Vektoren decken Präambel, Kopf und Blöcke ab.
 
-## Testabdeckung
+## store
 
-`go test -cover` (Phase 0.1): `rec` 99,6 %, `shamir` 100 %, `envelope` 93,5 %, `keys` 88,3 % (für `keys` ist kein Mindestwert gefordert). Nicht abgedeckte Zeilen in den drei Paketen mit Mindestanforderung:
+### API
 
-| Datei | Zeilen | Code | Begründung |
-|---|---|---|---|
-| rec/rec.go | 439-441 | `checkValue` in `Encode` für Listen schlägt fehl | Elemente werden bereits in `SetList` geprüft und die Slice kopiert; der zweite Aufruf ist eine Absicherung gegen spätere Änderung der Element-Records, die kein Test erzwingen kann, ohne die Prüfung in `SetList` zu umgehen. |
-| envelope/envelope.go | 214-216, 278-280, 341-343 | `Encode`-Fehler in `Header.encode`, `encodeRecipients`, `Trailer.encode` | Die Werte stammen aus validierten Strukturen mit festen Größen; `rec.Encode` kann dann nicht fehlschlagen. Die Zweige geben den Fehler nur weiter (fail closed). |
-| envelope/open.go | 71-73 | `hpke.NewDHKEMPrivateKey` schlägt fehl | Die Kurve wird vorher geprüft (`Curve() == ecdh.X25519()`); die Funktion schlägt nur bei anderen Kurven fehl. |
-| envelope/open.go | 83-85 | entpackter Dateischlüssel hat nicht 32 Byte | `wrapped_key` hat per Schema 48 Byte, AES-GCM liefert daraus immer 32 Byte; Absicherung. |
-| envelope/open.go | 90-92 | `contentAEAD` schlägt fehl | Siehe seal.go 221-232. |
-| envelope/parse.go | 145-147 | mehr als 800 Blöcke | Durch `MaxFileSize` (am Anfang von `Parse`) ist ein 801. Block nicht erreichbar, weil Kopf, Empfängerteil und Trailer höchstens etwa 21,5 KiB Spielraum lassen, ein Blockelement aber 65.557 Byte braucht; die Prüfung bleibt als eigenständige Garantie. `TestParseTooManyBlocksAndTooLarge` prüft, dass 801 Blöcke abgelehnt werden (über die Dateigröße). |
-| envelope/parse.go | 189-191, 193-195, 214-216 | `Encode`-Fehler in `Bytes` | `Bytes` wird nur auf Dateien aufgerufen, die `Parse` angenommen hat; deren Strukturen kodieren immer. |
-| envelope/seal.go | 78-83 | `Write`/`Close` in `Seal` schlagen fehl | `Seal` schreibt in einen `bytes.Buffer` (schlägt nie fehl) und prüft die Größe vorher; die Fehlerpfade sind für den `Writer` getestet (`TestWriterOutputErrors`). |
-| envelope/seal.go | 158-160 | `hdr.encode` schlägt fehl | Validierte Kopffelder mit festen Größen. |
-| envelope/seal.go | 168-170, 177-179 | `hpke.NewDHKEMPublicKey`, `sender.Seal` schlagen fehl | Kurve vorher geprüft; `Seal` schlägt im Base-Modus mit gültigem Kontext nicht fehl. `NewSender` (Punkt kleiner Ordnung) ist getestet. |
-| envelope/seal.go | 183-188 | `encodeRecipients` schlägt fehl; Empfängerteil über 16 KiB | Validierte Einträge; vier Einträge der Suite 1 belegen etwa 0,6 KiB. Die Grenze wird relevant für Suite 2 (S12). |
-| envelope/seal.go | 192-194, 221-232 | `contentAEAD`: HKDF, `aes.NewCipher`, `cipher.NewGCM` schlagen fehl | Feste Schlüssellänge 32 und feste Parameter; diese Funktionen schlagen nur bei falschen Längen fehl. |
-| envelope/seal.go | 238-240 | `emit` bei gesetztem `w.err` | `Write` und `Close` prüfen `w.err` vor dem Aufruf; Absicherung gegen neue Aufrufer. |
-| envelope/seal.go | 290-293 | 801. Block im Schreiber | Die Größenprüfung in `Write` (`MaxContentSize`) macht einen 801. Block unerreichbar; die Prüfung bleibt als eigenständige Garantie. `TestWriterLimits` prüft die Grenze über die Größe. |
-| envelope/seal.go | 346-360 | `signedStructure`, `keys.Sign`, `Trailer.encode` schlagen in `Close` fehl | Der Signer wird in `NewWriter` validiert (Typ, Generation, Schlüssellänge, `Extra` bis 4 KiB); danach können diese Aufrufe nicht fehlschlagen. |
+```go
+type ID [16]byte                       // zufällig, Text: base32 klein, 26 Zeichen
+func NewID(r io.Reader) (ID, error); ParseID(s string) (ID, error); (ID) String(); IsZero()
 
-Alle nicht abgedeckten Zeilen sind Fehlerzweige, die Fehler nur weiterreichen oder Grenzen ein zweites Mal prüfen. Keiner gibt Daten heraus.
+// Dateioperationen: atomar, mit fsync von Datei und Verzeichnis
+func WriteFileAtomic(path string, data []byte) error   // ersetzt
+func CreateFileAtomic(path string, data []byte) error  // nur wenn nicht vorhanden (ErrExists)
+func RenameDurable(src, dst string) error; RemoveDurable(path string) error; MkdirAll(dir string) error; SyncDir(dir string) error
+func ReadFileLimited(path string, max int64) ([]byte, error)   // Größe vor dem Lesen geprüft
+func RemoveTemp(dir string) error
 
-## Unabhängige Prüfung in Phase 0.1
+type Store struct{ Root string }
+func Init(root string) (*Store, error); Open(root string) (*Store, error)
+// Pfade nach Abschnitt 4: UserFile, InviteFile, AddressesFile, MailboxDir/File, FoldersFile, NoteFile,
+// EpochDir/File, WrapFile, MailDir, MailFile, MetaFile, PendingDir/File, SpoolDir, WorkDir; Rel/Abs für Journale
+func (s *Store) CreateUser(*User) error; ReadUser(ID) (*User, []byte, error)
+func (s *Store) CreateInvite(nowMillis int64) (ID, error); ConsumeInvite(ID) error
+func NormalizeAddress(string) (string, error); (s) LoadAddresses() (Addresses, error); AddAddress(addr string, mbx ID) (string, error)
+func (s *Store) WritePlatformFile(name string, data []byte) error; ReadPlatformFile(name) ([]byte, error)
+func (s *Store) ReadPlatformCert(role keys.Role, gen uint32) (*keys.PlatformCert, error)   // prüft .pub gegen .cert, nicht die Signatur
+func (s *Store) LockMailbox(ID) (func(), error); LockMailboxes([]ID) (func(), error)
+func (s *Store) WriteMailbox(*Mailbox) error; ReadMailbox(ID) (*Mailbox, error)
+func (s *Store) WriteEpoch(*Epoch) ([]byte, error); ReadEpoch(ID, n) (*Epoch, []byte, error); ListEpochs(ID)
+func (s *Store) WriteWrap(mbx, n, user, data); ReadWrap(mbx, n, user)
+func (s *Store) ListFolders, ListMails, ListPending, ListPendingEpochs; ReadMail, ReadMeta, ReadPending, ReadFolders, WriteFolders
+func (s *Store) ReadNote(ID) (*EpochNote, error); WriteNote(*EpochNote) error; RemoveNote(ID) error
 
-Ein Subagent ohne Kenntnis von DECISIONS, SPEC-ISSUES und HANDOFF prüfte `envelope` und `rec` gegen 3.1 bis 3.6 der Version 1.1 und fand keine Abweichung von der Spezifikation. Behoben (Commit 3b8cb50): Der Schreiber überschrieb seinen Klartextpuffer nur im Erfolgsfall; `Kind.String` lieferte für unbekannte Dateiarten einen Kunstnamen, den `keys.Sign` als Domäne angenommen hätte. Zur Kenntnis genommen, nicht geändert: `SealOptions.Rand` erlaubt Aufrufern die Wiederverwendung von Zufall (siehe Invarianten); `Decrypt` leitet das Flag aus der Position in der Blockliste ab, die `Parse` als `0x01* 0x02` garantiert; `Parse` kopiert die ganze Datei (bis 50 MiB) und hält sie für `FileHash`.
+// Datensätze (Typ-Strings gomail/v1/rec/...): user, mailbox, epoch (+ epoch-member), epoch-keys,
+// mail-meta (+ rcpt), meta-signed, pending (+ pending-entry, term), epoch-note, journal (+ move),
+// address, platform-key, platform-pin, mailbox-name, folders (+ folder)
+type User struct{ ID; RootPub; Generations []*keys.GenerationCert }      // DecodeUser prüft die Kette
+type Mailbox struct{ ID; Epoch uint32 /* Kopf */; Inbox ID; Name []byte /* versiegelt */ }
+type Epoch struct{ MailboxID; Number; Begin; Reason; Suite; ContentPub, MetaPub; Members []Member; PrevHash; SignerID; SignerGen; Signature }
+func (e *Epoch) Sign(identity) error; VerifySignature(pub) error; Member(ID) (Member, bool)
+func EpochHash(data []byte) [32]byte; CheckLink(prev *Epoch, prevData []byte, next *Epoch) error
+type EpochKeys struct{ MailboxID; Epoch; Content, Meta *ecdh.PrivateKey; Index [32]byte }; (k) Matches(*Epoch) bool; Zero()
+type MailMeta struct{ Version; MailID; Received; MailHash; Size; Folder; Flags; EnvelopeFrom; Recipients; From, To, Cc, Subject, Date, MessageID; Attachment; HeadersParsed }
+func (m *MailMeta) SignedExtra(mbx ID, epoch uint32) ([]byte, error)
+type Pending struct{ MailboxID; Epoch; Entries []PendingEntry{ MailID; Unprocessed bool; Terms []string } }
+type AddressAssignment struct{ Address; MailboxID; ValidFrom; AdminGen; Signature }; Sign/Verify
+func CleanText(s string, max int) string        // speicherbar nach 3.6 Regel 3
+var ErrRecord, ErrChain, ErrExists, ErrNotFound, ErrTooLarge, ErrID, ErrInvite, ErrAddress
+```
 
-## Fuzzing
+### Invarianten
+- Alles im Datenverzeichnis wird über `store` geschrieben: atomar, mit `fsync`; nie eine Datei an Ort und Stelle verändern. `epoch.rec`, Plattformdateien und `user.rec` werden nur exklusiv angelegt, nie ersetzt.
+- Jede Datei wird mit `ReadFileLimited` gelesen; die Grenzen stehen in `store.go` (DECISIONS D48).
+- Lesefunktionen prüfen Ort gegen Inhalt (`user.rec` gegen das Verzeichnis, `epoch.rec` gegen Postfach und Nummer, Notizen gegen das Postfach), nicht Signaturen. Signaturen und die Kette prüft der Aufrufer.
+- Sperren: Commit einer Annahme, Schreiben einer Begriffsliste, Anlegen von Epochen und `mailbox.rec` halten die Sperre des Postfachs; mehrere Postfächer nur über `LockMailboxes`.
+- Dekodierte Datensätze sind kanonisch: optionale Felder stehen nur, wenn sie einen Wert tragen; leere optionale Zeichenketten oder Kennzeichen mit dem Wert 0 werden abgelehnt.
 
-Fuzz-Ziele: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`. Jedes prüft: kein Panic, Annahme nur mit byte-identischer Rückkodierung, Entschlüsselung manipulierter Dateien scheitert (oder liefert bei fremden Empfängereinträgen denselben Klartext). Gefundene Fälle legt `go test` unter `testdata/fuzz/<Ziel>/` ab und sie laufen danach als Regressionstests. Phase 0.1: alle zehn Ziele je 5 Minuten ohne Fund (Ausführungen: rec.FuzzDecode 16,6 Mio., rec.FuzzIsNFC 18,7 Mio., keys.FuzzParseWordlist 5,5 Mio., keys.FuzzSeedFromWords 15,6 Mio., keys.FuzzDecodeGenerationCert 16,5 Mio., keys.FuzzOpenKeystore 18,9 Mio., shamir.FuzzShareFromWords 15,6 Mio., shamir.FuzzShareFromBytes 20,6 Mio., shamir.FuzzCombine 12,7 Mio., envelope.FuzzParseAndOpen 4,7 Mio.); die Saat von `envelope.FuzzParseAndOpen` enthält die Phase-0-Dateien und ungültige Elementfolgen. In Phase 0 fand `keys.FuzzDecodeGenerationCert` nach zwei Minuten ein Zertifikat mit ausdrücklich kodiertem `revokes = 0`, das angenommen wurde, aber nicht byte-identisch zurückkodierte; der Decoder lehnt diese Form jetzt ab, der Fall liegt unter `internal/keys/testdata/fuzz/FuzzDecodeGenerationCert/`.
+## translog
 
-## Offene Punkte für die nächsten Phasen
+```go
+type Log interface {
+    Verified() bool
+    AppendUser(user store.ID, userRec []byte) error
+    AppendEpoch(mailbox store.ID, number uint32, epochRec []byte) error
+    AppendAddress(addressRec []byte) error
+    AppendPlatform(name string, data []byte) error
+    CheckUser(user store.ID, userRec []byte) error
+    CheckGeneration(user store.ID, gen uint32) error
+    CheckRevokedSignature(user store.ID, gen uint32, signed []byte) error
+    CheckEpoch(mailbox store.ID, number uint32, epochRec []byte) error
+    CheckAddress(address string, mailbox store.ID, at int64) error
+    CheckPlatform(name string, data []byte) error
+    CheckFresh(now time.Time) error
+}
+type Unverified struct{}                      // nimmt alles an
+func NewUnverified(insecureNoLog bool) (*Unverified, error)   // ErrNoLog ohne den Schalter
+const Warning                                  // gibt der Client bei jedem Start aus
+```
 
-1. `user.rec`, `epoch.rec`, `mailbox.rec` und die Verpackungen (`members/<user>.wrap` als `.gml` mit `KindWrap` und `RecipientUserUnwrap`) als Datensätze festlegen; Schemas in `store`.
-2. Den Datensatz `extra` der Ingest-Signatur für Metadaten (Abschnitt 7) festlegen; dann liefert `envelope` die Signatur ohne Änderung.
-3. Den Hash der Mail-Datei in den Metadaten definieren (ganze Datei oder `FileHash`) und beim Lesen prüfen (SPEC-ISSUES S06).
-4. Wiederherstellungsempfänger (`RecipientRecovery`) beim Schreiben eintragen; nachträgliche Einträge in signierten Dateien bleiben ausgeschlossen (S09, Version 1.1).
-5. Resolver für Signaturen: Zertifikatskette (`PlatformCert` über Identität, Identitätsnachfolge), Generationskette des Benutzers, Widerrufe aus dem Log, Aktualitätsgrenze 24 h (2.3).
-6. Eingabenormalisierung für Seed-Wörter und Shamir-Wörter in `gomailctl` (S11).
-7. Beim Lesen einer Mail (Phase 1 ff.) die Prüfung aus Abschnitt 7 der Version 1.1 umsetzen: Metadaten signiert, SHA-256 der ganzen Mail-Datei gleich dem Wert in den Metadaten, Kopffelder gleich den Metadaten.
-8. Zeremonie-Werkzeug: `shamir.Split` für den Plattform-Root, Probe-Rekonstruktion, Vergleich über die abgeleiteten öffentlichen Schlüssel.
+- Jede Stelle, die das Log braucht, ruft diese Schnittstelle auf und bricht bei einem Fehler ab (getestet mit einem Log, das einzelne Prüfungen verweigert: `client/log_test.go`). Phase 3 ersetzt nur die Umsetzung.
+- Ein Client lehnt eine Entwicklungsidentität ab, sobald `Verified()` wahr ist.
+
+### Alle `TODO(phase3-translog)`
+
+| Stelle | Prüfung oder Eintrag | Spezifikation |
+|---|---|---|
+| `client/client.go`, `Open` | `CheckFresh`: Baumkopf mit Zeugensignatur höchstens 24 Stunden alt | 2.3, 2.7 |
+| `client/client.go`, `Open` | `CheckUser`: eigene `user.rec` im Log | 2.7 |
+| `client/mailbox.go`, `userKey` | `CheckUser`: `user.rec` des Unterzeichners im Log | 2.7 |
+| `client/mailbox.go`, `userKey` | `CheckGeneration`: Generation erst ab ihrem Logeintrag gültig | 2.2 Punkt 3 |
+| `client/mailbox.go`, `userKey` | `CheckRevokedSignature`: Signatur einer widerrufenen Generation vor dem Widerruf geloggt | 2.2 Punkt 4, S13 |
+| `client/mailbox.go`, `checkEpoch` | `CheckEpoch`: `epoch.rec` im Log | 2.7 |
+| `client/mailbox.go`, `createEpoch` | `AppendEpoch` | 2.7 |
+| `client/read.go`, `ingestKeyFor` | `CheckPlatform`: Zertifikat im Log, Generation nicht als kompromittiert markiert | 2.3, 7 |
+| `client/read.go`, `checkMeta` | `CheckAddress`: Adresse zur Empfangszeit diesem Postfach zugeordnet | 2.3 |
+| `client/keygen.go`, `Register` | `AppendUser`: die Generation gilt erst ab dem Eintrag | 2.2 Punkt 3 |
+| `cmd/gomail-server`, `address add` | `AppendAddress`: signierte Zuordnung | 2.3 |
+| `ceremony/ceremony.go`, `InitDev` | `AppendPlatform`: Zertifikate | 2.7 |
+| `store/records.go`, `UserSchema` | Bindung von Benutzer-ID und Root nur über das Log (S16) | 2.2, 2.7 |
+| `translog/translog.go` | alle elf Methoden von `Unverified` | 2.7 |
+
+Noch ohne Aufrufstelle, weil die Funktion erst später kommt: Vermerke der Clients (`checkpoints/`), Nachfolgen der Plattformidentität (`identity-<gen>.succ`), Widerruf kompromittierter Plattformgenerationen.
+
+## smtpd
+
+```go
+type Backend interface { Accepting() error; Recipient(address string) error; Begin(Session, from string, rcpts []string) (Delivery, error) }
+type Delivery interface { Write([]byte) (int, error); Commit() error; Abort() }
+type Session struct{ ID, Helo, RemoteIP string }
+type Config struct{ Hostname; MaxSize; MaxRecipients; CommandTimeout; DataTimeout; MaxConns; MaxConnsPerIP; MinRate; RateWindow; MaxMailsPerIP; RateMemory; Now; Logger }
+func NewServer(Config, Backend) *Server; (s) Serve(net.Listener) error; Close() error
+var ErrUnknownRecipient /*550*/, ErrDiskFull /*452*/, ErrTemporary /*451*/, ErrClosed
+```
+
+- `250` nach `DATA` erst, wenn `Commit` ohne Fehler zurückkam. Bei jedem Abbruch ruft die Sitzung `Abort`.
+- Der Server schreibt den `Received`-Header als erstes in die Zustellung; Inhalte, Header und Adressen loggt er nie (nur Sitzungs-ID, Größen, Statuscodes).
+- Grenzen und Antworten: DECISIONS D54. Zeitlimits und die Mindestrate laufen über `Config.Now` und Lese-Deadlines.
+
+## ingest
+
+```go
+type Config struct{ Store; Log; IngestKey; IngestGen; Now; Logger; MinFree; DiskSpace; QueueMemory; WorkLimit; BatchSize; BatchAge }
+func New(Config) (*Ingest, error)            // prüft den Schlüssel gegen ingest-<gen>.cert
+func (in *Ingest) Recover() error            // vor dem Start: Rollback offener Transaktionen, spool/ und work/ leeren
+func (in *Ingest) Start(); Flush() error; Close() error
+func (in *Ingest) Accepting() error; Recipient(string) error; Begin(...)   // smtpd.Backend
+func Terms(header []byte, received time.Time) ([]string, bool)          // 5.4
+```
+
+### Invarianten
+- Ablauf je Mail: Epochenwahl bei `DATA` (D50), Verschlüsselung je Postfach nach `spool/<txn>/<postfach>/mail.gml`, danach `meta.gml` und `marker.gml`, Journal, Umbenennungen, Löschen des Journals (Commit, D52). Kein Klartext auf der Platte; die Warteschlange lagert nur verschlüsselt aus.
+- `Recover` muss vor dem ersten `Begin` laufen. Ein Journal, das sich nicht dekodieren lässt oder Pfade außerhalb des Datenverzeichnisses nennt, stoppt den Start.
+- Absturzpunkte für Tests: Paketvariable `crashHook`, nur in Tests gesetzt.
+- Der Server prüft die Signatur der gewählten `epoch.rec` gegen `user.rec` des Unterzeichners, aber nicht die ganze Kette und nicht das Log; das ist Aufgabe des Clients.
+
+## client
+
+```go
+type Config struct{ Store; Dir; Pin *store.PlatformPin; Log; Now; Warn func(string) }
+func Keygen(Config, passphrase []byte, Prompter) (store.ID, error)
+func Register(Config, code store.ID) (store.ID, error)
+func Open(Config, passphrase []byte) (*Client, error)
+func (c *Client) CreateMailbox(name string) (store.ID, error)
+func (c *Client) Sync() error
+func (c *Client) List(mbx, folder store.ID) ([]*Mail, error)   // folder 0 = Posteingang
+func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error)
+func (c *Client) OpenPending(mbx, epoch, file) (*store.Pending, error)
+func (c *Client) MailboxName(store.ID) (string, error); Folders(store.ID) ([]store.Folder, error); Mailboxes() []store.ID; UserID(); Close()
+func Inspect(data []byte) ([]byte, error)
+const SupplyMonths = 3; ImmediateDelay = 5 * time.Minute; InboxName = "INBOX"
+var ErrNotRegistered, ErrRegistered, ErrConfirm, ErrDevIdentity, ErrPlatform, ErrUserRecord, ErrRollback, ErrEpoch,
+    ErrStaleEpoch, ErrReplay, ErrMailHash, ErrMismatch, ErrSigner, ErrWrap, ErrNotFound
+```
+
+### Prüfungen beim Lesen (Reihenfolge)
+1. Epochenkette ab 1: jede `epoch.rec` am richtigen Ort, verknüpft (`CheckLink`), signiert von einem Mitglied der Vorgängerin, im Log; Kopf aus `mailbox.rec` nicht unter dem gemerkten, gemerkte Epoche unverändert (D57). Bei einem Bruch gilt nur der Teil davor; jede Abweichung erzeugt eine Warnung.
+2. Verpackung: signiert von einem Mitglied der Epoche (aktuelle Generation, S13), Kopf passend, Schlüssel gleich den öffentlichen Schlüsseln der `epoch.rec` (D61).
+3. Metadaten: Art, Postfach, `file_id`, Epoche in der Kette, Suite, Signatur durch einen Ingest-Schlüssel mit Zertifikat der hinterlegten Identität, Felder aus Abschnitt 7 signiert, `received = created`, Zertifikat zur Empfangszeit gültig, Epochenregel (D50), Adresse über das Log, Version nicht kleiner als gesehen (D51).
+4. Mail (nur `Read`): SHA-256 der ganzen Datei gleich den Metadaten, dann Kopf (Art, Postfach, Epoche, `file_id`, ohne Trailer), dann Entschlüsselung mit Freigabe erst nach dem letzten Block.
+
+### Invarianten
+- `List` zeigt nur Mails, die alle Prüfungen bestanden haben, und warnt für jede andere; `Read` gibt bei jedem Fehler nichts heraus.
+- Der Client schreibt ins Datenverzeichnis nur Epochen, Verpackungen, `folders.gml`, `mailbox.rec` und `user.rec`; alles mit privatem Inhalt ist verschlüsselt.
+- Der lokale Zustand (`state.json`) ist Teil der Sicherheit (Schutz gegen Zurückspielen). Geht er verloren, beginnt der Client wieder bei Vertrauen beim ersten Kontakt (2.7, neues Gerät).
+
+## ceremony und Programme
+
+- `ceremony.InitDev(data, keys, now, log)`, `ReadKey(path, role)`, `ReadPin(path)`; Dateien und Regeln in DECISIONS D58.
+- `gomail-server serve` liest den Ingest-Schlüssel aus einer Datei außerhalb des Datenverzeichnisses, lauscht nur auf Loopback (sonst `--isolated-test-network`), ruft `Recover`, startet die Vorverarbeitung und beendet sich sauber bei SIGINT/SIGTERM (offene Begriffslisten werden geschrieben).
+- `gomailctl` liest die Passphrase aus `GOMAILCTL_PASSPHRASE`, `--passphrase-file` oder einer Zeile von stdin (sichtbar, siehe Grenzen).
+- Ohne `--insecure-no-log` starten `serve`, `address add`, `gomailctl` und die Zeremonie nicht.
+
+## Datenverzeichnis in Phase 1
+
+```
+data/
+  platform/identity-1.pub, admin-1.pub, admin-1.cert, ingest-1.pub, ingest-1.cert
+  users/<user-id>/user.rec
+  invites/<code>.json
+  addresses.json, addresses.lock
+  mailboxes/<postfach-id>/
+    mailbox.rec, folders.gml, lock, epoch-fallback.rec (nur nach einem Rückfall)
+    epochs/<n>/epoch.rec, content.pub, meta.pub, members/<user-id>.wrap
+    mail/<ordner-id>/<mail-id>.gml, <mail-id>.meta.gml
+    pending/<n>/<mail-id>.gml (Marker), <batch-id>.gml (Begriffslisten)
+  spool/<txn-id>/<postfach-id>/{mail,meta,marker}.gml, journal.rec   (nur während einer Annahme)
+  work/<zufall>.bin                                                   (verschlüsselt, nur bei Last)
+```
+
+Nicht angelegt werden in Phase 1: `log/`, `checkpoints/`, `index/`, `platform/identity-<gen>.succ`, `platform/witnesses.rec`.
+
+## Bekannte Grenzen
+- Kein Transparenzlog, keine Zeugen: siehe die Tabelle oben. Alles, was laut 2.7 erst das Log garantiert (Aufspalten von Sichten, stilles Umleiten von Adressen, zurückgehaltene Widerrufe, Bindung von Benutzer-ID und Root), ist in Phase 1 nicht geschützt.
+- Nur ein Mitglied je Postfach; die Formate (Mitgliederliste, Verpackung je Benutzer) tragen mehrere.
+- Keine Benutzersignaturen auf Metadaten (Flags); der Client lehnt sie ab. Kein Indexieren von `pending/` (Phase 5), nur `OpenPending`.
+- Nur die hinterlegte Generation der Plattformidentität; Nachfolgen und kompromittierte Generationen sind nicht umgesetzt.
+- Server und Client prüfen die Ingest-Signatur der Metadaten nur mit Schlüssel (S22).
+- `flock` ist über NFS oder SSHFS (Abnahme mit getrennten Maschinen, 9.1) nicht verlässlich; dort schreiben Server und Client nicht dieselben Dateien gleichzeitig, aber `epoch-fallback.rec` und `mailbox.rec` brauchen dann einen anderen Schutz.
+- Uhren: Epochenwahl und Prüfung hängen an den Uhren von Server und Client; der Vorlauf von fünf Minuten deckt nur mäßige Abweichungen (S19).
+- Die Passphrase wird auf dem Terminal sichtbar eingegeben, weil `x/term` nicht zugelassen ist; die Datei oder die Umgebungsvariable verwenden.
+- Mails, die der Server nach dem Commit, aber vor `250` verliert, stellt der Absender doppelt zu.
+- `ecdh.PrivateKey` (Epochenschlüssel im Speicher des Clients) lässt sich nicht überschreiben (DECISIONS D04).
+- Die Mindestrate wird in festen 60-Sekunden-Fenstern gemessen; ein Absender, der in jedem Fenster knapp 60 KB schickt, darf `DATA` bis zum Zeitlimit von 10 Minuten ausdehnen.
