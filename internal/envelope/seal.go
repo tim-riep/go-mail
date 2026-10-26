@@ -105,10 +105,12 @@ type Writer struct {
 }
 
 // NewWriter writes the preamble, header and recipient section to w and
-// returns a Writer for the content.
+// returns a Writer for the content. A header of kind meta needs Version
+// 1 or higher, a header of any other kind Version 0 (3.1, field 8);
+// anything else is rejected with ErrHeader and ErrHeaderVersion.
 func NewWriter(w io.Writer, hdr Header, recipients []Recipient, opts *SealOptions) (*Writer, error) {
 	if w == nil {
-		return nil, fmt.Errorf("envelope: nil writer")
+		return nil, fmt.Errorf("%w: nil writer", ErrArgument)
 	}
 	if opts == nil {
 		opts = &SealOptions{}
@@ -118,6 +120,11 @@ func NewWriter(w io.Writer, hdr Header, recipients []Recipient, opts *SealOption
 	}
 	if hdr.ChunkSize != 0 && hdr.ChunkSize != ChunkSize {
 		return nil, fmt.Errorf("%w: chunk size must be %d", ErrHeader, ChunkSize)
+	}
+	// Field 8 (3.1): required and at least 1 for kind meta, forbidden
+	// otherwise. Checked before any randomness is consumed.
+	if err := checkVersion(hdr.Kind, hdr.Version != 0 || hdr.Kind == KindMeta, hdr.Version); err != nil {
+		return nil, err
 	}
 	if len(recipients) == 0 || len(recipients) > MaxRecipients {
 		return nil, fmt.Errorf("%w: %d recipients", ErrRecipients, len(recipients))
@@ -215,20 +222,23 @@ func NewWriter(w io.Writer, hdr Header, recipients []Recipient, opts *SealOption
 
 // contentAEAD derives the content key from the file key and nonce prefix
 // and returns the AES-256-GCM instance. The key schedule inside the AEAD
-// cannot be wiped; the derived key bytes are.
+// cannot be wiped; the derived key bytes are. With a 32-byte file key
+// none of the steps can fail; if one does, the error wraps ErrInternal,
+// both when writing and when decrypting, so that it is never mistaken
+// for a failed authentication (ErrDecrypt).
 func contentAEAD(fileKey []byte, prefix [7]byte) (cipher.AEAD, error) {
 	contentKey, err := hkdf.Key(sha256.New, fileKey, prefix[:], infoContent, 32)
 	if err != nil {
-		return nil, fmt.Errorf("envelope: deriving content key: %w", err)
+		return nil, fmt.Errorf("%w: deriving content key: %v", ErrInternal, err)
 	}
 	defer wipe(contentKey)
 	block, err := aes.NewCipher(contentKey)
 	if err != nil {
-		return nil, fmt.Errorf("envelope: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrInternal, err)
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("envelope: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrInternal, err)
 	}
 	return aead, nil
 }
@@ -239,7 +249,7 @@ func (w *Writer) emit(b []byte) error {
 		return w.err
 	}
 	if _, err := w.out.Write(b); err != nil {
-		w.err = fmt.Errorf("envelope: write: %w", err)
+		w.err = fmt.Errorf("%w: %w", ErrWrite, err)
 		return w.err
 	}
 	w.hash.Write(b)

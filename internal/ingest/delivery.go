@@ -496,7 +496,7 @@ func (d *delivery) writeMeta(t *target, f *headerFields, parsed bool) error {
 		return smtpd.ErrTemporary
 	}
 	data, err := envelope.Seal(
-		envelope.Header{Kind: envelope.KindMeta, MailboxID: t.mbx.ID, Epoch: t.epoch.Number, FileID: t.mailID, Created: d.received.UnixMilli()},
+		envelope.Header{Kind: envelope.KindMeta, MailboxID: t.mbx.ID, Epoch: t.epoch.Number, FileID: t.mailID, Created: d.received.UnixMilli(), Version: m.Version},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: t.mbx.ID, Gen: t.epoch.Number, PublicKey: t.epoch.MetaPub}},
 		plain,
 		&envelope.SealOptions{Signer: d.in.ingestSigner(extra)},

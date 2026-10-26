@@ -51,7 +51,7 @@ func (c *Client) signer() *envelope.Signer {
 // user (kind meta: mailbox name and folders).
 func (c *Client) sealMeta(e *store.Epoch, fileID store.ID, plain []byte) ([]byte, error) {
 	return envelope.Seal(
-		envelope.Header{Kind: envelope.KindMeta, MailboxID: e.MailboxID, Epoch: e.Number, FileID: fileID, Created: c.cfg.Now().UnixMilli()},
+		envelope.Header{Kind: envelope.KindMeta, MailboxID: e.MailboxID, Epoch: e.Number, FileID: fileID, Created: c.cfg.Now().UnixMilli(), Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: e.MailboxID, Gen: e.Number, PublicKey: e.MetaPub}},
 		plain, &envelope.SealOptions{Signer: c.signer()})
 }

@@ -40,12 +40,18 @@ func FuzzParseAndOpen(f *testing.F) {
 	}
 	f.Add([]byte("GOML\x01\x01"))
 	f.Add([]byte{})
-	// The phase 0 vector files (framing without element type bytes) stay
-	// in the corpus as rejection cases.
+	// The phase 0 vector files (framing without element type bytes) and
+	// the signed files of version 1.2 (kind meta without header field 8)
+	// stay in the corpus as rejection cases.
 	old, err := filepath.Glob(filepath.Join("testdata", "phase0", "*.gml"))
 	if err != nil || len(old) == 0 {
 		f.Fatalf("phase 0 files: %v", err)
 	}
+	v12, err := filepath.Glob(filepath.Join("testdata", "v12", "*.gml"))
+	if err != nil || len(v12) == 0 {
+		f.Fatalf("version 1.2 files: %v", err)
+	}
+	old = append(old, v12...)
 	for _, name := range old {
 		data, err := os.ReadFile(name)
 		if err != nil {

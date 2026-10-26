@@ -12,6 +12,14 @@
 // crypto/rand inside crypto/hpke and cannot be injected; the recipient
 // section and the signature (which covers it) therefore differ between
 // runs. Tests compare the deterministic parts and decrypt the rest.
+//
+// Because of that, an existing file is kept byte for byte when it still
+// opens with the vector keys (signature included) and its header and
+// block ciphertexts equal those of a fresh seal; only files whose
+// deterministic parts change are rewritten. Since specification 1.4 the
+// signed files (kind meta) carry header field 8 version; the files of
+// version 1.2 without it are kept under testdata/v12 as rejection cases.
+// The unsigned files (kind mail) have no field 8 and stay unchanged.
 package main
 
 import (
@@ -40,6 +48,7 @@ type fileVector struct {
 	Epoch        uint32 `json:"epoch"`
 	FileID       string `json:"file_id"`
 	Created      int64  `json:"created"`
+	Version      uint32 `json:"version"`
 	Random       string `json:"random"`
 	PlaintextSHA string `json:"plaintext_sha256"`
 	NoncePrefix  string `json:"nonce_prefix"`
@@ -84,7 +93,7 @@ func main() {
 		SignerGen     uint32       `json:"signer_gen"`
 		Files         []fileVector `json:"files"`
 	}
-	vectors.Comment = "Complete .gml files with fixed keys and fixed randomness (nonce prefix, then file key). Plaintext is pattern(size): SHA-256(\"envelope pattern\" || uint32 block index) per 32 bytes. Recipient entries and signatures are not reproducible because crypto/hpke draws ephemeral keys from crypto/rand."
+	vectors.Comment = "Complete .gml files with fixed keys and fixed randomness (nonce prefix, then file key). Plaintext is pattern(size): SHA-256(\"envelope pattern\" || uint32 block index) per 32 bytes. Recipient entries and signatures are not reproducible because crypto/hpke draws ephemeral keys from crypto/rand. version is header field 8 (specification 1.4): set for kind meta, 0 meaning absent for kind mail."
 	vectors.RecipientPriv = hex.EncodeToString(priv.Bytes())
 	epochID := id16("epoch")
 	vectors.RecipientID = hex.EncodeToString(epochID[:])
@@ -94,23 +103,36 @@ func main() {
 	vectors.SignerID = hex.EncodeToString(signerID[:])
 	vectors.SignerGen = 1
 
+	// version is header field 8 of the signed (meta) file of each size.
+	// The values cover 1, small counters, every byte position and the
+	// maximum.
 	sizes := []struct {
-		name string
-		size int
+		name    string
+		size    int
+		version uint32
 	}{
-		{"empty", 0},
-		{"one-byte", 1},
-		{"one-block", envelope.ChunkSize},
-		{"two-blocks", 2 * envelope.ChunkSize},
-		{"two-blocks-plus-one", 2*envelope.ChunkSize + 1},
+		{"empty", 0, 1},
+		{"one-byte", 1, 2},
+		{"one-block", envelope.ChunkSize, 3},
+		{"two-blocks", 2 * envelope.ChunkSize, 0x01020304},
+		{"two-blocks-plus-one", 2*envelope.ChunkSize + 1, 0xffffffff},
+	}
+	recipientKey := envelope.RecipientKey{Type: envelope.RecipientEpochContent, ID: epochID, Gen: 1, PrivateKey: priv}
+	resolve := func(ref envelope.SignerRef) (ed25519.PublicKey, error) {
+		if ref.Type == envelope.SignerIngest && ref.ID == signerID && ref.Gen == 1 {
+			return signerKey.Public().(ed25519.PublicKey), nil
+		}
+		return nil, fmt.Errorf("unknown signer")
 	}
 	for i, s := range sizes {
 		for _, signed := range []bool{false, true} {
 			name := s.name
 			kind := envelope.KindMail
+			var version uint32
 			if signed {
 				name += "-signed"
 				kind = envelope.KindMeta
+				version = s.version
 			}
 			random := make([]byte, 7+32)
 			for j := range random {
@@ -119,7 +141,7 @@ func main() {
 					random[j] ^= 0x80
 				}
 			}
-			hdr := envelope.Header{Kind: kind, MailboxID: id16("mailbox"), Epoch: 12, FileID: id16(name), Created: 1761400000000 + int64(i)}
+			hdr := envelope.Header{Kind: kind, MailboxID: id16("mailbox"), Epoch: 12, FileID: id16(name), Created: 1761400000000 + int64(i), Version: version}
 			opts := &envelope.SealOptions{Rand: bytes.NewReader(random)}
 			if signed {
 				opts.Signer = &envelope.Signer{Type: envelope.SignerIngest, ID: signerID, Gen: 1, Key: signerKey}
@@ -127,10 +149,17 @@ func main() {
 			pt := pattern(s.size)
 			data, err := envelope.Seal(hdr, []envelope.Recipient{{Type: envelope.RecipientEpochContent, ID: epochID, Gen: 1, PublicKey: priv.PublicKey()}}, pt, opts)
 			check(err)
+			fileName := name + ".gml"
+			path := filepath.Join(*out, fileName)
+			if old, err := os.ReadFile(path); err == nil && sameVector(old, data, envelope.OpenOptions{ExpectedSuite: envelope.Suite1, Key: recipientKey, ResolveSigner: resolve, AllowUnsigned: !signed}) {
+				data = old
+				fmt.Println("kept", fileName, len(data), "bytes")
+			} else {
+				check(os.WriteFile(path, data, 0o644))
+				fmt.Println("wrote", fileName, len(data), "bytes")
+			}
 			f, err := envelope.Parse(data)
 			check(err)
-			fileName := name + ".gml"
-			check(os.WriteFile(filepath.Join(*out, fileName), data, 0o644))
 			ptSum := sha256.Sum256(pt)
 			bh := sha256.New()
 			nblocks := 0
@@ -141,17 +170,42 @@ func main() {
 			vectors.Files = append(vectors.Files, fileVector{
 				Name: name, File: fileName, Size: s.size, Signed: signed, Kind: uint8(kind),
 				MailboxID: hex.EncodeToString(hdr.MailboxID[:]), Epoch: hdr.Epoch, FileID: hex.EncodeToString(hdr.FileID[:]),
-				Created: hdr.Created, Random: hex.EncodeToString(random), PlaintextSHA: hex.EncodeToString(ptSum[:]),
+				Created: hdr.Created, Version: f.Header.Version, Random: hex.EncodeToString(random), PlaintextSHA: hex.EncodeToString(ptSum[:]),
 				NoncePrefix: hex.EncodeToString(f.Header.NoncePrefix[:]), Blocks: nblocks, BlockSHA256: hex.EncodeToString(bh.Sum(nil)),
 				HeaderBytes: hex.EncodeToString(headerOf(data)),
 			})
-			fmt.Println("wrote", fileName, len(data), "bytes")
 		}
 	}
 	b, err := json.MarshalIndent(vectors, "", " ")
 	check(err)
 	check(os.WriteFile(filepath.Join(*out, "vectors.json"), append(b, '\n'), 0o644))
 	fmt.Println("wrote vectors.json")
+}
+
+// sameVector reports whether the existing file old is still a valid
+// vector for the freshly sealed file fresh: it opens with the vector keys
+// (and signature, if any) and has the same preamble, header and block
+// ciphertexts. Only the recipient section and the trailer may differ;
+// they are not reproducible.
+func sameVector(old, fresh []byte, opts envelope.OpenOptions) bool {
+	fo, _, err := envelope.Open(old, opts)
+	if err != nil {
+		return false
+	}
+	fn, err := envelope.Parse(fresh)
+	if err != nil || len(old) < 6 || !bytes.Equal(old[:6], fresh[:6]) || !bytes.Equal(headerOf(old), headerOf(fresh)) {
+		return false
+	}
+	ob, nb := blocksOf(old, fo), blocksOf(fresh, fn)
+	if len(ob) != len(nb) {
+		return false
+	}
+	for i := range ob {
+		if !bytes.Equal(ob[i], nb[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // headerOf extracts the header record from a file by its length field.

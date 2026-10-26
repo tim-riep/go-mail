@@ -67,7 +67,7 @@ func TestNameAndFoldersTampered(t *testing.T) {
 	e9 := *e1
 	e9.Number = 9
 	plain, _ := store.EncodeMailboxName(f.mbx, "x")
-	sealed, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 9, FileID: f.mbx},
+	sealed, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 9, FileID: f.mbx, Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 9, PublicKey: e1.MetaPub}}, plain, nil)
 	bad.Name = sealed
 	f.env.Store.WriteMailbox(&bad)
@@ -75,7 +75,7 @@ func TestNameAndFoldersTampered(t *testing.T) {
 		t.Fatalf("name of epoch 9: %v", err)
 	}
 	// Unsigned name for epoch 1: no unsigned meta files.
-	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx},
+	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx, Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain, nil)
 	bad.Name = sealed
 	f.env.Store.WriteMailbox(&bad)
@@ -83,7 +83,7 @@ func TestNameAndFoldersTampered(t *testing.T) {
 		t.Fatalf("unsigned name: %v", err)
 	}
 	// Signed by the ingest key: not a member.
-	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx},
+	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx, Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain,
 		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerIngest, Gen: 1, Key: f.env.IngestKey}})
 	bad.Name = sealed
@@ -94,7 +94,7 @@ func TestNameAndFoldersTampered(t *testing.T) {
 	// Signed by a user who is not a member.
 	bob := f.env.NewUser("bob")
 	ks, _ := keys.OpenKeystore(mustRead(t, filepath.Join(bob.Dir, "keystore")), testenv.Passphrase)
-	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx},
+	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx, Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain,
 		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerUser, ID: bob.ID, Gen: 1, Key: ks.Identity}})
 	ks.Zero()
@@ -159,7 +159,7 @@ func TestMailHeaderChecks(t *testing.T) {
 		"other mailbox": mk(envelope.Header{MailboxID: store.ID{1}, Epoch: 1}, false),
 		"other epoch":   mk(envelope.Header{MailboxID: f.mbx, Epoch: 2}, false),
 		"signed mail":   mk(envelope.Header{MailboxID: f.mbx, Epoch: 1}, true),
-		"kind meta":     mk(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1}, false),
+		"kind meta":     mk(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, Version: 1}, false),
 	} {
 		if _, _, err := f.u.Client.Read(f.mbx, id); !errors.Is(err, client.ErrMismatch) {
 			t.Fatalf("%s: %v", name, err)
@@ -179,7 +179,7 @@ func TestMailHeaderChecks(t *testing.T) {
 	id2, _ := store.NewID(nil)
 	m := &store.MailMeta{Version: 1, MailID: id2, Received: at.UnixMilli(), Folder: inbox, Recipients: []string{"a@example.org"}}
 	plain, _ := m.Encode()
-	unsigned, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: id2, Created: at.UnixMilli()},
+	unsigned, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: id2, Created: at.UnixMilli(), Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain, nil)
 	store.WriteFileAtomic(f.env.Store.MetaFile(f.mbx, inbox, id2), unsigned)
 	store.WriteFileAtomic(f.env.Store.MailFile(f.mbx, inbox, id2), []byte("x"))
@@ -187,7 +187,7 @@ func TestMailHeaderChecks(t *testing.T) {
 		t.Fatalf("unsigned metadata: %v", err)
 	}
 	ks, _ := keys.OpenKeystore(mustRead(t, filepath.Join(f.u.Dir, "keystore")), testenv.Passphrase)
-	userSigned, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: id2, Created: at.UnixMilli()},
+	userSigned, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: id2, Created: at.UnixMilli(), Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain,
 		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerUser, ID: f.u.ID, Gen: 1, Key: ks.Identity}})
 	ks.Zero()

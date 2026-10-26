@@ -16,6 +16,15 @@
 // last one with its end flag, has authenticated; on any error nothing is
 // returned.
 //
+// Header field 8 version (3.1, version 1.4) is mandatory and at least 1
+// in a header of kind meta and forbidden in every other kind; the writer
+// and the parser both enforce this. Field 7 created of a meta header is
+// always the time the mail was received, unchanged across all versions of
+// the metadata (3.1). This package cannot check that, because it does not
+// know the mail: the store and the client compare created and version of
+// the header with the received time and version inside the decrypted
+// metadata (section 7; DECISIONS D31 for created in general).
+//
 // No cryptographic primitive is implemented here. HPKE comes from
 // crypto/hpke, AES-GCM from crypto/aes and crypto/cipher, HKDF from
 // crypto/hkdf, X25519 from crypto/ecdh, Ed25519 from crypto/ed25519 via
@@ -76,6 +85,10 @@ const (
 )
 
 // Exported errors. Every error of this package wraps one of them.
+// ErrHeaderVersion (the rule for header field 8) always comes together
+// with ErrHeader, never instead of it; ErrVersion is the format version
+// in the preamble. ErrWrite also wraps the error of the underlying
+// io.Writer, so errors.Is finds both.
 var (
 	ErrMagic           = errors.New("envelope: not a .gml file")
 	ErrVersion         = errors.New("envelope: unsupported format version")
@@ -83,6 +96,7 @@ var (
 	ErrTruncated       = errors.New("envelope: file is truncated")
 	ErrTooLarge        = errors.New("envelope: file or content exceeds the size limit")
 	ErrHeader          = errors.New("envelope: invalid header")
+	ErrHeaderVersion   = errors.New("envelope: header field version violates the rule for its kind")
 	ErrHeaderSize      = errors.New("envelope: header length exceeds the limit")
 	ErrRecipients      = errors.New("envelope: invalid recipient section")
 	ErrRecipientsSize  = errors.New("envelope: recipient section length exceeds the limit")
@@ -102,6 +116,9 @@ var (
 	ErrWrap            = errors.New("envelope: wrapping the file key failed")
 	ErrRandom          = errors.New("envelope: reading randomness failed")
 	ErrClosed          = errors.New("envelope: writer is closed")
+	ErrWrite           = errors.New("envelope: writing the output failed")
+	ErrArgument        = errors.New("envelope: invalid argument")
+	ErrInternal        = errors.New("envelope: internal error")
 )
 
 // Suite identifies the algorithm suite (3.5). The proof of concept knows
@@ -189,10 +206,20 @@ type Header struct {
 	FileID      [16]byte
 	NoncePrefix [7]byte
 	ChunkSize   uint32
-	Created     int64 // milliseconds since 1970 UTC
+	// Created is milliseconds since 1970 UTC. For kind meta it is the
+	// time the mail was received, unchanged across all versions (3.1);
+	// the store and the client check that, not this package.
+	Created int64
+	// Version is header field 8 (3.1, version 1.4), the version counter
+	// of the metadata: required and at least 1 for kind meta, 0 (field
+	// absent) for every other kind. The writer rejects a header that
+	// breaks this rule instead of dropping or inventing a value.
+	Version uint32
 }
 
-// HeaderSchema is the canonical encoding of the header.
+// HeaderSchema is the canonical encoding of the header. Field 8 is
+// optional in the schema; whether it must be present depends on the kind
+// and is checked by checkVersion when encoding and when decoding.
 var HeaderSchema = rec.MustSchema("gomail/v1/rec/header",
 	rec.Field{Num: 1, Name: "kind", Kind: rec.U8, Required: true},
 	rec.Field{Num: 2, Name: "mailbox_id", Kind: rec.Bytes, Size: 16, Required: true},
@@ -201,18 +228,45 @@ var HeaderSchema = rec.MustSchema("gomail/v1/rec/header",
 	rec.Field{Num: 5, Name: "nonce_prefix", Kind: rec.Bytes, Size: 7, Required: true},
 	rec.Field{Num: 6, Name: "chunk_size", Kind: rec.U32, Required: true},
 	rec.Field{Num: 7, Name: "created", Kind: rec.I64, Required: true},
+	rec.Field{Num: 8, Name: "version", Kind: rec.U32},
 )
 
+// checkVersion enforces the rule for header field 8 (3.1, version 1.4):
+// present and at least 1 for kind meta, absent for every other kind, even
+// with the value 0. present says whether the field is in the encoding.
+// The error wraps ErrHeader and ErrHeaderVersion.
+func checkVersion(kind Kind, present bool, version uint32) error {
+	switch {
+	case kind == KindMeta && !present:
+		return fmt.Errorf("%w: %w: kind meta without version", ErrHeader, ErrHeaderVersion)
+	case kind == KindMeta && version == 0:
+		return fmt.Errorf("%w: %w: kind meta with version 0", ErrHeader, ErrHeaderVersion)
+	case kind != KindMeta && present:
+		return fmt.Errorf("%w: %w: kind %d with a version field", ErrHeader, ErrHeaderVersion, kind)
+	}
+	return nil
+}
+
+// encode writes the header record. Field 8 is written for kind meta only.
+// A meta header with Version 0 and a header of another kind with a
+// Version are rejected, so encode never produces a header that Parse
+// would refuse.
 func (h *Header) encode() ([]byte, error) {
-	b, err := rec.New(HeaderSchema).
+	if err := checkVersion(h.Kind, h.Version != 0 || h.Kind == KindMeta, h.Version); err != nil {
+		return nil, err
+	}
+	r := rec.New(HeaderSchema).
 		SetU8(1, uint8(h.Kind)).
 		SetBytes(2, h.MailboxID[:]).
 		SetU32(3, h.Epoch).
 		SetBytes(4, h.FileID[:]).
 		SetBytes(5, h.NoncePrefix[:]).
 		SetU32(6, h.ChunkSize).
-		SetI64(7, h.Created).
-		Encode()
+		SetI64(7, h.Created)
+	if h.Kind == KindMeta {
+		r.SetU32(8, h.Version)
+	}
+	b, err := r.Encode()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHeader, err)
 	}
@@ -233,6 +287,12 @@ func decodeHeader(data []byte) (Header, error) {
 	}
 	if h.ChunkSize != ChunkSize {
 		return Header{}, fmt.Errorf("%w: chunk size %d", ErrHeader, h.ChunkSize)
+	}
+	if r.Has(8) {
+		h.Version = r.U32(8)
+	}
+	if err := checkVersion(h.Kind, r.Has(8), h.Version); err != nil {
+		return Header{}, err
 	}
 	return h, nil
 }
@@ -368,6 +428,16 @@ func decodeTrailer(data []byte) (*Trailer, error) {
 // type bytes and length fields), the signer, and optional kind-specific
 // fields supplied by the caller as an embedded canonical record. The
 // signature domain is "gomail/v1/sig/<kind>".
+//
+// Header field 8 leaves this structure unchanged. For kind meta the
+// caller's extra is the record meta-signed of section 7 (mailbox,
+// epoch, file_id, created, version, hash of the mail file). Since
+// version 1.4 every one of these values comes from the plaintext header
+// of the metadata file (mailbox_id, epoch, file_id, created, version) or
+// is a hash over ciphertext (the mail file; file_hash here covers the
+// metadata file itself), so the server, too, can rebuild the signed
+// structure and verify the signature without any key (section 7, "Was
+// die Ingest-Signatur aussagt").
 var SignedSchema = rec.MustSchema("gomail/v1/rec/signed",
 	rec.Field{Num: 1, Name: "file_hash", Kind: rec.Bytes, Size: sha256.Size, Required: true},
 	rec.Field{Num: 2, Name: "signer_type", Kind: rec.U8, Required: true},

@@ -57,8 +57,18 @@ func fixedRand(seed byte) io.Reader {
 	return bytes.NewReader(b)
 }
 
+// testMetaVersion is header field 8 of every meta header built by
+// testHeader. It is not 1 on purpose: flipping its lowest bit gives
+// another valid version, so a test that flips the last header byte
+// reaches the signature check instead of the parser's field 8 rule.
+const testMetaVersion = 3
+
 func testHeader(kind Kind) Header {
-	return Header{Kind: kind, MailboxID: id16("mailbox"), Epoch: 7, FileID: id16("file"), Created: 1761400000000}
+	h := Header{Kind: kind, MailboxID: id16("mailbox"), Epoch: 7, FileID: id16("file"), Created: 1761400000000}
+	if kind == KindMeta {
+		h.Version = testMetaVersion
+	}
+	return h
 }
 
 var (
@@ -181,7 +191,7 @@ func TestHeaderFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Suite != Suite1 || f.Header.Kind != KindMeta || f.Header.MailboxID != hdr.MailboxID || f.Header.Epoch != 7 || f.Header.FileID != hdr.FileID || f.Header.ChunkSize != ChunkSize || f.Header.Created != hdr.Created {
+	if f.Suite != Suite1 || f.Header.Kind != KindMeta || f.Header.MailboxID != hdr.MailboxID || f.Header.Epoch != 7 || f.Header.FileID != hdr.FileID || f.Header.ChunkSize != ChunkSize || f.Header.Created != hdr.Created || f.Header.Version != testMetaVersion {
 		t.Fatalf("header differs: %+v", f.Header)
 	}
 	if f.Header.NoncePrefix == ([7]byte{}) {
@@ -370,8 +380,8 @@ func TestSealRejects(t *testing.T) {
 			}
 		})
 	}
-	if _, err := NewWriter(nil, testHeader(KindMail), []Recipient{r}, nil); err == nil {
-		t.Fatal("nil writer must be rejected")
+	if _, err := NewWriter(nil, testHeader(KindMail), []Recipient{r}, nil); !errors.Is(err, ErrArgument) {
+		t.Fatalf("nil writer must be rejected with ErrArgument, got %v", err)
 	}
 }
 

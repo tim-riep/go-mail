@@ -14,9 +14,12 @@ import (
 	"time"
 )
 
-// Limits of 5.1 (DECISIONS D54 for the units).
+// Limits of 5.1 (DECISIONS D54 for the units). The maximum message size
+// is 25 MiB as specified in 5.1 since version 1.3 (26,214,400 bytes,
+// advertised as SIZE). The other units stay decimal: 1,000,000 bytes for
+// the header (5.2) and 1,000 bytes per second for the minimum rate (D54).
 const (
-	DefaultMaxSize        = 25_000_000 // bytes, advertised as SIZE
+	DefaultMaxSize        = 26_214_400 // bytes, 25 MiB, advertised as SIZE
 	DefaultMaxRecipients  = 100
 	MaxLineLen            = 1000 // octets including CRLF (RFC 5321 4.5.3.1.6)
 	DefaultCommandTimeout = 5 * time.Minute

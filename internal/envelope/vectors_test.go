@@ -30,6 +30,7 @@ type vectorFile struct {
 		Epoch        uint32 `json:"epoch"`
 		FileID       string `json:"file_id"`
 		Created      int64  `json:"created"`
+		Version      uint32 `json:"version"`
 		Random       string `json:"random"`
 		PlaintextSHA string `json:"plaintext_sha256"`
 		NoncePrefix  string `json:"nonce_prefix"`
@@ -97,7 +98,7 @@ func TestVectors(t *testing.T) {
 			if !bytes.Equal(pt, pattern(fv.Size)) {
 				t.Fatal("plaintext is not the documented pattern")
 			}
-			if uint8(f.Header.Kind) != fv.Kind || f.Header.Epoch != fv.Epoch || f.Header.Created != fv.Created ||
+			if uint8(f.Header.Kind) != fv.Kind || f.Header.Epoch != fv.Epoch || f.Header.Created != fv.Created || f.Header.Version != fv.Version ||
 				hex.EncodeToString(f.Header.MailboxID[:]) != fv.MailboxID || hex.EncodeToString(f.Header.FileID[:]) != fv.FileID ||
 				hex.EncodeToString(f.Header.NoncePrefix[:]) != fv.NoncePrefix {
 				t.Fatalf("header differs: %+v", f.Header)
@@ -130,7 +131,7 @@ func TestVectors(t *testing.T) {
 				sealOpts.Signer = &Signer{Type: SignerIngest, Gen: v.SignerGen, Key: ed25519.NewKeyFromSeed(unhex(t, v.SignerSeed))}
 				copy(sealOpts.Signer.ID[:], unhex(t, v.SignerID))
 			}
-			hdr := Header{Kind: Kind(fv.Kind), Epoch: fv.Epoch, Created: fv.Created}
+			hdr := Header{Kind: Kind(fv.Kind), Epoch: fv.Epoch, Created: fv.Created, Version: fv.Version}
 			copy(hdr.MailboxID[:], unhex(t, fv.MailboxID))
 			copy(hdr.FileID[:], unhex(t, fv.FileID))
 			again, err := Seal(hdr, []Recipient{{Type: key.Type, ID: key.ID, Gen: key.Gen, PublicKey: key.PrivateKey.PublicKey()}}, pt, &sealOpts)

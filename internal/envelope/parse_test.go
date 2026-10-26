@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -223,6 +224,38 @@ func TestParseTooManyBlocksAndTooLarge(t *testing.T) {
 	if _, err := Parse(q.build()); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("801 blocks: %v", err)
 	}
+	// 801 full blocks already exceed MaxFileSize, so the case above does
+	// not reach the block count. 800 full ElemBlock elements and a short
+	// ElemLastBlock stay below MaxFileSize and must fail at the rule "at
+	// most 800 blocks" (3.3, rule 2); 799 full blocks and the same last
+	// block are structurally fine.
+	short := make([]byte, TagSize+1)
+	for _, tc := range []struct {
+		full int
+		ok   bool
+	}{{MaxBlocks - 1, true}, {MaxBlocks, false}} {
+		q := p.with(func(p *parts) {
+			p.blocks = make([][]byte, 0, tc.full+1)
+			for i := 0; i < tc.full; i++ {
+				p.blocks = append(p.blocks, full)
+			}
+			p.blocks = append(p.blocks, short)
+		})
+		data := q.build()
+		if len(data) > MaxFileSize {
+			t.Fatalf("%d full blocks and a short one: %d bytes exceed MaxFileSize %d", tc.full, len(data), MaxFileSize)
+		}
+		f, err := Parse(data)
+		if tc.ok {
+			if err != nil || len(f.blocks) != MaxBlocks {
+				t.Fatalf("%d full blocks and a short one: %v", tc.full, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrTooLarge) || f != nil {
+			t.Fatalf("%d full blocks and a short one: %v", tc.full, err)
+		}
+	}
 	big := make([]byte, MaxFileSize+1)
 	copy(big, "GOML\x01\x01")
 	if _, err := Parse(big); !errors.Is(err, ErrTooLarge) {
@@ -316,7 +349,8 @@ func TestDecryptRejectsHeaderAndRecipientManipulation(t *testing.T) {
 		{"mailbox id changed", reHeader(func(h *Header) { h.MailboxID[0] ^= 1 }), ErrUnwrap},
 		{"epoch changed", reHeader(func(h *Header) { h.Epoch++ }), ErrUnwrap},
 		{"file id changed", reHeader(func(h *Header) { h.FileID[15] ^= 1 }), ErrUnwrap},
-		{"kind changed", reHeader(func(h *Header) { h.Kind = KindMeta }), ErrUnwrap},
+		{"kind changed", reHeader(func(h *Header) { h.Kind = KindMeta; h.Version = 1 }), ErrUnwrap},
+		{"kind changed to pending", reHeader(func(h *Header) { h.Kind = KindPending }), ErrUnwrap},
 		{"created changed", reHeader(func(h *Header) { h.Created++ }), ErrUnwrap},
 		{"nonce prefix changed", reHeader(func(h *Header) { h.NoncePrefix[3] ^= 1 }), ErrUnwrap},
 		{"header of A with blocks of B", pa.with(func(p *parts) { p.blocks = pb.blocks }), ErrDecrypt},
@@ -418,6 +452,78 @@ func TestSignatureNegatives(t *testing.T) {
 	fu, _ := Parse(seal(t, testHeader(KindMail), nil, false))
 	if err := fu.VerifySignature(nil, nil); !errors.Is(err, ErrUnsigned) {
 		t.Fatal("unsigned file must report ErrUnsigned")
+	}
+}
+
+// TestSignerFieldsAreSigned: signer_type, signer_id and signer_gen of the
+// trailer are part of the signed structure (3.4). The resolver here
+// returns the same public key for both signer types, two IDs and two
+// generations, so a relabelled trailer passes the resolver and only the
+// signature can catch it: the error must be ErrSignature, not ErrSigner.
+func TestSignerFieldsAreSigned(t *testing.T) {
+	idA, idB := id16("signer a"), id16("signer b")
+	key := edKey("shared signer")
+	pub := key.Public().(ed25519.PublicKey)
+	resolve := func(ref SignerRef) (ed25519.PublicKey, error) {
+		if (ref.Type == SignerIngest || ref.Type == SignerUser) && (ref.ID == idA || ref.ID == idB) && (ref.Gen == 1 || ref.Gen == 2) {
+			return pub, nil
+		}
+		return nil, errors.New("unknown signer")
+	}
+	opts := OpenOptions{ExpectedSuite: Suite1, Key: testRecipientKey(t), ResolveSigner: resolve}
+	orig := SignerRef{Type: SignerIngest, ID: idA, Gen: 1}
+	data, err := Seal(testHeader(KindMeta), []Recipient{testRecipient(t)}, pattern(10),
+		&SealOptions{Rand: fixedRand(1), Signer: &Signer{Type: orig.Type, ID: orig.ID, Gen: orig.Gen, Key: key}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(data, opts); err != nil {
+		t.Fatalf("original file: %v", err)
+	}
+	f, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relabel := func(ref SignerRef) []byte {
+		tb, err := (&Trailer{Signer: ref, Signature: f.Trailer.Signature}).encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := append([]byte(nil), data[:f.trailerOffset]...)
+		return append(out, element(ElemTrailer, tb)...)
+	}
+	for name, ref := range map[string]SignerRef{
+		"signer_gen":          {Type: SignerIngest, ID: idA, Gen: 2},
+		"signer_type":         {Type: SignerUser, ID: idA, Gen: 1},
+		"signer_id":           {Type: SignerIngest, ID: idB, Gen: 1},
+		"type, id and gen":    {Type: SignerUser, ID: idB, Gen: 2},
+		"type and generation": {Type: SignerUser, ID: idA, Gen: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forged := relabel(ref)
+			if _, err := resolve(ref); err != nil {
+				t.Fatal("the resolver must accept the relabelled signer")
+			}
+			ff, pt, err := Open(forged, opts)
+			if !errors.Is(err, ErrSignature) || errors.Is(err, ErrSigner) || ff != nil || pt != nil {
+				t.Fatalf("relabelled %s: expected ErrSignature only, got %v", name, err)
+			}
+			pf, err := Parse(forged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pf.Trailer.Signer != ref {
+				t.Fatal("trailer not relabelled")
+			}
+			if err := pf.VerifySignature(pub, nil); !errors.Is(err, ErrSignature) {
+				t.Fatalf("VerifySignature of relabelled %s: %v", name, err)
+			}
+		})
+	}
+	// Sanity: relabelling to the original values gives back a file that
+	// opens, so the rejections above come from the changed field alone.
+	if _, _, err := Open(relabel(orig), opts); err != nil {
+		t.Fatalf("trailer rebuilt unchanged: %v", err)
 	}
 }
 

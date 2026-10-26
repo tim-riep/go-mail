@@ -28,16 +28,18 @@ func (w *failingWriter) Write(p []byte) (int, error) {
 func TestWriterOutputErrors(t *testing.T) {
 	boom := errors.New("disk full")
 	// Failure while writing the head.
-	if _, err := NewWriter(&failingWriter{n: 10, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, nil); !errors.Is(err, boom) {
-		t.Fatalf("expected the writer's error, got %v", err)
+	// Every failure of the output wraps ErrWrite and the writer's own
+	// error.
+	if _, err := NewWriter(&failingWriter{n: 10, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, nil); !errors.Is(err, boom) || !errors.Is(err, ErrWrite) {
+		t.Fatalf("expected ErrWrite and the writer's error, got %v", err)
 	}
 	// Failure while writing a block: Write reports it, Close repeats it.
 	w, err := NewWriter(&failingWriter{n: 1000, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, &SealOptions{Signer: testSigner()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Write(make([]byte, 2*ChunkSize)); !errors.Is(err, boom) {
-		t.Fatalf("expected the writer's error, got %v", err)
+	if _, err := w.Write(make([]byte, 2*ChunkSize)); !errors.Is(err, boom) || !errors.Is(err, ErrWrite) {
+		t.Fatalf("expected ErrWrite and the writer's error, got %v", err)
 	}
 	if _, err := w.Write([]byte("x")); !errors.Is(err, boom) {
 		t.Fatal("writer must stay failed")
@@ -56,8 +58,8 @@ func TestWriterOutputErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.Write([]byte("short"))
-		if err := w.Close(); !errors.Is(err, boom) {
-			t.Fatalf("n=%d: expected the writer's error, got %v", n, err)
+		if err := w.Close(); !errors.Is(err, boom) || !errors.Is(err, ErrWrite) {
+			t.Fatalf("n=%d: expected ErrWrite and the writer's error, got %v", n, err)
 		}
 	}
 }

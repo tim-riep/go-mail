@@ -93,7 +93,7 @@ func (f *fixture) writeMeta(t *testing.T, e *store.Epoch, id, folder store.ID, m
 	m := &store.MailMeta{Version: version, MailID: id, Received: ms, MailHash: hash, Size: 1, Folder: folder, Recipients: []string{"a@example.org"}, Subject: "forged"}
 	plain, _ := m.Encode()
 	extra, _ := m.SignedExtra(f.mbx, e.Number)
-	meta, err := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: e.Number, FileID: id, Created: ms},
+	meta, err := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: e.Number, FileID: id, Created: ms, Version: version},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: e.Number, PublicKey: e.MetaPub}}, plain,
 		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerIngest, Gen: gen, Key: key, Extra: extra}})
 	if err != nil {
@@ -415,5 +415,81 @@ func (f *fixture) deliver2(t *testing.T) {
 	d.Write([]byte("Subject: hidden\r\n\r\nx\r\n"))
 	if err := d.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestMetaHeaderVersionDiffersFromContent: the header says version 2, the
+// encrypted metadata say version 1, and the signature (over the header
+// values and the extra of the content) is valid. The client must compare
+// the version inside the metadata with the header (section 7) and refuse
+// the mail, with a warning that carries no content.
+func TestMetaHeaderVersionDiffersFromContent(t *testing.T) {
+	f := newFixture(t)
+	e, _, _ := f.env.Store.ReadEpoch(f.mbx, 1)
+	id, _ := store.NewID(nil)
+	inbox := f.inbox(t)
+	ms := testenv.Start.Add(time.Minute).UnixMilli()
+	mail, err := envelope.Seal(envelope.Header{Kind: envelope.KindMail, MailboxID: f.mbx, Epoch: e.Number, FileID: id, Created: ms},
+		[]envelope.Recipient{{Type: envelope.RecipientEpochContent, ID: f.mbx, Gen: e.Number, PublicKey: e.ContentPub}}, []byte("hello"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "version-mismatch-subject"
+	m := &store.MailMeta{Version: 1, MailID: id, Received: ms, MailHash: sha256.Sum256(mail), Size: 1, Folder: inbox,
+		Recipients: []string{"a@example.org"}, Subject: secret}
+	plain, err := m.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra, err := m.SignedExtra(f.mbx, e.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: e.Number, FileID: id, Created: ms, Version: 2},
+		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: e.Number, PublicKey: e.MetaPub}}, plain,
+		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerIngest, Gen: 1, Key: f.env.IngestKey, Extra: extra}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The forged file is validly signed: the mismatch alone must reject it.
+	pf, err := envelope.Parse(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pf.VerifySignature(f.env.IngestKey.Public().(ed25519.PublicKey), extra); err != nil {
+		t.Fatalf("forged metadata not validly signed: %v", err)
+	}
+	store.MkdirAll(f.env.Store.MailDir(f.mbx, inbox))
+	store.WriteFileAtomic(f.env.Store.MetaFile(f.mbx, inbox, id), meta)
+	store.WriteFileAtomic(f.env.Store.MailFile(f.mbx, inbox, id), mail)
+
+	f.env.Warnings.Take()
+	list, err := f.u.Client.List(f.mbx, store.ID{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range list {
+		if l.ID == id {
+			t.Fatal("mail with header version 2 and content version 1 listed")
+		}
+	}
+	warnings := f.env.Warnings.Take()
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, secret) {
+			t.Fatalf("warning carries metadata content: %q", w)
+		}
+		if strings.Contains(w, id.String()) && strings.Contains(w, "wird nicht verarbeitet") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no warning for the version mismatch: %q", warnings)
+	}
+	if _, _, err := f.u.Client.Read(f.mbx, id); !errors.Is(err, client.ErrMismatch) {
+		t.Fatalf("version mismatch: %v", err)
+	}
+	if warned(f.env, secret) {
+		t.Fatal("warning of Read carries metadata content")
 	}
 }

@@ -211,14 +211,14 @@ func TestProtocolErrors(t *testing.T) {
 	c.cmd("DATA", 503)
 	c.cmd("EHLO", 501)
 	text := c.cmd("EHLO me.example", 250)
-	if !strings.Contains(text, "SIZE 25000000") {
+	if !strings.Contains(text, "SIZE 26214400") {
 		t.Fatalf("EHLO does not advertise SIZE: %q", text)
 	}
 	c.cmd("HELO me.example", 250)
 	c.cmd("DATA", 503) // DATA before RCPT TO
 	c.cmd("RCPT TO:<info@x.example>", 503)
 	c.cmd("MAIL FROM:s@x.example", 501)
-	c.cmd("MAIL FROM:<s@x.example> SIZE=25000001", 552)
+	c.cmd("MAIL FROM:<s@x.example> SIZE=26214401", 552)
 	c.cmd("MAIL FROM:<s@x.example> SIZE=x", 501)
 	c.cmd("MAIL FROM:<s@x.example> FOO=1", 555)
 	c.cmd("MAIL FROM:<s@x.example> BODY=BINARY", 501)
@@ -331,6 +331,53 @@ func TestSizeLimitDuringData(t *testing.T) {
 	c.cmd("NOOP", 250)
 	if len(b.messages()) != 0 || b.aborted != 1 {
 		t.Fatal("oversized message delivered")
+	}
+}
+
+// TestDefaultMaxSize: the default limit is 25 MiB (5.1, version 1.3),
+// advertised as SIZE 26214400; a message of exactly that many bytes
+// (after dot-unstuffing, with CRLF) is delivered, one byte more is not.
+func TestDefaultMaxSize(t *testing.T) {
+	if DefaultMaxSize != 25<<20 {
+		t.Fatalf("DefaultMaxSize = %d, want 25 MiB", DefaultMaxSize)
+	}
+	b := newFake("info@x.example")
+	_, addr := startServer(t, Config{}, b)
+	c := dial(t, addr)
+	if text := c.cmd("EHLO me.example", 250); !strings.Contains(text, "250-SIZE 26214400\r\n") {
+		t.Fatalf("EHLO does not advertise 25 MiB: %q", text)
+	}
+	c.cmd("MAIL FROM:<s@x.example> SIZE=26214400", 250)
+	c.cmd("RSET", 250)
+	c.cmd("MAIL FROM:<s@x.example> SIZE=26214401", 552)
+
+	// message returns size bytes of data lines of at most 1000 octets
+	// including CRLF.
+	message := func(size int) string {
+		line := strings.Repeat("x", 998) + "\r\n"
+		var m strings.Builder
+		for ; size >= len(line); size -= len(line) {
+			m.WriteString(line)
+		}
+		m.WriteString(strings.Repeat("x", size-2) + "\r\n")
+		return m.String()
+	}
+	for _, tc := range []struct {
+		size int
+		code int
+	}{{DefaultMaxSize, 250}, {DefaultMaxSize + 1, 552}} {
+		c.begin("info@x.example")
+		c.send(message(tc.size))
+		c.send(".\r\n")
+		c.expect(tc.code)
+	}
+	msgs := b.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("%d messages delivered, want 1", len(msgs))
+	}
+	// The delivery is the Received header followed by the data, intact.
+	if !strings.HasSuffix(string(msgs[0]), message(DefaultMaxSize)) || !strings.HasPrefix(string(msgs[0]), "Received:") {
+		t.Fatal("the message of exactly 25 MiB was not delivered intact")
 	}
 }
 

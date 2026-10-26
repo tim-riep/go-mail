@@ -121,7 +121,7 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if err := f.VerifySignature(ik.pub, extra); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSigner, err)
 	}
-	if m.MailID != id || m.Folder != folder || m.Received != h.Created {
+	if m.MailID != id || m.Folder != folder || m.Received != h.Created || m.Version != h.Version {
 		return nil, fmt.Errorf("%w: metadata fields", ErrMismatch)
 	}
 	if m.Received < ik.validFrom {
