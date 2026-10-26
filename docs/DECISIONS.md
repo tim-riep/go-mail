@@ -1,6 +1,8 @@
-# Entscheidungen in Phase 0
+# Entscheidungen in Phase 0 und 0.1
 
-Die Spezifikation liegt in `docs/PLAN.md`. Dieses Dokument hält jede Stelle fest, an der sie mehrdeutig ist oder etwas offen lässt, und welche Entscheidung die Umsetzung getroffen hat. Grundsatz: im Zweifel die konservativere Lesart, keine erfundenen Anforderungen. Widersprüche und Lücken, die eine Änderung der Spezifikation nahelegen, stehen zusätzlich in `docs/SPEC-ISSUES.md`.
+Die Spezifikation liegt in `docs/PLAN.md` (Version 1.0). Dieses Dokument hält jede Stelle fest, an der sie mehrdeutig ist oder etwas offen lässt, und welche Entscheidung die Umsetzung getroffen hat. Grundsatz: im Zweifel die konservativere Lesart, keine erfundenen Anforderungen. Widersprüche und Lücken, die eine Änderung der Spezifikation nahelegen, stehen zusätzlich in `docs/SPEC-ISSUES.md`.
+
+Phase 0.1 setzt die Änderungen der Version 1.1 um, soweit der Auftrag sie benennt (Elementrahmen, Empfängertyp 4, höchstens vier Empfänger, NFC über `golang.org/x/text`). Der Text der Version 1.1 (`docs/spec.md`) lag bei der Umsetzung nicht vor; Einträge, die davon abhängen, sind als Annahme gekennzeichnet (D42 bis D44) und gegen den Text zu prüfen, sobald er im Repository liegt. Aufgehobene Entscheidungen bleiben als Verlauf stehen und sind mit "Aufgehoben in Phase 0.1" und dem Commit markiert.
 
 Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung.
 
@@ -57,12 +59,14 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Begründung: Phase 0 braucht genau diese; nichts erfinden.
 
 ### D09 NFC-Prüfung ohne `golang.org/x/text`
+- Aufgehoben in Phase 0.1 (Commit 4ee0b90): Version 1.1 lässt `golang.org/x/text` zu (S02). Die eigenen Tabellen und der Generator sind entfernt; `isNFC` ist `utf8.ValidString` gefolgt von `norm.NFC.IsNormalString`. Die UTF-8-Prüfung bleibt getrennt, weil `x/text` ungültige Bytes als normalisiert meldet. `x/text` ist in `go.mod` auf v0.43.0 festgelegt (Unicode 15.0.0, dieselbe Version wie die entfernten Tabellen). Alle NFC-Testfälle aus Phase 0 bleiben bestehen.
 - Stelle: 3.6 Regel 3 und 6; Auftrag erlaubt nur Standardbibliothek und `x/crypto`.
 - Frage: Die Standardbibliothek hat keine Unicode-Normalisierung. Wie wird NFC geprüft?
 - Entscheidung: Exakte Prüfung mit eigenen Tabellen aus der Unicode Character Database 15.0.0 (dieselbe Version wie `unicode.Version` von Go 1.26): vollständige kanonische Dekomposition, kanonische Umordnung, kanonische Komposition nach UAX #15, dann Vergleich mit der Eingabe. `NFC_Quick_Check` dient nur als Abkürzung. Der Generator `internal/rec/nfc_tables_gen.go` erzeugt die Tabellen; die SHA-256 der Eingabedateien stehen in `nfc_tables.go`. Die Umsetzung wurde gegen Pythons `unicodedata` mit 200.000 Zufallsstrings abgeglichen (keine Abweichung). Ein Test schlägt fehl, wenn die Unicode-Version der Werkzeugkette von der der Tabellen abweicht.
 - Begründung: Die Spezifikation verlangt die Ablehnung nicht normalisierter Zeichenketten; eine Näherung (nur Quick Check) würde gültige Strings ablehnen oder ungültige durchlassen. Siehe SPEC-ISSUES S02.
 
 ### D10 Quelle der Unicode-Daten
+- Aufgehoben in Phase 0.1 (Commit 4ee0b90) zusammen mit D09; die Unicode-Daten kommen jetzt aus `golang.org/x/text`.
 - Stelle: wie D09.
 - Frage: `unicode.org` war aus der Umgebung nicht erreichbar.
 - Entscheidung: Die Dateien `UnicodeData.txt` und `DerivedNormalizationProps.txt` der Version 15.0.0 stammen aus dem ICU-Repository auf GitHub (`unicode-org/icu`, Tag `release-73-2`, Verzeichnis `icu4c/source/data/unidata`), das die offiziellen Dateien unverändert enthält. Ihre Hashes sind im generierten Code vermerkt, damit ein Prüfer sie gegen `unicode.org` vergleichen kann.
@@ -176,6 +180,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 ## envelope (Spezifikation 3)
 
 ### D29 Erkennung des Trailers
+- Aufgehoben in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (S01); siehe D42. Die Regel "Längenfeld gleich Restlänge" ist vollständig entfernt.
 - Stelle: 3.1 Aufbau, Blöcke `Länge || Chiffrat`, dann `Länge Trailer || Trailer`.
 - Frage: Ohne Schlüssel kann ein Parser nicht wissen, welcher Block der letzte ist (das Flag steckt im Nonce). Nach einem vollen Block könnte das nächste Längenfeld ein Block oder der Trailer sein.
 - Entscheidung: Ein Längenfeld, dessen Wert genau der Zahl der verbleibenden Bytes entspricht, ist die Trailer-Länge. Ein Block kann diese Bedingung nie erfüllen, weil nach ihm mindestens die 4 Byte der Trailer-Länge folgen. Dafür muss die gesamte Datei vorliegen; `Parse` arbeitet auf einem Byte-Slice. Zusätzlich gilt strukturell: nur der letzte Block darf kürzer als `chunk_size + 16` sein, ein leerer Block (nur Tag) ist nur als einziger Block zulässig, mindestens ein Block ist Pflicht.
@@ -192,8 +197,9 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Begründung: Keine Vorgabe; die Bewertung gehört zur Ablage und zur Epochenkette.
 
 ### D32 Empfängerteil: Anzahl und Eindeutigkeit
+- Geändert in Phase 0.1 (Commit 53b92a0): 1 bis 4 Einträge, Typ 1 bis 4 (4 = `recovery`, Wiederherstellungsempfänger), nach Version 1.1 (S09, S12). Die Schemagrenze `MaxCount` und die Prüfung in `NewWriter` sind auf 4 gesetzt; ein fünfter Eintrag wird beim Schreiben und beim Lesen abgelehnt. `MaxRecipientsSize` bleibt 16 KiB (vier Einträge der Suite 2 mit 1.120 Byte Kapselung passen hinein).
 - Stelle: 3.1, "Liste von 1 bis 32 Einträgen".
-- Entscheidung: 1 bis 32 Einträge, Typ 1 bis 3, Generation >= 1, kein doppeltes Tripel (Typ, ID, Generation). Beim Öffnen wird genau der Eintrag benutzt, der zum eigenen Tripel passt; fehlt er, `ErrNoRecipient` ohne Entschlüsselungsversuch; schlägt sein Entpacken fehl, wird die Datei abgelehnt.
+- Entscheidung (Phase 0): 1 bis 32 Einträge, Typ 1 bis 3, Generation >= 1, kein doppeltes Tripel (Typ, ID, Generation). Beim Öffnen wird genau der Eintrag benutzt, der zum eigenen Tripel passt; fehlt er, `ErrNoRecipient` ohne Entschlüsselungsversuch; schlägt sein Entpacken fehl, wird die Datei abgelehnt.
 - Begründung: 3.2 verlangt das Überspringen fremder Einträge ohne Versuch; ein doppeltes Tripel hätte keine sinnvolle Bedeutung.
 
 ### D33 Kodierung von `info` und AAD beim Verpacken
@@ -209,13 +215,13 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 
 ### D35 Größen
 - Stelle: 3.3 Regel 2, "50 MB, also höchstens 800 Blöcke".
-- Entscheidung: Höchstens 800 Blöcke, also 52.428.800 Byte (50 MiB) Inhalt. `MaxFileSize` ergibt sich aus den Höchstwerten aller Teile (52.466.322 Byte). Der Trailer ist auf 1 KiB begrenzt (der Trailer der Suite 1 hat 127 Byte).
+- Entscheidung: Höchstens 800 Blöcke, also 52.428.800 Byte (50 MiB) Inhalt. `MaxFileSize` ergibt sich aus den Höchstwerten aller Teile (Phase 0: 52.466.322 Byte; seit Phase 0.1 mit Typbyte je Element 52.467.123 Byte). Der Trailer ist auf 1 KiB begrenzt (der Trailer der Suite 1 hat 127 Byte).
 - Begründung: 800 Blöcke sind die präzise Zahl; siehe SPEC-ISSUES S10.
 
 ### D36 Signatur: Domäne und signierte Struktur
 - Stelle: 3.4, `sig = Ed25519("gomail/v1/sig/" || kind || 0x00 || kanonische Struktur)`; "enthält immer den SHA-256 über Präambel, Kopf, Empfängerteil und alle Blöcke, je nach Dateiart weitere Felder (siehe 7)".
 - Frage: Ist `kind` die Zahl oder der Name? Welche Bytes gehen in den Hash? Wie kommen die Felder aus Abschnitt 7 hinein?
-- Entscheidung: `kind` ist der Name (`mail`, `meta`, `pending`, `wrap`, `index`), also etwa `"gomail/v1/sig/meta" || 0x00`. Der Hash läuft über die Dateibytes von Offset 0 bis vor das Trailer-Längenfeld, also inklusive der Längenfelder von Kopf, Empfängerteil und Blöcken. Die signierte Struktur ist der Datensatz `gomail/v1/rec/signed` mit `file_hash`, `signer_type`, `signer_id`, `signer_gen` und optional `extra`: ein vom Aufrufer kanonisch kodierter Datensatz mit den dateiartspezifischen Feldern aus Abschnitt 7 (Phase 3 legt ihn für Metadaten fest). Der Prüfer muss dasselbe `extra` übergeben.
+- Entscheidung: `kind` ist der Name (`mail`, `meta`, `pending`, `wrap`, `index`), also etwa `"gomail/v1/sig/meta" || 0x00`. Der Hash läuft über die Dateibytes von Offset 0 bis vor das Trailer-Element (Phase 0: bis vor das Trailer-Längenfeld), also inklusive der Längenfelder von Kopf und Empfängerteil und der Typbytes und Längenfelder aller Blöcke (3.4, Version 1.1; Commit 53b92a0). Bei einer unsignierten Datei liefert `FileHash` damit den Hash der ganzen Datei. Die signierte Struktur ist der Datensatz `gomail/v1/rec/signed` mit `file_hash`, `signer_type`, `signer_id`, `signer_gen` und optional `extra`: ein vom Aufrufer kanonisch kodierter Datensatz mit den dateiartspezifischen Feldern aus Abschnitt 7 (Phase 3 legt ihn für Metadaten fest). Der Prüfer muss dasselbe `extra` übergeben.
 - Begründung: Der Name liest sich wie die anderen Labels; beides wäre eindeutig. Die Signer-Felder in der Struktur binden den Trailer an den Schlüssel. `extra` hält die Schnittstelle offen, ohne Felder zu erfinden. Siehe SPEC-ISSUES S04.
 
 ### D37 Signaturpolitik beim Öffnen
@@ -242,3 +248,27 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Frage: Anhang A des RFC enthält für X25519 nur AES-128-GCM und ChaCha20-Poly1305.
 - Entscheidung: Verwendet wird der Vektor für DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM, Base-Modus aus der vom RFC referenzierten vollständigen Sammlung (`cfrg/draft-irtf-cfrg-hpke`, `test-vectors.json`), beschränkt auf die ersten zehn Verschlüsselungen und alle Exporte. Quelle steht in der Datei und im Test. Geprüft werden die Ableitung des Empfängerschlüssels, das Öffnen der Kapselung und der Verschlüsselungen, die Exporte, der Pfad über `crypto/ecdh` und die Ablehnung von Punkten kleiner Ordnung auf beiden Seiten.
 - Begründung: Einziger offizieller Vektor für genau diese Suite.
+
+## Phase 0.1 (Version 1.1)
+
+### D42 Elementrahmen nach dem Empfängerteil
+- Stelle: 3.1 (Version 1.1), Elemente mit Typbyte; Auftrag Phase 0.1 Punkt 1.
+- Frage: Der Auftrag nennt die Typbytes (`0x01` Block, `0x02` letzter Block, `0x03` Trailer) und die zulässige Folge `0x01*, 0x02, 0x03?`, nicht aber die Bytefolge innerhalb eines Elements; `docs/spec.md` lag nicht vor.
+- Entscheidung: Ein Element ist `Typbyte (1) || Länge uint32 Big Endian (4) || Inhalt`. Der Parser nimmt genau die Folge `ElemBlock* ElemLastBlock ElemTrailer?` und danach das Dateiende an. Jeder `ElemBlock` ist ein voller Block (`chunk_size + 16`), der `ElemLastBlock` ist 16 bis `chunk_size + 16` Byte groß und nur als einziger Block leer. Abgelehnt werden: fehlender `0x02` (Dateiende oder Trailer nach `0x01`-Blöcken: `ErrTruncated` bzw. `ErrElement`), zwei `0x02`, `0x01` nach `0x02`, zwei Trailer, jedes andere Typbyte (`ErrElementType`), jedes Byte nach dem Trailer (`ErrElement`, vor dem Lesen des Längenfelds). Eine unsignierte Datei endet mit dem `0x02`-Element; es gibt kein Trailer-Längenfeld 0 mehr. Die Übereinstimmung von Typbyte und Letzter-Block-Flag im Nonce prüft die Authentifizierung: Der Entschlüsseler setzt das Flag aus dem Typbyte, ein Block mit dem jeweils anderen Flag authentifiziert nicht (`TestElementTypeMatchesNonceFlag`). `MaxFileSize` enthält 5 Byte Rahmen je Element.
+- Begründung: Typbyte vor der Länge entspricht dem Aufbau der übrigen Teile (Kennung, dann Länge). Die Folge ist ohne Schlüssel und streamend prüfbar; jede Abweichung wird vor jeder Entschlüsselung abgelehnt. Annahme, gegen 3.1 der Version 1.1 zu prüfen.
+
+### D43 Empfängertyp 4 und Höchstzahl 4
+- Stelle: 3.1 (Version 1.1); Auftrag Phase 0.1 Punkt 2.
+- Entscheidung: `RecipientRecovery = 4`; Typen 1 bis 4 gültig, höchstens vier Einträge (siehe D32). Für Typ 4 gelten dieselben Regeln wie für die anderen (HPKE-`info` mit Typ, ID, Generation; eindeutiges Tripel). Ob Version 1.1 dem Wiederherstellungsempfänger weitere Regeln gibt (etwa Pflicht beim Schreiben), ist aus dem Auftrag nicht ersichtlich und gegen 3.1 zu prüfen.
+- Begründung: Vorgabe des Auftrags.
+
+### D44 Testvektoren nach dem Formatwechsel
+- Stelle: Auftrag Phase 0.1, "Vektoren, die sich nicht ändern dürften, müssen unverändert bleiben".
+- Entscheidung: Die zehn `.gml`-Dateien sind neu erzeugt (Rahmen geändert, Signaturen decken den neuen Rahmen ab). Alle in `vectors.json` festgehaltenen Werte sind byte-identisch geblieben: Kopfkodierung, Nonce-Präfix, SHA-256 der Blockchiffrate, SHA-256 des Klartexts; das wurde vor dem Commit mit der alten Datei verglichen. Die Dateien aus Phase 0 liegen unter `internal/envelope/testdata/phase0/` und laufen als Ablehnungsfälle (`TestPhase0FilesRejected`) und als Fuzz-Saat weiter.
+- Begründung: Kopf, Schlüsselableitung, Nonces und Block-AAD sind unverändert; nur der Rahmen und damit die Signatur ändern sich. Ein Unterschied in den festgehaltenen Werten hätte auf einen Fehler in der Umsetzung gedeutet.
+
+### D45 Nicht umgesetzt: Argon2-Bereiche und Datensatztypen aus 2.2 und 2.3
+- Stelle: Auftrag Phase 0.1 Punkt 4 (S07, S08).
+- Entscheidung: Nicht geändert. Die Bereiche für Argon2id in 2.2 und die Datensatztypen der Plattformzertifikate und Nachfolgen in 2.3 der Version 1.1 stehen nur im Text der Spezifikation, der nicht vorlag. `keys` prüft weiterhin die Grenzen aus D22 (64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads, Untergrenzen vorhanden) und verwendet die Formate aus D20.
+- Begründung: Raten würde die Vorgabe "keine erfundenen Anforderungen" verletzen. Sobald `docs/spec.md` vorliegt, sind D22 und D20 gegen 2.2 und 2.3 abzugleichen.
+

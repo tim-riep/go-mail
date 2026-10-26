@@ -4,13 +4,17 @@ Festgestellt bei der Umsetzung von Phase 0 (`rec`, `keys`, `shamir`, `envelope`)
 
 Keiner der Punkte ist ein Sicherheitsproblem, das den Bau hätte anhalten müssen. S01 und S06 betreffen die Robustheit des Formats, S09 ein Spannungsfeld im Entwurf, die übrigen sind Lücken oder Mehrdeutigkeiten.
 
+Stand Phase 0.1: Version 1.1 der Spezifikation behandelt laut Auftrag S01, S02, S07, S08, S09 und S12. Erledigte Punkte sind unten mit Commit markiert. S07 und S08 sind in 1.1 geregelt, aber noch nicht umgesetzt, weil der Text (`docs/spec.md`) nicht vorlag. Für S03 bis S06, S10, S11 und S13 ist nicht bekannt, ob 1.1 sie aufgreift; sie bleiben offen, bis der Text geprüft ist.
+
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
+- Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
 - Stelle: 3.1 Aufbau, 3.3 Regel 7.
 - Problem: Blöcke und Trailer sind beide `uint32 Länge || Bytes`. Das Ende der Blockfolge ist nur über das Letzter-Block-Flag im Nonce definiert, das ein Parser ohne Schlüssel nicht sieht. Nach einem vollen Block ist nicht entscheidbar, ob das nächste Längenfeld einen Block oder den Trailer einleitet, solange nur der Datenstrom und nicht die Dateilänge bekannt ist. Auch der Server, der laut 3.4 Signaturen ohne Schlüssel prüfen soll, braucht diese Grenze.
 - Phase 0: Die Trailer-Länge ist das Längenfeld, dessen Wert genau den verbleibenden Bytes entspricht (DECISIONS D29). Das setzt die vollständige Datei voraus und schließt streamendes Parsen aus.
 - Vorschlag: Die Grenze explizit machen, etwa durch die Zahl der Blöcke oder die Inhaltslänge im Kopf, oder durch einen Trailer, dessen Länge am Dateiende steht (Parsen vom Ende), oder durch ein Endmarker-Längenfeld (`0xFFFFFFFF`) vor dem Trailer. Bis dahin die Regel aus D29 in 3.1 aufnehmen.
 
 ## S02 NFC-Prüfung und Abhängigkeitsregel
+- Erledigt in Phase 0.1 (Commit 4ee0b90): Version 1.1 lässt `golang.org/x/text` zu; die eigenen Tabellen sind entfernt, `x/text` ist auf v0.43.0 festgelegt. D09 und D10 sind aufgehoben.
 - Stelle: 3.6 Regel 3 und 6; 1 Grundsätze (nur `x/crypto` und `x/mod`).
 - Problem: Die Standardbibliothek kann keine Unicode-Normalisierung. Die Ablehnung nicht normalisierter Zeichenketten erfordert entweder `golang.org/x/text/unicode/norm` oder eigene Tabellen aus der Unicode-Datenbank.
 - Phase 0: Eigene Tabellen und eine exakte Prüfung (DECISIONS D09, D10), knapp 1.500 Zeilen generierter Code, der bei jedem Unicode-Wechsel der Werkzeugkette neu erzeugt werden muss.
@@ -41,18 +45,21 @@ Keiner der Punkte ist ein Sicherheitsproblem, das den Bau hätte anhalten müsse
 - Vorschlag: Festhalten, dass die Integrität des Empfängerteils einer Mail über die signierten Metadaten gewährleistet wird (Abschnitt 7 nimmt den SHA-256 der verschlüsselten Mail-Datei in die Ingest-Signatur auf; dieser Hash deckt den Empfängerteil mit ab) und dass ein Client beim Lesen einer Mail diesen Hash prüft.
 
 ## S07 Keine Grenzen für KDF-Parameter aus dem Schlüsselspeicher
+- Stand Phase 0.1: In Version 1.1 (2.2) geregelt, Umsetzung steht aus, weil der Text nicht vorlag. Der Code prüft weiterhin die Grenzen aus D22 (Unter- und Obergrenzen vorhanden); siehe D45.
 - Stelle: 2.2 Lokale Ablage, "alle KDF-Parameter stehen im Kopf der Datei".
 - Problem: Werden die Parameter aus der Datei übernommen, kann eine manipulierte Datei den Client zu beliebig großen Argon2-Reservierungen zwingen, bevor die Authentifizierung fehlschlägt (die AAD-Prüfung braucht den abgeleiteten Schlüssel).
 - Phase 0: Unter- und Obergrenzen, Prüfung vor Argon2 (DECISIONS D22).
 - Vorschlag: In 2.2 festlegen, welche Parameter beim Öffnen akzeptiert werden (mindestens die festen Werte, höchstens definierte Obergrenzen) oder nur exakt die festen Werte zulassen.
 
 ## S08 Formate der Plattformzertifikate und der Identitätsnachfolge fehlen
+- Stand Phase 0.1: In Version 1.1 (2.3) geregelt, Abgleich steht aus, weil der Text nicht vorlag; siehe D45.
 - Stelle: 2.3, `admin-<gen>.cert`, `ingest-<gen>.cert`, `identity-<gen>.succ`; 4 Ablage.
 - Problem: Nur die Dateinamen und die Signierenden sind genannt, nicht die Felder.
 - Phase 0: Minimale Datensätze (DECISIONS D20).
 - Vorschlag: Die Felder in 2.3 aufnehmen; insbesondere, dass ein Zertifikat die Generation der signierenden Identität nennt, damit der Client den richtigen Schlüssel wählt.
 
 ## S09 Nachträgliche Empfänger und signierte Dateien
+- Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 führt den Empfängertyp 4 (`recovery`) ein, sodass der Wiederherstellungsempfänger beim Schreiben eingetragen wird (Vorschlag c). Die Signatur deckt den Empfängerteil weiterhin vollständig ab; nachträgliche Einträge bleiben damit ausgeschlossen.
 - Stelle: 3.1, "damit spätere Empfängertypen (etwa ein Wiederherstellungsschlüssel) ohne Neuverschlüsselung des Inhalts ergänzt werden können" und "bei signierten Dateien deckt die Signatur den gesamten Empfängerteil ab".
 - Problem: Beide Aussagen zusammen bedeuten, dass ein nachträglich ergänzter Empfänger die Signatur einer Metadaten-, Verpackungs- oder Begriffslisten-Datei ungültig macht. Für Ingest-signierte Dateien kann kein Mitglied neu signieren, ohne dass die Aussage der Ingest-Signatur verloren geht (Abschnitt 7 erlaubt die Benutzersignatur nur nach einer Flag-Änderung an Metadaten).
 - Phase 0: Keine Vorkehrung; die Signatur deckt den gesamten Empfängerteil ab, wie gefordert.
@@ -71,6 +78,7 @@ Keiner der Punkte ist ein Sicherheitsproblem, das den Bau hätte anhalten müsse
 - Vorschlag: In 2.2 die Eingabenormalisierung der Kommandozeile festlegen (Trimmen, Kleinschreibung, Trennung an Leerraum).
 
 ## S12 Suite 2 ändert die Größen im Empfängerteil
+- Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 senkt die Höchstzahl der Empfänger auf 4; vier Einträge der Suite 2 (je etwa 1,2 KiB) passen in die 16 KiB. Die Feldgrößen je Suite sind erst beim Einführen von Suite 2 festzulegen.
 - Stelle: 3.5, Suite 2 mit `MLKEM768X25519`.
 - Problem: Die Kapselung dieses KEM ist 1.120 Byte groß statt 32. Der Höchstwert von 16 KiB für den Empfängerteil reicht für 32 Einträge (etwa 40 KiB) dann nicht mehr; außerdem müssen Schemas je Suite verschiedene feste Längen haben.
 - Phase 0: Schema und Grenzen gelten für Suite 1.
