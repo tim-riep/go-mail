@@ -293,7 +293,7 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 	})
 	if err != nil {
 		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
-		return nil, err
+		return nil, signerErr(err)
 	}
 	defer keys.Wipe(plain)
 	if f.Header.Kind != envelope.KindPending || f.Header.MailboxID != mbx || f.Header.Epoch != epoch || f.Header.FileID != file {

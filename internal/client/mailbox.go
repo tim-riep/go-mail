@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/envelope"
@@ -117,7 +118,7 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 // 1 beginning now, the supply for the next three months, folders.gml with
 // the inbox, and mailbox.rec as the last file.
 func (c *Client) CreateMailbox(name string) (store.ID, error) {
-	name = store.CleanText(name, 256)
+	name = strings.TrimSpace(store.CleanText(name, 256))
 	if name == "" {
 		return store.ID{}, fmt.Errorf("client: empty mailbox name")
 	}
@@ -516,9 +517,15 @@ func (c *Client) openUserMeta(ch *chain, data []byte, fileID store.ID) ([]byte, 
 		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, signerErr(err)
 	}
 	return plain, nil
 }
 
-var _ = errors.Is
+// signerErr maps signature failures of envelope to ErrSigner.
+func signerErr(err error) error {
+	if errors.Is(err, envelope.ErrSigner) || errors.Is(err, envelope.ErrSignature) {
+		return fmt.Errorf("%w: %v", ErrSigner, err)
+	}
+	return err
+}
