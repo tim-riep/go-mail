@@ -503,7 +503,19 @@ Fuzz-Ziele aus Phase 0: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordli
 - `smtpd.FuzzData`: beliebige Daten nach `DATA`; zugestellt wird genau das Ergebnis einer Referenz für Dot-Unstuffing, ungültige Eingaben nie.
 - `ingest.FuzzTerms`: beliebige Header; alle Begriffe und Metadatenfelder speicherbar (UTF-8, NFC, ohne Nullbyte, innerhalb der Grenzen), keine doppelten Begriffe.
 
-Ergebnis Phase 1: FUZZ_RESULTS
+Ergebnis Phase 1: alle 14 Ziele je 5 Minuten ohne Fund, kein neuer Fall unter `testdata/fuzz/`. Ausführungen:
+
+| Ziel | Ausführungen | Ziel | Ausführungen |
+|---|---|---|---|
+| rec.FuzzDecode | 27,4 Mio. | shamir.FuzzShareFromBytes | 34,2 Mio. |
+| rec.FuzzIsNFC | 29,1 Mio. | shamir.FuzzCombine | 25,4 Mio. |
+| keys.FuzzParseWordlist | 14,5 Mio. | envelope.FuzzParseAndOpen | 12,1 Mio. |
+| keys.FuzzSeedFromWords | 14,0 Mio. | store.FuzzDecodeRecords | 24,7 Mio. |
+| keys.FuzzDecodeGenerationCert | 18,2 Mio. | smtpd.FuzzCommands | 3,6 Mio. |
+| keys.FuzzOpenKeystore | 24,5 Mio. | smtpd.FuzzData | 8,5 Mio. |
+| shamir.FuzzShareFromWords | 20,4 Mio. | ingest.FuzzTerms | 3,1 Mio. |
+
+Die Ziele von `store`, `smtpd` und `ingest` liefen auf dem Stand nach den Korrekturen aus den Prüfungen. Bei `smtpd` und `ingest` zeigt der Fuzzer zeitweise 0 Ausführungen je Sekunde; das ist das Minimieren neuer Eingaben, keine einzelne Eingabe brauchte länger als eine halbe Sekunde (geprüft). Der Regressionsfall `revokes = 0` aus Phase 0 liegt zusätzlich mit dem neuen Typ-String `user-gen` vor.
 
 ## Was Phase 2 als Erstes wissen muss
 
