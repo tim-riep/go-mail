@@ -1,6 +1,8 @@
-# Entscheidungen in Phase 0, 0.1 und 1
+# Entscheidungen in Phase 0, 0.1, 1 und bis M1
 
 Die Spezifikation liegt in `docs/PLAN.md` (Version 1.0). Dieses Dokument hält jede Stelle fest, an der sie mehrdeutig ist oder etwas offen lässt, und welche Entscheidung die Umsetzung getroffen hat. Grundsatz: im Zweifel die konservativere Lesart, keine erfundenen Anforderungen. Widersprüche und Lücken, die eine Änderung der Spezifikation nahelegen, stehen zusätzlich in `docs/SPEC-ISSUES.md`.
+
+Die Arbeit bis Meilenstein M1 (Orchestrierung, `docs/ORCHESTRATION.md`) arbeitet gegen Version 1.4 und `docs/PHASE2-KLAERUNGEN.md`; ihre Entscheidungen stehen ab D63. Fragen, die nach K7 angehalten wurden, stehen in `docs/QUESTIONS.md`.
 
 Phase 1 arbeitet gegen Version 1.2 (`docs/PLAN.md`, Abschnitt 14 listet die Änderungen gegenüber 1.1); ihre Entscheidungen stehen ab D47.
 
@@ -374,3 +376,20 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Stelle: 4 "Alle IDs sind zufällig (128 Bit, base32)"; Auftrag Phase 1 "Sperren pro Postfach mit Dateisperren, keine globale Sperre".
 - Entscheidung: IDs sind 16 Byte aus `crypto/rand`, Textform base32 in Kleinbuchstaben ohne Auffüllung (26 Zeichen); `ParseID` nimmt nur die kanonische Form an, sodass eine ID nie einen Pfad außerhalb ihres Verzeichnisses bezeichnet. Sperren sind `flock` auf `mailboxes/<id>/lock`; mehrere Postfächer werden in fester Reihenfolge gesperrt. Gehalten werden sie beim Commit einer Annahme, beim Schreiben einer Begriffsliste und beim Anlegen von Epochen und `mailbox.rec`. Atomare Schreibvorgänge: temporäre Datei `.tmp-*` im Zielverzeichnis, `fsync`, Umbenennen (oder harter Link für exklusives Anlegen), `fsync` des Verzeichnisses; neue Verzeichnisse werden mit `fsync` des Elternverzeichnisses angelegt.
 - Begründung: `flock` gibt es auf allen Zielsystemen; über NFS ist es nicht verlässlich (siehe HANDOFF, Grenzen).
+
+## Bis M1 (Version 1.4, Orchestrierung)
+
+### D63 Gründe der Epochen und sofortige Wirkung
+- Stelle: 2.4 Tabelle der Gründe (Version 1.4); Vorrat ("Der nächste Client erzeugt dann eine Epoche mit sofortigem Beginn"); 2.6 Grund `deleted`; K1, K8; `docs/QUESTIONS.md` Q5.
+- Frage: Die Tabelle nennt sechs Gründe. Keiner passt auf die erste Epoche eines Postfachs oder auf die Epoche nach erschöpftem Vorrat; `deleted` aus 2.6 fehlt in der Tabelle; `member-added` ist "geplant oder sofort", und aus der `epoch.rec` ist nicht ablesbar, welche Form gemeint ist.
+- Entscheidung: `store.Reason` kennt genau die sechs Werte der Tabelle in ihrer Reihenfolge (1 `regular` bis 6 `generation-revoked`); die Gründe aus D49 entfallen (D49 insoweit aufgehoben). Epoche 1 und die Epoche nach erschöpftem Vorrat tragen `regular` und beginnen wie jede geplante Epoche frühestens fünf Minuten nach dem Anlegen (2.4 Vorlauf Regel 1; D50 bleibt für geplante Epochen). `member-added` gilt in M1 immer als sofort (`Reason.Immediate()` ist wahr für 2 bis 6): es wird nur die sofortige Form gebaut, und für eine neuere Epoche zu früh zu verschlüsseln "schadet nie" (2.4). `deleted` wird nicht gebaut (Löschen ist nicht Teil von M1).
+- Begründung: Keine erfundenen Gründe; die Lesart ist aus der Tabelle und den Vorlaufregeln ableitbar und ändert sich nicht, falls die Spezifikation später einen eigenen Grund für die erste Epoche einführt (dann nur ein neuer Wert).
+
+### D64 Kettenprüfer `store.Chain` und Unterzeichnerregeln
+- Stelle: 2.4 "Verwerfen des Vorrats" Regeln 1 bis 5; K2 Regeln 1 und 2; HANDOFF Phase 1 Punkt C7.
+- Entscheidung: Die Regeln der Kette liegen in einem einzigen Prüfer ohne Ein-/Ausgabe (`store.Chain`), den Client und Server gleich verwenden: Verknüpfung über `prev_hash`, Nummer +1, Suite nicht älter, `discards` genau gleich der Menge der bisher nicht verworfenen Epochen mit späterem Beginn (bei `regular` leer und keine solche Epoche vorhanden), Beginn nicht vor der letzten nicht verworfenen Vorgängerin, verworfene Nummern nie wieder gültig. Der Unterzeichner muss Benutzer-Mitglied der Vorgängerin und der neuen Epoche sein, und sein Mitgliedseintrag in der neuen Epoche trägt genau `signer_gen`. Damit kann ein entferntes Mitglied die Epoche `member-removed` nicht signieren (K2 Regel 2), eine Vertretung oder ein Wiederherstellungsempfänger keine Epoche anlegen (K2 Regel 1, siehe Q6), und ein Unterzeichner keine fremde Generation vortäuschen (C7). Ob die Generation des Unterzeichners zum Zeitpunkt gültig war, prüft der Aufrufer über `user.rec` und das Log.
+- Begründung: Eine einzige Umsetzung der Regeln verhindert, dass Server und Client auseinanderlaufen (K8 verlangt, dass der Server dieselbe Epoche wählt, die der Client akzeptiert).
+
+### D65 Haltepunkte in `docs/QUESTIONS.md`
+- Stelle: K7; Orchestrierungsauftrag Abschnitt 4.
+- Entscheidung: Jede Frage, die nach K7 anzuhalten ist, steht mit Vorschlag in `docs/QUESTIONS.md` (Q1 Wiederherstellungsempfänger, Q2 Einladungen, Q3 `--server-search`, Q4 Schlüssel und Zeit des Baumkopfs, Q6 Vertretung als Mitgliedsart). Pakete, die eine solche Stelle berühren, bauen die strengste Lesart und markieren sie mit `TODO(Qn)`; kein Befehl, der davon abhängt, wird vor der Antwort ausgeliefert.
