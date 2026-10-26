@@ -133,13 +133,23 @@ func TestRunbook(t *testing.T) {
 	if err := smtp.SendMail(addr, nil, "rechnung@lieferant.example", []string{"info@brownbear.example"}, []byte(msg)); err != nil {
 		t.Fatal(err)
 	}
+	// A second mail with a known secret phrase in header and body.
+	secret := "Subject: Geheimprojekt Nordlicht\r\nFrom: vorstand@brownbear.example\r\nTo: info@brownbear.example\r\n\r\nKennwort: Nordlicht-2026\r\n"
+	if err := smtp.SendMail(addr, nil, "vorstand@brownbear.example", []string{"info@brownbear.example"}, []byte(secret)); err != nil {
+		t.Fatal(err)
+	}
 
 	// 7. list, read, inspect, sync.
 	list := run("", "gomailctl", append([]string{"list", mbx}, common...)...)
 	if !strings.Contains(list, "Rechnung 4711") {
 		t.Fatalf("list: %q", list)
 	}
-	mailID := strings.Fields(list)[0]
+	var mailID string
+	for _, line := range strings.Split(list, "\n") {
+		if strings.Contains(line, "Rechnung 4711") {
+			mailID = strings.Fields(line)[0]
+		}
+	}
 	content := run("", "gomailctl", append([]string{"read", mbx, mailID}, common...)...)
 	if !strings.HasSuffix(content, msg) || !strings.HasPrefix(content, "Received: ") {
 		t.Fatalf("read: %q", content)
@@ -154,12 +164,19 @@ func TestRunbook(t *testing.T) {
 	// The server log holds no content and no addresses.
 	srv.Process.Signal(os.Interrupt)
 	srv.Wait()
-	for _, s := range []string{"Rechnung", "lieferant", "brownbear", "Hallo"} {
+	for _, s := range []string{"Rechnung", "lieferant", "brownbear", "Hallo", "Nordlicht", "vorstand"} {
 		if strings.Contains(logs.String(), s) {
 			t.Fatalf("server log contains %q", s)
 		}
 	}
 	if !strings.Contains(logs.String(), "status=250") {
 		t.Fatalf("server log: %s", logs.String())
+	}
+	// GOMAIL_E2E_KEEP=<dir> keeps a copy of the data directory (only the
+	// data directory: no keys, no client) for an independent review.
+	if keep := os.Getenv("GOMAIL_E2E_KEEP"); keep != "" {
+		if out, err := exec.Command("cp", "-a", data, keep).CombinedOutput(); err != nil {
+			t.Fatalf("keep: %v %s", err, out)
+		}
 	}
 }

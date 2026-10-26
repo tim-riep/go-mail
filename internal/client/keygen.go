@@ -177,6 +177,7 @@ func Register(cfg Config, code store.ID) (store.ID, error) {
 		}
 		return store.ID{}, err
 	}
+	// TODO(phase3-translog): user.rec into the log; the generation is valid only from then on (2.2 rule 3).
 	if err := cfg.Log.AppendUser(user.ID, data); err != nil {
 		return store.ID{}, err
 	}

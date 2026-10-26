@@ -39,6 +39,7 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	if err != nil {
 		return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
 	}
+	// TODO(phase3-translog): certificate in the log, generation not compromised (2.3, 7).
 	if err := c.cfg.Log.CheckPlatform(name, raw); err != nil {
 		return ingestKey{}, err
 	}
@@ -133,6 +134,7 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 		return nil, fmt.Errorf("%w: epoch %d had begun", ErrStaleEpoch, next.Number)
 	}
 	for _, a := range m.Recipients {
+		// TODO(phase3-translog): address assigned to this mailbox at receipt (2.3).
 		if err := c.cfg.Log.CheckAddress(a, mbx, m.Received); err != nil {
 			return nil, err
 		}

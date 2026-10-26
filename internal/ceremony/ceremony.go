@@ -151,6 +151,7 @@ func InitDev(dataDir, keyDir string, now time.Time, log translog.Log) (*Result, 
 			return nil, err
 		}
 		if strings.HasSuffix(name, ".cert") {
+			// TODO(phase3-translog): certificates into the log (2.7).
 			if err := log.AppendPlatform(name, data); err != nil {
 				return nil, err
 			}

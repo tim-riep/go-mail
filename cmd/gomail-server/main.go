@@ -237,6 +237,7 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
+	// TODO(phase3-translog): signed address assignment into the log (2.3).
 	if err := tlog.AppendAddress(enc); err != nil {
 		return fail(stderr, err)
 	}

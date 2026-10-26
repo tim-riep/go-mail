@@ -166,6 +166,7 @@ func Open(cfg Config, passphrase []byte) (*Client, error) {
 	if !cfg.Log.Verified() {
 		cfg.Warn(translog.Warning)
 	}
+	// TODO(phase3-translog): tree head with witness signature at most 24 hours old (2.3).
 	if err := cfg.Log.CheckFresh(cfg.Now()); err != nil {
 		return nil, err
 	}
@@ -195,6 +196,7 @@ func Open(cfg Config, passphrase []byte) (*Client, error) {
 		cfg.Warn("WARNUNG: user.rec im Datenverzeichnis weicht vom registrierten Stand ab.")
 		return nil, ErrUserRecord
 	}
+	// TODO(phase3-translog): own user.rec included in the log (2.7).
 	if err := cfg.Log.CheckUser(me, local); err != nil {
 		return nil, err
 	}

@@ -108,6 +108,7 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 	if err != nil {
 		return nil, nil, err
 	}
+	// TODO(phase3-translog): epoch.rec into the log (2.7).
 	if err := c.cfg.Log.AppendEpoch(mbx, n, data); err != nil {
 		return nil, nil, err
 	}
@@ -218,6 +219,7 @@ func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.Public
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSigner, err)
 	}
+	// TODO(phase3-translog): signer's user.rec included in the log (2.7).
 	if err := c.cfg.Log.CheckUser(id, raw); err != nil {
 		return nil, err
 	}
@@ -225,6 +227,7 @@ func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.Public
 	if g == nil {
 		return nil, fmt.Errorf("%w: unknown generation %d", ErrSigner, gen)
 	}
+	// TODO(phase3-translog): generation valid only from its log entry on (2.2 rule 3).
 	if err := c.cfg.Log.CheckGeneration(id, gen); err != nil {
 		return nil, err
 	}
@@ -236,6 +239,7 @@ func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.Public
 		if logged == nil {
 			return nil, fmt.Errorf("%w: generation %d is revoked", ErrSigner, gen)
 		}
+		// TODO(phase3-translog): logged before the revocation (2.2 rule 4).
 		if err := c.cfg.Log.CheckRevokedSignature(id, gen, logged); err != nil {
 			return nil, err
 		}
@@ -321,6 +325,7 @@ func (c *Client) checkEpoch(e *store.Epoch, data []byte, prev *store.Epoch, prev
 	if err := e.VerifySignature(pub); err != nil {
 		return err
 	}
+	// TODO(phase3-translog): epoch.rec included in the log (2.7).
 	return c.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data)
 }
 
