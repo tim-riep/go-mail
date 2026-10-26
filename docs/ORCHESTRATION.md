@@ -84,3 +84,6 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 ## 4. Verlauf
 
 (Je zusammengeführtes Paket zwei bis drei Zeilen: Paket, Ergebnis der Verifikation, Commit.)
+
+- **01 `envelope`, `keys`, `smtpd`** (Kopffeld 8, SIZE 25 MiB, Abdeckung `keys` 93,9 %). Verifikation: Angreifer ohne Funde (Feld 8 über AAD und Signatur gebunden, Dateiarten, Trailer- und Empfängertausch, SMTP-Größe und Smuggling abgewehrt); Spezifikation vier Funde (mittel: Client verglich die Version im Inhalt nicht mit dem Kopf; drei niedrig: stumpfe Tests, Fehlerumhüllung), behoben in Nacharbeit 01b, nachverifiziert ohne Funde. Commit 6dc201d.
+- **03 Schnittstellen Log, Zeuge, Zeremonie**: Entwurf abgeliefert; Verifikation Spezifikation acht Funde (vier mittel: Zeugenquorum, zurückgehaltener Eintrag, Widerruf von Plattformgenerationen → Q8, ungeloggte Epoche blockiert Nummer), Angreifer (Bericht wurde vom Modellschutz abgebrochen, Funde aus seinen Testdateien rekonstruiert und selbst ausgeführt): hoch Zeugenquorum, hoch fremde Epochennummern belegbar, mittel `tlog`-Beweisfunktionen hängen bei Größen über 2^62, niedrig vergiftete Signaturzeile, Dekodierkosten. Nacharbeit 03b läuft.
