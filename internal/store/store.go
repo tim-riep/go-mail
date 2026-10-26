@@ -97,18 +97,26 @@ func (s *Store) Abs(rel string) (string, error) {
 
 func epochDir(n uint32) string { return strconv.FormatUint(uint64(n), 10) }
 
-func (s *Store) SpoolDir() string                  { return s.Path("spool") }
-func (s *Store) WorkDir() string                   { return s.Path("work") }
-func (s *Store) UserFile(id ID) string             { return s.Path("users", id.String(), "user.rec") }
-func (s *Store) InviteFile(code ID) string         { return s.Path("invites", code.String()+".json") }
-func (s *Store) AddressesFile() string             { return s.Path("addresses.json") }
-func (s *Store) MailboxDir(id ID) string           { return s.Path("mailboxes", id.String()) }
-func (s *Store) MailboxFile(id ID) string          { return filepath.Join(s.MailboxDir(id), "mailbox.rec") }
-func (s *Store) NoteFile(id ID) string             { return filepath.Join(s.MailboxDir(id), "epoch-fallback.rec") }
-func (s *Store) EpochDir(id ID, n uint32) string   { return filepath.Join(s.MailboxDir(id), "epochs", epochDir(n)) }
-func (s *Store) EpochFile(id ID, n uint32) string  { return filepath.Join(s.EpochDir(id, n), "epoch.rec") }
-func (s *Store) MailDir(id, folder ID) string      { return filepath.Join(s.MailboxDir(id), "mail", folder.String()) }
-func (s *Store) PendingDir(id ID, n uint32) string { return filepath.Join(s.MailboxDir(id), "pending", epochDir(n)) }
+func (s *Store) SpoolDir() string          { return s.Path("spool") }
+func (s *Store) WorkDir() string           { return s.Path("work") }
+func (s *Store) UserFile(id ID) string     { return s.Path("users", id.String(), "user.rec") }
+func (s *Store) InviteFile(code ID) string { return s.Path("invites", code.String()+".json") }
+func (s *Store) AddressesFile() string     { return s.Path("addresses.json") }
+func (s *Store) MailboxDir(id ID) string   { return s.Path("mailboxes", id.String()) }
+func (s *Store) MailboxFile(id ID) string  { return filepath.Join(s.MailboxDir(id), "mailbox.rec") }
+func (s *Store) NoteFile(id ID) string     { return filepath.Join(s.MailboxDir(id), "epoch-fallback.rec") }
+func (s *Store) EpochDir(id ID, n uint32) string {
+	return filepath.Join(s.MailboxDir(id), "epochs", epochDir(n))
+}
+func (s *Store) EpochFile(id ID, n uint32) string {
+	return filepath.Join(s.EpochDir(id, n), "epoch.rec")
+}
+func (s *Store) MailDir(id, folder ID) string {
+	return filepath.Join(s.MailboxDir(id), "mail", folder.String())
+}
+func (s *Store) PendingDir(id ID, n uint32) string {
+	return filepath.Join(s.MailboxDir(id), "pending", epochDir(n))
+}
 
 func (s *Store) WrapFile(id ID, n uint32, user ID) string {
 	return filepath.Join(s.EpochDir(id, n), "members", user.String()+".wrap")
@@ -581,3 +589,38 @@ func (s *Store) WriteNote(n *EpochNote) error {
 
 // RemoveNote deletes epoch-fallback.rec.
 func (s *Store) RemoveNote(id ID) error { return RemoveDurable(s.NoteFile(id)) }
+
+// ListFolders returns the folder directories below mail/, sorted.
+func (s *Store) ListFolders(id ID) ([]ID, error) {
+	entries, err := os.ReadDir(filepath.Join(s.MailboxDir(id), "mail"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []ID
+	for _, e := range entries {
+		if fid, err := ParseID(e.Name()); err == nil && e.IsDir() {
+			out = append(out, fid)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return string(out[i][:]) < string(out[j][:]) })
+	return out, nil
+}
+
+// WriteFolders replaces folders.gml.
+func (s *Store) WriteFolders(id ID, data []byte) error {
+	if err := MkdirAll(s.MailboxDir(id)); err != nil {
+		return err
+	}
+	return WriteFileAtomic(s.FoldersFile(id), data)
+}
+
+// ReadFolders reads folders.gml.
+func (s *Store) ReadFolders(id ID) ([]byte, error) {
+	return ReadFileLimited(s.FoldersFile(id), MaxMetaFile)
+}
+
+// FoldersFile is mailboxes/<id>/folders.gml.
+func (s *Store) FoldersFile(id ID) string { return filepath.Join(s.MailboxDir(id), "folders.gml") }

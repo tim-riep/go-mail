@@ -22,15 +22,15 @@ var ErrRecord = errors.New("store: invalid record")
 
 // Limits of the records defined here (DECISIONS D48).
 const (
-	MaxGenerations = 1024  // generations in user.rec
-	MaxMembers     = 64    // members of one epoch
-	MaxNameSize    = 8192  // sealed mailbox name in mailbox.rec
-	MaxRecipients  = 100   // envelope recipients in metadata (5.1)
-	MaxAddressLen  = 320   // one address
-	MaxTextLen     = 4096  // one header value in metadata
-	MaxBatch       = 100   // entries of one pending batch (5.4)
-	MaxTerms       = 256   // terms of one mail
-	MaxTermLen     = 1024  // one term
+	MaxGenerations = 1024 // generations in user.rec
+	MaxMembers     = 64   // members of one epoch
+	MaxNameSize    = 8192 // sealed mailbox name in mailbox.rec
+	MaxRecipients  = 100  // envelope recipients in metadata (5.1)
+	MaxAddressLen  = 320  // one address
+	MaxTextLen     = 4096 // one header value in metadata
+	MaxBatch       = 100  // entries of one pending batch (5.4)
+	MaxTerms       = 256  // terms of one mail
+	MaxTermLen     = 1024 // one term
 	MaxJournal     = 3 * MaxRecipients
 	MaxPathLen     = 512
 )
@@ -982,7 +982,6 @@ func CleanText(s string, max int) string {
 	return s
 }
 
-
 // ------------------------------------------------------ address assignment
 
 // AddressSchema is a signed address assignment (2.3): address, mailbox,
@@ -1075,4 +1074,93 @@ func DecodeAddressAssignment(data []byte) (*AddressAssignment, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// ------------------------------------------------------- name and folders
+
+// MaxFolders bounds folders.gml.
+const MaxFolders = 1024
+
+// MailboxNameSchema is the plaintext of the sealed name in mailbox.rec.
+var MailboxNameSchema = rec.MustSchema("gomail/v1/rec/mailbox-name",
+	id16(1, "mailbox_id", true),
+	rec.Field{Num: 2, Name: "name", Kind: rec.String, MaxLen: 256, Required: true},
+)
+
+// EncodeMailboxName encodes the name of mailbox id.
+func EncodeMailboxName(id ID, name string) ([]byte, error) {
+	if id.IsZero() || name == "" {
+		return nil, fmt.Errorf("%w: empty mailbox name", ErrRecord)
+	}
+	return rec.New(MailboxNameSchema).SetBytes(1, id[:]).SetString(2, name).Encode()
+}
+
+// DecodeMailboxName decodes the name and checks that it belongs to id.
+func DecodeMailboxName(id ID, data []byte) (string, error) {
+	r, err := rec.Decode(MailboxNameSchema, data)
+	if err != nil {
+		return "", err
+	}
+	if idFromBytes(r.Bytes(1)) != id {
+		return "", fmt.Errorf("%w: name of another mailbox", ErrRecord)
+	}
+	if r.String(2) == "" {
+		return "", fmt.Errorf("%w: empty mailbox name", ErrRecord)
+	}
+	return r.String(2), nil
+}
+
+// FolderSchema is one entry of folders.gml.
+var FolderSchema = rec.MustSchema("gomail/v1/rec/folder",
+	id16(1, "id", true),
+	rec.Field{Num: 2, Name: "name", Kind: rec.String, MaxLen: 256, Required: true},
+)
+
+// FoldersSchema is the plaintext of folders.gml (section 4: folder names
+// only encrypted, for the meta key of the epoch).
+var FoldersSchema = rec.MustSchema("gomail/v1/rec/folders",
+	id16(1, "mailbox_id", true),
+	rec.Field{Num: 2, Name: "folders", Kind: rec.List, Elem: FolderSchema, MaxCount: MaxFolders, Required: true},
+)
+
+// Folder is one folder.
+type Folder struct {
+	ID   ID
+	Name string
+}
+
+// EncodeFolders encodes the folder list of mailbox id.
+func EncodeFolders(id ID, folders []Folder) ([]byte, error) {
+	list := make([]*rec.Record, 0, len(folders))
+	seen := map[ID]bool{}
+	for _, f := range folders {
+		if f.ID.IsZero() || f.Name == "" || seen[f.ID] {
+			return nil, fmt.Errorf("%w: invalid folder", ErrRecord)
+		}
+		seen[f.ID] = true
+		list = append(list, rec.New(FolderSchema).SetBytes(1, f.ID[:]).SetString(2, f.Name))
+	}
+	return rec.New(FoldersSchema).SetBytes(1, id[:]).SetList(2, list).Encode()
+}
+
+// DecodeFolders decodes folders.gml and checks that it belongs to id.
+func DecodeFolders(id ID, data []byte) ([]Folder, error) {
+	r, err := rec.Decode(FoldersSchema, data)
+	if err != nil {
+		return nil, err
+	}
+	if idFromBytes(r.Bytes(1)) != id {
+		return nil, fmt.Errorf("%w: folders of another mailbox", ErrRecord)
+	}
+	var out []Folder
+	seen := map[ID]bool{}
+	for _, e := range r.List(2) {
+		f := Folder{ID: idFromBytes(e.Bytes(1)), Name: e.String(2)}
+		if f.ID.IsZero() || f.Name == "" || seen[f.ID] {
+			return nil, fmt.Errorf("%w: invalid folder", ErrRecord)
+		}
+		seen[f.ID] = true
+		out = append(out, f)
+	}
+	return out, nil
 }

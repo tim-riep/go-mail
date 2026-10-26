@@ -439,10 +439,10 @@ func TestPending(t *testing.T) {
 		t.Fatal("pending entries")
 	}
 	for name, bad := range map[string]*Pending{
-		"empty":        {MailboxID: ID{1}, Epoch: 1},
-		"no mailbox":   {Epoch: 1, Entries: []PendingEntry{{MailID: ID{3}, Unprocessed: true}}},
-		"zero mail":    {MailboxID: ID{1}, Epoch: 1, Entries: []PendingEntry{{Unprocessed: true}}},
-		"both":         {MailboxID: ID{1}, Epoch: 1, Entries: []PendingEntry{{MailID: ID{3}, Unprocessed: true, Terms: []string{"x"}}}},
+		"empty":      {MailboxID: ID{1}, Epoch: 1},
+		"no mailbox": {Epoch: 1, Entries: []PendingEntry{{MailID: ID{3}, Unprocessed: true}}},
+		"zero mail":  {MailboxID: ID{1}, Epoch: 1, Entries: []PendingEntry{{Unprocessed: true}}},
+		"both":       {MailboxID: ID{1}, Epoch: 1, Entries: []PendingEntry{{MailID: ID{3}, Unprocessed: true, Terms: []string{"x"}}}},
 	} {
 		if _, err := bad.Encode(); !errors.Is(err, ErrRecord) {
 			t.Fatalf("%s encoded", name)
@@ -458,9 +458,19 @@ func TestPending(t *testing.T) {
 		"neither":       entry(func(r *rec.Record) {}),
 		"unprocessed 2": entry(func(r *rec.Record) { r.SetU8(2, 2) }),
 		"both":          entry(func(r *rec.Record) { r.SetU8(2, 1).SetList(3, nil) }),
-		"zero mail":     func() []byte { e := rec.New(PendingEntrySchema).SetBytes(1, make([]byte, 16)).SetU8(2, 1); b, _ := rec.New(PendingSchema).SetBytes(1, (&ID{1})[:]).SetU32(2, 1).SetList(3, []*rec.Record{e}).Encode(); return b }(),
-		"no entries":    func() []byte { b, _ := rec.New(PendingSchema).SetBytes(1, (&ID{1})[:]).SetU32(2, 1).SetList(3, nil).Encode(); return b }(),
-		"epoch 0":       func() []byte { b, _ := rec.New(PendingSchema).SetBytes(1, (&ID{1})[:]).SetU32(2, 0).SetList(3, nil).Encode(); return b }(),
+		"zero mail": func() []byte {
+			e := rec.New(PendingEntrySchema).SetBytes(1, make([]byte, 16)).SetU8(2, 1)
+			b, _ := rec.New(PendingSchema).SetBytes(1, (&ID{1})[:]).SetU32(2, 1).SetList(3, []*rec.Record{e}).Encode()
+			return b
+		}(),
+		"no entries": func() []byte {
+			b, _ := rec.New(PendingSchema).SetBytes(1, (&ID{1})[:]).SetU32(2, 1).SetList(3, nil).Encode()
+			return b
+		}(),
+		"epoch 0": func() []byte {
+			b, _ := rec.New(PendingSchema).SetBytes(1, (&ID{1})[:]).SetU32(2, 0).SetList(3, nil).Encode()
+			return b
+		}(),
 	} {
 		if _, err := DecodePending(enc); err == nil {
 			t.Fatalf("%s decoded", name)
@@ -577,11 +587,11 @@ func TestAddressAssignment(t *testing.T) {
 
 func TestCleanText(t *testing.T) {
 	cases := map[string]string{
-		"plain":             "plain",
-		"a\x00b\r\nc\td":    "a b  c\td",
-		"bad \xff utf8":     "bad � utf8",
-		"é":           "é",
-		"\x7f":              " ",
+		"plain":          "plain",
+		"a\x00b\r\nc\td": "a b  c\td",
+		"bad \xff utf8":  "bad � utf8",
+		"é":             "é",
+		"\x7f":           " ",
 	}
 	for in, want := range cases {
 		if got := CleanText(in, 100); got != want {
@@ -924,3 +934,65 @@ func TestLocks(t *testing.T) {
 }
 
 var _ = envelope.Suite1
+
+func TestNameAndFolders(t *testing.T) {
+	d, err := EncodeMailboxName(ID{1}, "Büro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := DecodeMailboxName(ID{1}, d); err != nil || n != "Büro" {
+		t.Fatal("name")
+	}
+	if _, err := DecodeMailboxName(ID{2}, d); !errors.Is(err, ErrRecord) {
+		t.Fatal("name of another mailbox")
+	}
+	if _, err := EncodeMailboxName(ID{1}, ""); !errors.Is(err, ErrRecord) {
+		t.Fatal("empty name")
+	}
+	empty, _ := rec.New(MailboxNameSchema).SetBytes(1, (&ID{1})[:]).SetString(2, "").Encode()
+	if _, err := DecodeMailboxName(ID{1}, empty); !errors.Is(err, ErrRecord) {
+		t.Fatal("empty decoded name")
+	}
+	if _, err := DecodeMailboxName(ID{1}, nil); err == nil {
+		t.Fatal("nil")
+	}
+	fs := []Folder{{ID{2}, "INBOX"}, {ID{3}, "Archiv"}}
+	fd, err := EncodeFolders(ID{1}, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeFolders(ID{1}, fd)
+	if err != nil || len(got) != 2 || got[1] != fs[1] {
+		t.Fatal("folders")
+	}
+	if _, err := DecodeFolders(ID{9}, fd); !errors.Is(err, ErrRecord) {
+		t.Fatal("folders of another mailbox")
+	}
+	if _, err := EncodeFolders(ID{1}, []Folder{{ID{2}, "a"}, {ID{2}, "b"}}); !errors.Is(err, ErrRecord) {
+		t.Fatal("duplicate folder")
+	}
+	dup, _ := rec.New(FoldersSchema).SetBytes(1, (&ID{1})[:]).SetList(2, []*rec.Record{
+		rec.New(FolderSchema).SetBytes(1, (&ID{2})[:]).SetString(2, "a"),
+		rec.New(FolderSchema).SetBytes(1, (&ID{2})[:]).SetString(2, "b")}).Encode()
+	if _, err := DecodeFolders(ID{1}, dup); !errors.Is(err, ErrRecord) {
+		t.Fatal("duplicate decoded folder")
+	}
+	if _, err := DecodeFolders(ID{1}, nil); err == nil {
+		t.Fatal("nil")
+	}
+	s, _ := Init(t.TempDir())
+	if err := s.WriteFolders(ID{1}, fd); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := s.ReadFolders(ID{1}); err != nil || !bytes.Equal(b, fd) {
+		t.Fatal("folders file")
+	}
+	MkdirAll(s.MailDir(ID{1}, ID{2}))
+	MkdirAll(filepath.Join(s.MailboxDir(ID{1}), "mail", "junk"))
+	if f, _ := s.ListFolders(ID{1}); len(f) != 1 || f[0] != (ID{2}) {
+		t.Fatal("list folders")
+	}
+	if f, _ := s.ListFolders(ID{5}); f != nil {
+		t.Fatal("folders of missing mailbox")
+	}
+}

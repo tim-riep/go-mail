@@ -26,7 +26,9 @@ func FuzzDecodeRecords(f *testing.F) {
 	a := &AddressAssignment{Address: "a@b.c", MailboxID: ID{1}, ValidFrom: 1, AdminGen: 1}
 	a.Sign(k)
 	ad, _ := a.Encode()
-	for i, s := range [][]byte{ud, md, ed, kd, meta, pd, nd, jd, kfd, pin, ad, ed2} {
+	nm, _ := EncodeMailboxName(ID{1}, "Büro")
+	fo, _ := EncodeFolders(ID{1}, []Folder{{ID{2}, "INBOX"}, {ID{3}, "Archiv"}})
+	for i, s := range [][]byte{ud, md, ed, kd, meta, pd, nd, jd, kfd, pin, ad, ed2, nm, fo} {
 		f.Add(append([]byte{byte(i)}, s...))
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -36,7 +38,7 @@ func FuzzDecodeRecords(f *testing.F) {
 		in := data[1:]
 		var out []byte
 		var err error
-		switch data[0] % 12 {
+		switch data[0] % 14 {
 		case 0:
 			var u *User
 			if u, err = DecodeUser(in); err == nil {
@@ -96,12 +98,22 @@ func FuzzDecodeRecords(f *testing.F) {
 			if a, err = DecodeAddressAssignment(in); err == nil {
 				out, err = a.Encode()
 			}
+		case 12:
+			var n string
+			if n, err = DecodeMailboxName(ID{1}, in); err == nil {
+				out, err = EncodeMailboxName(ID{1}, n)
+			}
+		case 13:
+			var fs []Folder
+			if fs, err = DecodeFolders(ID{1}, in); err == nil {
+				out, err = EncodeFolders(ID{1}, fs)
+			}
 		}
 		if err != nil {
 			return
 		}
 		if !bytes.Equal(out, in) {
-			t.Fatalf("decoder %d accepted input that does not re-encode identically", data[0]%12)
+			t.Fatalf("decoder %d accepted input that does not re-encode identically", data[0]%14)
 		}
 	})
 }
