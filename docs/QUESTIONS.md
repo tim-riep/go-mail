@@ -37,3 +37,11 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
 
 - Kein Haltepunkt im engen Sinn (klarstellend), hier nur zur Kenntnis; Entscheidung in `DECISIONS.md`.
 - 2.4 nennt sechs Gründe; keiner heißt „erste Epoche“ oder „sofortiger Beginn nach leerem Vorrat“. Umgesetzt wird: Epoche 1 und die Epoche nach erschöpftem Vorrat tragen `regular` (geplant, mit fünf Minuten Vorlauf wie bisher); `member-added` gilt in M1 immer als sofort (K-Anhang: „geplant oder sofort“, es wird nur die sofortige Form gebaut).
+
+## Q6 Vertretung als eigene Mitgliedsart
+
+- Haltepunkt 1 (signierter Datensatz, Prüfregel im Client).
+- Stelle: 2.5 „Vertretung“, 2.4 Grund `delegation-ended`, K2 Regel 1 („Ein Wiederherstellungsempfänger und eine Vertretung dürfen keine Epochen anlegen“), D49 (Mitgliedsarten 1 Benutzer, 2 Wiederherstellung).
+- Problem: Die Regel, dass eine Vertretung keine Epochen anlegen darf, ist nur prüfbar, wenn die Mitgliederliste der `epoch.rec` eine Vertretung von einem Mitglied unterscheidet. Heute gibt es dafür keine Art.
+- Vorschlag: Mitgliedsart 3 `delegate` in `gomail/v1/rec/epoch-member`. Eine Vertretung bekommt wie ein Mitglied eine Verpackung je Epoche ihres Zeitraums, darf aber weder Epochen signieren noch `folders.gml` oder Metadaten neu ausstellen; `share --from --to` trägt sie als Art 3 ein, `delegation-ended` entfernt sie.
+- Bis zur Antwort: Auftrag 02 baut die Art 3 als strengste Lesart (`TODO(Q6)`), kein Befehl verwendet sie, bevor die Frage entschieden ist.
