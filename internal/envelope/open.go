@@ -32,6 +32,9 @@ func (f *File) VerifySignature(pub ed25519.PublicKey, extra []byte) error {
 	if f.Trailer == nil {
 		return ErrUnsigned
 	}
+	if !f.Header.Kind.valid() {
+		return fmt.Errorf("%w: unknown kind %d", ErrHeader, f.Header.Kind)
+	}
 	signed, err := f.signedBytes(f.Trailer.Signer, extra)
 	if err != nil {
 		return err

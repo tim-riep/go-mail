@@ -526,7 +526,35 @@ func TestKindNames(t *testing.T) {
 			t.Fatalf("%d: %q", k, k.String())
 		}
 	}
-	if Kind(0).String() == "" || Kind(9).String() == "" {
-		t.Fatal("unknown kinds need a name too")
+	// Unknown kinds have no name, so they can never be signed.
+	for _, k := range []Kind{0, 6, 9, 255} {
+		if k.String() != "" {
+			t.Fatalf("kind %d has a name %q", k, k.String())
+		}
+		if _, err := keys.Sign(ingestKey, k.String(), []byte("x")); !errors.Is(err, keys.ErrDomain) {
+			t.Fatalf("kind %d: signing must fail, got %v", k, err)
+		}
+	}
+}
+
+// TestUnknownKindNeverSignedOrVerified: even with the header check
+// bypassed, Close and VerifySignature refuse an unknown kind.
+func TestUnknownKindNeverSignedOrVerified(t *testing.T) {
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, testHeader(KindMeta), []Recipient{testRecipient(t)}, &SealOptions{Signer: testSigner()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.kind = 9
+	if err := w.Close(); !errors.Is(err, ErrHeader) {
+		t.Fatalf("expected ErrHeader, got %v", err)
+	}
+	f, err := Parse(seal(t, testHeader(KindMeta), []byte("x"), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Header.Kind = 9
+	if err := f.VerifySignature(ingestKey.Public().(ed25519.PublicKey), nil); !errors.Is(err, ErrHeader) {
+		t.Fatalf("expected ErrHeader, got %v", err)
 	}
 }

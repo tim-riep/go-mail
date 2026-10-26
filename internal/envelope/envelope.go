@@ -134,8 +134,10 @@ const (
 	KindIndex   Kind = 5
 )
 
-// String returns the name used in the signature domain
-// "gomail/v1/sig/<kind>".
+// String returns the ASCII name used in the signature domain
+// "gomail/v1/sig/<kind>" (3.4). An unknown kind has no name: the empty
+// string is rejected as a domain by keys.Sign and keys.Verify, so an
+// unknown kind can never be signed or verified.
 func (k Kind) String() string {
 	switch k {
 	case KindMail:
@@ -149,7 +151,7 @@ func (k Kind) String() string {
 	case KindIndex:
 		return "index"
 	}
-	return fmt.Sprintf("kind(%d)", uint8(k))
+	return ""
 }
 
 func (k Kind) valid() bool { return k >= KindMail && k <= KindIndex }

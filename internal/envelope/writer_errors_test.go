@@ -1,6 +1,7 @@
 package envelope
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 )
@@ -76,5 +77,52 @@ func TestVerifySignatureExtraTooLong(t *testing.T) {
 	pub := ingestKey.Public()
 	if err := f.VerifySignature(pub.(edPublicKey), make([]byte, MaxExtraSize+1)); !errors.Is(err, ErrSigner) {
 		t.Fatalf("expected ErrSigner, got %v", err)
+	}
+}
+
+// TestWriterWipesPlaintextOnError: after any failure, and after Close, the
+// writer holds no plaintext.
+func TestWriterWipesPlaintextOnError(t *testing.T) {
+	boom := errors.New("disk full")
+	secret := []byte("secret plaintext that must not linger")
+	// Size limit exceeded.
+	w, _ := NewWriter(&failingWriter{n: 1 << 20, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, nil)
+	w.Write(secret)
+	if _, err := w.Write(make([]byte, MaxContentSize)); !errors.Is(err, ErrTooLarge) {
+		t.Fatal(err)
+	}
+	if w.buf != nil {
+		t.Fatal("buffer kept after the size error")
+	}
+	// Output failure inside Write.
+	w, _ = NewWriter(&failingWriter{n: 1000, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, nil)
+	if _, err := w.Write(make([]byte, 2*ChunkSize)); !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	if w.buf != nil {
+		t.Fatal("buffer kept after the output error")
+	}
+	// Output failure in Close, and the stored-error path of Close.
+	w, _ = NewWriter(&failingWriter{n: 320, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, nil)
+	w.Write(secret)
+	if err := w.Close(); !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	if w.buf != nil {
+		t.Fatal("buffer kept after Close failed")
+	}
+	w, _ = NewWriter(&failingWriter{n: 1000, err: boom}, testHeader(KindMail), []Recipient{testRecipient(t)}, nil)
+	w.Write(make([]byte, 2*ChunkSize))
+	w.buf = append([]byte(nil), secret...)
+	w.Close()
+	if w.buf != nil {
+		t.Fatal("buffer kept on the stored-error path")
+	}
+	// Success: nothing left either.
+	var out bytes.Buffer
+	w, _ = NewWriter(&out, testHeader(KindMail), []Recipient{testRecipient(t)}, nil)
+	w.Write(secret)
+	if err := w.Close(); err != nil || w.buf != nil {
+		t.Fatal("buffer kept after a successful Close")
 	}
 }

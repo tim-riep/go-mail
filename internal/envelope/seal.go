@@ -257,6 +257,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 	}
 	if w.total+int64(len(p)) > MaxContentSize {
 		w.err = fmt.Errorf("%w: content exceeds %d bytes", ErrTooLarge, MaxContentSize)
+		w.discard()
 		return 0, w.err
 	}
 	w.total += int64(len(p))
@@ -268,6 +269,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 		// A full buffer followed by more data is not the last block.
 		if len(w.buf) == ChunkSize {
 			if err := w.block(w.buf, false); err != nil {
+				w.discard()
 				return written, err
 			}
 			wipe(w.buf)
@@ -298,6 +300,14 @@ func (w *Writer) block(pt []byte, last bool) error {
 	return w.emit(element(typ, ct))
 }
 
+// discard wipes and drops the buffered plaintext. It is called on every
+// path on which the writer stops, so no plaintext stays in memory after
+// an error or after Close.
+func (w *Writer) discard() {
+	wipe(w.buf)
+	w.buf = nil
+}
+
 // element frames payload as "typ || uint32 length || payload".
 func element(typ byte, payload []byte) []byte {
 	out := make([]byte, 0, elemHeaderSize+len(payload))
@@ -315,15 +325,20 @@ func (w *Writer) Close() error {
 	}
 	w.closed = true
 	if w.err != nil {
+		w.discard()
 		return w.err
 	}
-	if err := w.block(w.buf, true); err != nil {
+	err := w.block(w.buf, true)
+	w.discard()
+	if err != nil {
 		return err
 	}
-	wipe(w.buf)
-	w.buf = nil
 	if w.signer == nil {
 		return nil
+	}
+	if !w.kind.valid() {
+		w.err = fmt.Errorf("%w: unknown kind %d", ErrHeader, w.kind)
+		return w.err
 	}
 	var fileHash [sha256.Size]byte
 	w.hash.Sum(fileHash[:0])
