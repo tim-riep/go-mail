@@ -1,6 +1,6 @@
 # Übergabe nach Phase 0.1
 
-Stand: Phase 0 (kryptografisches Fundament) ist umgesetzt und getestet; Phase 0.1 hat `envelope` und `rec` auf die Version 1.1 der Spezifikation gebracht (Elementrahmen mit Typbytes, Empfängertyp 4, höchstens vier Empfänger, NFC über `golang.org/x/text`). Dieses Dokument richtet sich an die nächste Phase. Es beschreibt die öffentliche API der vier Pakete, die Invarianten, die Aufrufer einhalten müssen, bekannte Grenzen und offene Punkte. Entscheidungen stehen in `docs/DECISIONS.md`, Spezifikationslücken in `docs/SPEC-ISSUES.md`. Die Spezifikation 1.0 ist `docs/PLAN.md`; der Text der Version 1.1 (`docs/spec.md`) lag in Phase 0.1 nicht vor, siehe DECISIONS D42 bis D45.
+Stand: Phase 0 (kryptografisches Fundament) ist umgesetzt und getestet; Phase 0.1 hat `envelope` und `rec` auf die Version 1.1 der Spezifikation gebracht (Elementrahmen mit Typbytes, Empfängertyp 4, höchstens vier Empfänger, NFC über `golang.org/x/text`). Dieses Dokument richtet sich an die nächste Phase. Es beschreibt die öffentliche API der vier Pakete, die Invarianten, die Aufrufer einhalten müssen, bekannte Grenzen und offene Punkte. Entscheidungen stehen in `docs/DECISIONS.md`, Spezifikationslücken in `docs/SPEC-ISSUES.md`. Die Spezifikation ist `docs/PLAN.md` in Version 1.1 (Abschnitt 13 listet die Änderungen gegenüber 1.0).
 
 ## Überblick
 
@@ -91,19 +91,19 @@ func (c *GenerationCert) Encode() ([]byte, error); DecodeGenerationCert([]byte) 
 func (c *GenerationCert) Verify(rootPub ed25519.PublicKey) error
 func VerifyGenerationChain(rootPub ed25519.PublicKey, certs []*GenerationCert) error
 
-type PlatformCert struct { Role Role; Gen uint32; Pub ed25519.PublicKey; Created int64; IdentityGen uint32; Signature []byte }
-func NewPlatformCert(identity ed25519.PrivateKey, identityGen uint32, role Role, gen uint32, pub ed25519.PublicKey, created int64) (*PlatformCert, error)
+type PlatformCert struct { Role Role; Gen uint32; Pub ed25519.PublicKey; IdentityGen uint32; ValidFrom int64; Signature []byte }   // 2.3, Version 1.1
+func NewPlatformCert(identity ed25519.PrivateKey, identityGen uint32, role Role, gen uint32, pub ed25519.PublicKey, validFrom int64) (*PlatformCert, error)
 func DecodePlatformCert([]byte) (*PlatformCert, error); (c *PlatformCert) Encode(); Verify(identityPub) error
-type IdentitySuccession struct { Gen uint32; Pub ed25519.PublicKey; Created int64; Signature []byte }
-func NewIdentitySuccession(prev ed25519.PrivateKey, gen uint32, pub ed25519.PublicKey, created int64) (*IdentitySuccession, error)
-func DecodeIdentitySuccession([]byte); (s *IdentitySuccession) Encode(); Verify(prevPub, prevGen) error
+type PlatformSuccession struct { Gen uint32; Pub ed25519.PublicKey; ValidFrom int64; Signature []byte }   // gomail/v1/rec/platform-succ
+func NewPlatformSuccession(prev ed25519.PrivateKey, gen uint32, pub ed25519.PublicKey, validFrom int64) (*PlatformSuccession, error)
+func DecodePlatformSuccession([]byte); (s *PlatformSuccession) Encode(); Verify(prevPub, prevGen) error
 
 type Keystore struct { Generation uint32; Identity ed25519.PrivateKey; Unwrap *ecdh.PrivateKey }
 func (k *Keystore) Seal(passphrase []byte, r io.Reader) ([]byte, error)   // Argon2id 64 MiB/3/4, r: 16 Byte Salt, 12 Byte Nonce
 func OpenKeystore(data, passphrase []byte) (*Keystore, error)
 func (k *Keystore) Zero()
 func WriteKeystoreFile(path string, data []byte) error; ReadKeystoreFile(path string) ([]byte, error)
-var GenerationCertSchema, PlatformCertSchema, IdentitySuccessionSchema, KeystoreHeaderSchema, KeystoreContentSchema
+var GenerationCertSchema, PlatformCertSchema, PlatformSuccessionSchema, KeystoreHeaderSchema, KeystoreContentSchema
 var ErrWordlist, ErrWordCount, ErrUnknownWord, ErrChecksum, ErrGeneration, ErrZeroed, ErrDomain, ErrSignature,
     ErrCert, ErrKeystore, ErrPassphrase, ErrKDFParams
 ```
@@ -111,7 +111,7 @@ var ErrWordlist, ErrWordCount, ErrUnknownWord, ErrChecksum, ErrGeneration, ErrZe
 ### Invarianten
 - Generationen beginnen bei 1 und sind lückenlos; `VerifyGenerationChain` verlangt die vollständige Folge ab 1. Ob eine Signatur einer widerrufenen Generation vor dem Widerruf im Log stand (2.2 Punkt 4), prüft Phase 6 mit dem Transparenzlog.
 - `RootKey` nur kurz im Speicher halten und mit `keys.Wipe` löschen; `UserRoot.Zero` nach der Ableitung aufrufen. Der Seed wird nie gespeichert.
-- Signaturdomänen sind Konstanten (`DomainGeneration`, `DomainPlatformCert`, `DomainIdentitySuccession`; `envelope` nutzt die Dateiartnamen). Nie dieselbe Domäne für zwei Strukturen verwenden.
+- Signaturdomänen sind Konstanten (`DomainGeneration` = `generation`; `DomainPlatformCert` und `DomainPlatformSuccession` sind nach 2.3 der volle Datensatztyp, siehe DECISIONS D46; `envelope` nutzt die Dateiartnamen). Nie dieselbe Domäne für zwei Strukturen verwenden.
 - `Decode*` prüft Struktur, nicht Signatur; `Verify` immer aufrufen.
 - Der Schlüsselspeicher enthält nur die aktuelle Generation. Beim Öffnen werden KDF-Parameter aus dem Kopf innerhalb fester Grenzen übernommen (64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads); schwächere als die Spezifikation nie.
 - Die Passphrase ist `[]byte` (damit sie überschreibbar ist) und darf nicht leer sein.
@@ -187,6 +187,7 @@ var ErrMagic, ErrVersion, ErrSuite, ErrTruncated, ErrTooLarge, ErrHeader, ErrHea
 - Signaturpolitik: Mail-Dateien mit `AllowUnsigned`, alle anderen mit `ResolveSigner`. `envelope` koppelt `AllowUnsigned` nicht an die Dateiart, weil Abschnitt 7 für Index-Dateien keine Signatur nennt; die Ablage muss die Politik je Dateiart setzen und darf `AllowUnsigned` nie pauschal verwenden. Der Resolver setzt Abschnitt 7 um: unbekannter Schlüssel, fehlendes Zertifikat, Widerruf, kompromittierte Generation führen zu einem Fehler. `Extra` muss beim Prüfen gleich dem beim Signieren sein; Phase 3 legt für Metadaten den Datensatz fest (Postfach-ID, Epoche, Mail-ID, Empfangszeit, Ingest-Generation, Hashes der Mail- und Metadaten-Datei, Versionszähler).
 - Eine Mail-Datei (unsigniert) schützt ihren Empfängerteil nicht gegen Änderungen an fremden Einträgen. Der Client prüft deshalb den SHA-256 der Mail-Datei aus den signierten Metadaten. `FileHash` liefert den Hash aller Bytes vor dem Trailer-Element; bei einer unsignierten Datei ist das die ganze Datei.
 - Dateiaufbau nach dem Empfängerteil (Version 1.1): Elemente `Typbyte || uint32 Länge || Inhalt`, genau in der Folge `0x01* 0x02 0x03?`. Eine unsignierte Datei endet mit dem `0x02`-Element. Das Typbyte eines Blocks muss zum Letzter-Block-Flag im Nonce passen; sonst scheitert die Authentifizierung.
+- `RecipientRecovery` (Typ 4) gehört nach 2.4 nur in `epochs/<n>/members/recovery.wrap`, nie in Mail- oder Metadatendateien. `envelope` nimmt Typ 4 in jeder Datei an (3.1); die Ablage setzt die Regel aus 2.4 beim Schreiben und Lesen durch. Dateien sind unveränderlich: der Empfängerteil wird nie nachträglich ergänzt.
 - `SealOptions.Rand` und der Reader von `Keystore.Seal` sind für Testvektoren gedacht. Im Betrieb immer `nil` übergeben (crypto/rand); ein fester Reader würde Nonce-Präfix und Dateischlüssel wiederverwenden.
 - `Parse` braucht die ganze Datei; Dateien sind auf `MaxFileSize` begrenzt. Für Dateien aus dem Dateisystem die Größe vor dem Lesen prüfen.
 - Streaming beim Schreiben: `NewWriter` schreibt sofort Präambel, Kopf und Empfängerteil; erst `Close` macht die Datei gültig. Bei Abbruch die Datei verwerfen (passt zum `spool/`-Verfahren in 5.2).
@@ -233,5 +234,5 @@ Fuzz-Ziele: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.F
 4. Wiederherstellungsempfänger (`RecipientRecovery`) beim Schreiben eintragen; nachträgliche Einträge in signierten Dateien bleiben ausgeschlossen (S09, Version 1.1).
 5. Resolver für Signaturen: Zertifikatskette (`PlatformCert` über Identität, Identitätsnachfolge), Generationskette des Benutzers, Widerrufe aus dem Log, Aktualitätsgrenze 24 h (2.3).
 6. Eingabenormalisierung für Seed-Wörter und Shamir-Wörter in `gomailctl` (S11).
-7. Sobald `docs/spec.md` (Version 1.1) vorliegt: D42 und D43 gegen 3.1 prüfen, die Argon2-Bereiche aus 2.2 und die Datensatztypen aus 2.3 in `keys` abgleichen (D45, S07, S08), und die übrigen Punkte in SPEC-ISSUES gegen Abschnitt 13 abgleichen.
+7. Beim Lesen einer Mail (Phase 1 ff.) die Prüfung aus Abschnitt 7 der Version 1.1 umsetzen: Metadaten signiert, SHA-256 der ganzen Mail-Datei gleich dem Wert in den Metadaten, Kopffelder gleich den Metadaten.
 8. Zeremonie-Werkzeug: `shamir.Split` für den Plattform-Root, Probe-Rekonstruktion, Vergleich über die abgeleiteten öffentlichen Schlüssel.

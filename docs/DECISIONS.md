@@ -2,7 +2,7 @@
 
 Die Spezifikation liegt in `docs/PLAN.md` (Version 1.0). Dieses Dokument hält jede Stelle fest, an der sie mehrdeutig ist oder etwas offen lässt, und welche Entscheidung die Umsetzung getroffen hat. Grundsatz: im Zweifel die konservativere Lesart, keine erfundenen Anforderungen. Widersprüche und Lücken, die eine Änderung der Spezifikation nahelegen, stehen zusätzlich in `docs/SPEC-ISSUES.md`.
 
-Phase 0.1 setzt die Änderungen der Version 1.1 um, soweit der Auftrag sie benennt (Elementrahmen, Empfängertyp 4, höchstens vier Empfänger, NFC über `golang.org/x/text`). Der Text der Version 1.1 (`docs/spec.md`) lag bei der Umsetzung nicht vor; Einträge, die davon abhängen, sind als Annahme gekennzeichnet (D42 bis D44) und gegen den Text zu prüfen, sobald er im Repository liegt. Aufgehobene Entscheidungen bleiben als Verlauf stehen und sind mit "Aufgehoben in Phase 0.1" und dem Commit markiert.
+Phase 0.1 setzt die Änderungen der Version 1.1 um. Die Version 1.1 liegt als `docs/PLAN.md` vor (Abschnitt 13 listet die Änderungen); die Umsetzung von `envelope` und `rec` begann nach dem Auftragstext, bevor die Datei im Repository lag, und wurde danach gegen den Text geprüft (D42, D43). Aufgehobene Entscheidungen bleiben als Verlauf stehen und sind mit "Aufgehoben in Phase 0.1" und dem Commit markiert.
 
 Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung.
 
@@ -129,6 +129,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Begründung: Abgrenzung des Auftrags; die Bausteine dafür liegen bereit.
 
 ### D20 Plattformzertifikate und Identitätsnachfolge
+- Geändert in Phase 0.1 (Commit 5863796): Version 1.1 legt die Datensätze in 2.3 fest. `gomail/v1/rec/platform-cert`: `role`, `gen`, `pub`, `identity_gen`, `valid_from`, `sig` (Felder 4 und 5 gegenüber Phase 0 vertauscht). `gomail/v1/rec/platform-succ` (statt `identity-succ`): `gen`, `pub`, `valid_from`, `sig`. Signaturdomäne ist der Datensatztyp, siehe D46. Go-Namen: `ValidFrom`, `PlatformSuccession`.
 - Stelle: 2.3, `platform/admin-<gen>.cert`, `platform/ingest-<gen>.cert`, `identity-<gen>.succ`.
 - Frage: Die Spezifikation legt keine Felder fest.
 - Entscheidung: `gomail/v1/rec/platform-cert` mit `role` (1 admin, 2 ingest), `gen`, `pub`, `created`, `identity_gen` (Generation der signierenden Identität), `sig`; Domäne `platform-cert`. `gomail/v1/rec/identity-succ` mit `gen` (>= 2), `pub`, `created`, `sig` der Generation `gen-1`; Domäne `identity-succ`. Beides minimal, Signatur jeweils über den Datensatz ohne `sig`.
@@ -141,6 +142,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Begründung: Alle Parameter sind authentifiziert, wie gefordert; das Format folgt dem Muster der `.gml`-Datei.
 
 ### D22 Schlüsselspeicher: Grenzen der KDF-Parameter
+- Bestätigt in Phase 0.1: Version 1.1 schreibt in 2.2 genau diese Bereiche fest (64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads, Prüfung vor Argon2id). Keine Codeänderung; die Tests decken Unter- und Obergrenzen ab.
 - Stelle: 2.2, "Version und alle KDF-Parameter stehen im Kopf der Datei".
 - Frage: Parameter aus einer fremden Datei können den Client zu Gigabyte-Reservierungen zwingen. Welche Werte werden beim Öffnen akzeptiert?
 - Entscheidung: Speicher 64 MiB bis 256 MiB, Durchläufe 3 bis 10, Threads 1 bis 16. Untergrenzen sind die Werte der Spezifikation, Obergrenzen schützen vor einer feindlichen Datei (nach der unabhängigen Prüfung von 1 GiB/32/64 gesenkt). Die Prüfung erfolgt vor dem Aufruf von Argon2. Zum Schreiben werden immer die Werte der Spezifikation benutzt. Version und KDF-Kennung müssen 1 sein.
@@ -253,22 +255,28 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 
 ### D42 Elementrahmen nach dem Empfängerteil
 - Stelle: 3.1 (Version 1.1), Elemente mit Typbyte; Auftrag Phase 0.1 Punkt 1.
-- Frage: Der Auftrag nennt die Typbytes (`0x01` Block, `0x02` letzter Block, `0x03` Trailer) und die zulässige Folge `0x01*, 0x02, 0x03?`, nicht aber die Bytefolge innerhalb eines Elements; `docs/spec.md` lag nicht vor.
+- Frage: Der Auftrag nennt die Typbytes (`0x01` Block, `0x02` letzter Block, `0x03` Trailer) und die zulässige Folge `0x01*, 0x02, 0x03?`, nicht aber die Bytefolge innerhalb eines Elements; der Text der Version 1.1 lag zu diesem Zeitpunkt noch nicht im Repository (er kam als `docs/PLAN.md` hinzu).
 - Entscheidung: Ein Element ist `Typbyte (1) || Länge uint32 Big Endian (4) || Inhalt`. Der Parser nimmt genau die Folge `ElemBlock* ElemLastBlock ElemTrailer?` und danach das Dateiende an. Jeder `ElemBlock` ist ein voller Block (`chunk_size + 16`), der `ElemLastBlock` ist 16 bis `chunk_size + 16` Byte groß und nur als einziger Block leer. Abgelehnt werden: fehlender `0x02` (Dateiende oder Trailer nach `0x01`-Blöcken: `ErrTruncated` bzw. `ErrElement`), zwei `0x02`, `0x01` nach `0x02`, zwei Trailer, jedes andere Typbyte (`ErrElementType`), jedes Byte nach dem Trailer (`ErrElement`, vor dem Lesen des Längenfelds). Eine unsignierte Datei endet mit dem `0x02`-Element; es gibt kein Trailer-Längenfeld 0 mehr. Die Übereinstimmung von Typbyte und Letzter-Block-Flag im Nonce prüft die Authentifizierung: Der Entschlüsseler setzt das Flag aus dem Typbyte, ein Block mit dem jeweils anderen Flag authentifiziert nicht (`TestElementTypeMatchesNonceFlag`). `MaxFileSize` enthält 5 Byte Rahmen je Element.
-- Begründung: Typbyte vor der Länge entspricht dem Aufbau der übrigen Teile (Kennung, dann Länge). Die Folge ist ohne Schlüssel und streamend prüfbar; jede Abweichung wird vor jeder Entschlüsselung abgelehnt. Annahme, gegen 3.1 der Version 1.1 zu prüfen.
+- Begründung: Typbyte vor der Länge entspricht dem Aufbau der übrigen Teile (Kennung, dann Länge). Die Folge ist ohne Schlüssel und streamend prüfbar; jede Abweichung wird vor jeder Entschlüsselung abgelehnt.
+- Bestätigt gegen den Text: 3.1 der Version 1.1 legt `Typ (1 Byte) || Länge (uint32 Big Endian) || Wert`, die Typen `0x01`/`0x02`/`0x03`, die Folge "beliebig viele `0x01`, genau ein `0x02`, danach höchstens ein `0x03`, danach Dateiende" und die Ablehnung jedes Bytes danach fest; 3.4 den Hash über alle Bytes vor dem Trailer-Element einschließlich Typbyte und Länge. Die Umsetzung entspricht dem.
 
 ### D43 Empfängertyp 4 und Höchstzahl 4
 - Stelle: 3.1 (Version 1.1); Auftrag Phase 0.1 Punkt 2.
-- Entscheidung: `RecipientRecovery = 4`; Typen 1 bis 4 gültig, höchstens vier Einträge (siehe D32). Für Typ 4 gelten dieselben Regeln wie für die anderen (HPKE-`info` mit Typ, ID, Generation; eindeutiges Tripel). Ob Version 1.1 dem Wiederherstellungsempfänger weitere Regeln gibt (etwa Pflicht beim Schreiben), ist aus dem Auftrag nicht ersichtlich und gegen 3.1 zu prüfen.
-- Begründung: Vorgabe des Auftrags.
+- Entscheidung: `RecipientRecovery = 4`; Typen 1 bis 4 gültig, höchstens vier Einträge (siehe D32). Für Typ 4 gelten dieselben Regeln wie für die anderen (HPKE-`info` mit Typ, ID, Generation; eindeutiges Tripel). `envelope` erzwingt nicht, dass Typ 4 nur in `recovery.wrap` vorkommt: 2.4 (Version 1.1) legt fest, dass der Wiederherstellungsempfänger nie in Mail- oder Metadatendateien eingetragen wird, aber 3.1 lässt die Typen 1 bis 4 in jeder Datei zu; die Regel aus 2.4 setzt die Ablage um (siehe HANDOFF).
+- Begründung: Vorgabe von 3.1; keine erfundene Prüfung im Format.
 
 ### D44 Testvektoren nach dem Formatwechsel
 - Stelle: Auftrag Phase 0.1, "Vektoren, die sich nicht ändern dürften, müssen unverändert bleiben".
 - Entscheidung: Die zehn `.gml`-Dateien sind neu erzeugt (Rahmen geändert, Signaturen decken den neuen Rahmen ab). Alle in `vectors.json` festgehaltenen Werte sind byte-identisch geblieben: Kopfkodierung, Nonce-Präfix, SHA-256 der Blockchiffrate, SHA-256 des Klartexts; das wurde vor dem Commit mit der alten Datei verglichen. Die Dateien aus Phase 0 liegen unter `internal/envelope/testdata/phase0/` und laufen als Ablehnungsfälle (`TestPhase0FilesRejected`) und als Fuzz-Saat weiter.
 - Begründung: Kopf, Schlüsselableitung, Nonces und Block-AAD sind unverändert; nur der Rahmen und damit die Signatur ändern sich. Ein Unterschied in den festgehaltenen Werten hätte auf einen Fehler in der Umsetzung gedeutet.
 
-### D45 Nicht umgesetzt: Argon2-Bereiche und Datensatztypen aus 2.2 und 2.3
-- Stelle: Auftrag Phase 0.1 Punkt 4 (S07, S08).
-- Entscheidung: Nicht geändert. Die Bereiche für Argon2id in 2.2 und die Datensatztypen der Plattformzertifikate und Nachfolgen in 2.3 der Version 1.1 stehen nur im Text der Spezifikation, der nicht vorlag. `keys` prüft weiterhin die Grenzen aus D22 (64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads, Untergrenzen vorhanden) und verwendet die Formate aus D20.
-- Begründung: Raten würde die Vorgabe "keine erfundenen Anforderungen" verletzen. Sobald `docs/spec.md` vorliegt, sind D22 und D20 gegen 2.2 und 2.3 abzugleichen.
+### D45 Argon2-Bereiche und Datensatztypen aus 2.2 und 2.3
+- Stelle: Auftrag Phase 0.1 Punkt 4 (S07, S08); 2.2 und 2.3 der Version 1.1.
+- Entscheidung: Die Argon2id-Bereiche in 2.2 entsprechen genau D22; keine Änderung. Die Datensatztypen in 2.3 weichen von D20 ab und sind angeglichen (Commit 5863796), siehe D20 und D46.
+- Begründung: Vorgabe des Textes.
 
+### D46 Signaturdomäne der Plattformdatensätze
+- Stelle: 2.3 (Version 1.1): "Signiert wird jeweils der Datensatz ohne das Signaturfeld, mit dem Präfix `"gomail/v1/sig/" || Datensatztyp || 0x00`."
+- Frage: "Datensatztyp" ist in der Tabelle davor der volle Typ-String (`gomail/v1/rec/platform-cert`). Gemeint sein könnte auch ein Kurzname.
+- Entscheidung: Wörtlich: Domäne ist der volle Typ-String, die signierte Nachricht beginnt mit `gomail/v1/sig/gomail/v1/rec/platform-cert\x00`. `DomainPlatformCert` und `DomainPlatformSuccession` sind gleich `PlatformCertSchema.Type` und `PlatformSuccessionSchema.Type`; ein Test pinnt das. Das Generationszertifikat der Benutzer (2.2, D18) ist nicht betroffen und behält die Domäne `generation`.
+- Begründung: Die konservative Lesart ist der Text; die Verdopplung des Präfixes ist eindeutig und kollidiert mit keiner anderen Domäne. Siehe SPEC-ISSUES S14.

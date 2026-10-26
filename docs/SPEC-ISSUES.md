@@ -4,7 +4,7 @@ Festgestellt bei der Umsetzung von Phase 0 (`rec`, `keys`, `shamir`, `envelope`)
 
 Keiner der Punkte ist ein Sicherheitsproblem, das den Bau hätte anhalten müssen. S01 und S06 betreffen die Robustheit des Formats, S09 ein Spannungsfeld im Entwurf, die übrigen sind Lücken oder Mehrdeutigkeiten.
 
-Stand Phase 0.1: Version 1.1 der Spezifikation behandelt laut Auftrag S01, S02, S07, S08, S09 und S12. Erledigte Punkte sind unten mit Commit markiert. S07 und S08 sind in 1.1 geregelt, aber noch nicht umgesetzt, weil der Text (`docs/spec.md`) nicht vorlag. Für S03 bis S06, S10, S11 und S13 ist nicht bekannt, ob 1.1 sie aufgreift; sie bleiben offen, bis der Text geprüft ist.
+Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01, S02, S04, S06 (Lesepfad ab Phase 1), S07, S08, S09 und S12, jeweils unten mit Commit oder Verweis markiert. Offen bleiben S03, S05, S10, S11 und S13 (in 1.1 nicht aufgegriffen) und der neue Punkt S14.
 
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
@@ -27,6 +27,7 @@ Stand Phase 0.1: Version 1.1 der Spezifikation behandelt laut Auftrag S01, S02, 
 - Vorschlag: Die Bytefolge in 3.2 ausschreiben (`uint8 type || 16 Byte id || uint32 BE gen`), ebenso für die AAD-Eingabe festhalten, dass "Kopf" den Datensatz ohne sein Längenfeld meint.
 
 ## S04 Bedeutung von `kind` in der Signaturdomäne
+- Erledigt in Version 1.1: 3.4 nennt den ASCII-Namen der Dateiart; entspricht D36, keine Codeänderung.
 - Stelle: 3.4, `"gomail/v1/sig/" || kind || 0x00`.
 - Problem: `kind` ist im Kopf ein `uint8`, in der Domäne könnte die Zahl oder der Name gemeint sein.
 - Phase 0: Der Name (`gomail/v1/sig/meta`), DECISIONS D36.
@@ -39,20 +40,21 @@ Stand Phase 0.1: Version 1.1 der Spezifikation behandelt laut Auftrag S01, S02, 
 - Vorschlag: Regel 4 entsprechend ergänzen, inklusive der Aussage, dass jedes Element mit seinem Typ-String beginnt.
 
 ## S06 Empfängerteil unsignierter Dateien ist nicht geschützt
+- Erledigt in Version 1.1 (3.1, 7): Der Client öffnet eine Mail nur, wenn der SHA-256 der gesamten Mail-Datei mit den signierten Metadaten übereinstimmt. Keine Änderung in Phase 0.1; betrifft die Lesepfade ab Phase 1. `File.FileHash` liefert für unsignierte Dateien genau diesen Hash.
 - Stelle: 3.1, "bewusst nicht Teil der AAD der Blöcke"; 7, Mails selbst tragen keine Signatur.
 - Problem: In einer Mail-Datei (`kind` 1, unsigniert) kann, wer die Datei schreiben darf, Einträge anderer Empfänger entfernen, verändern oder hinzufügen, ohne dass ein Empfänger es an seiner eigenen Entschlüsselung bemerkt. Ein Angreifer gewinnt damit keinen Schlüssel (ein neuer Eintrag ließe sich nur mit dem Dateischlüssel erzeugen), kann aber einzelne Mitglieder vom Lesen ausschließen (Verfügbarkeit) und das Entfernen eines Wiederherstellungsempfängers verschleiern.
 - Phase 0: Verhalten dokumentiert und getestet (DECISIONS D39, `TestBitFlipForeignRecipient`).
 - Vorschlag: Festhalten, dass die Integrität des Empfängerteils einer Mail über die signierten Metadaten gewährleistet wird (Abschnitt 7 nimmt den SHA-256 der verschlüsselten Mail-Datei in die Ingest-Signatur auf; dieser Hash deckt den Empfängerteil mit ab) und dass ein Client beim Lesen einer Mail diesen Hash prüft.
 
 ## S07 Keine Grenzen für KDF-Parameter aus dem Schlüsselspeicher
-- Stand Phase 0.1: In Version 1.1 (2.2) geregelt, Umsetzung steht aus, weil der Text nicht vorlag. Der Code prüft weiterhin die Grenzen aus D22 (Unter- und Obergrenzen vorhanden); siehe D45.
+- Erledigt in Version 1.1 (2.2): Speicher 64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads, Prüfung vor Argon2id. Entspricht genau D22; keine Codeänderung, Tests für Unter- und Obergrenzen vorhanden.
 - Stelle: 2.2 Lokale Ablage, "alle KDF-Parameter stehen im Kopf der Datei".
 - Problem: Werden die Parameter aus der Datei übernommen, kann eine manipulierte Datei den Client zu beliebig großen Argon2-Reservierungen zwingen, bevor die Authentifizierung fehlschlägt (die AAD-Prüfung braucht den abgeleiteten Schlüssel).
 - Phase 0: Unter- und Obergrenzen, Prüfung vor Argon2 (DECISIONS D22).
 - Vorschlag: In 2.2 festlegen, welche Parameter beim Öffnen akzeptiert werden (mindestens die festen Werte, höchstens definierte Obergrenzen) oder nur exakt die festen Werte zulassen.
 
 ## S08 Formate der Plattformzertifikate und der Identitätsnachfolge fehlen
-- Stand Phase 0.1: In Version 1.1 (2.3) geregelt, Abgleich steht aus, weil der Text nicht vorlag; siehe D45.
+- Erledigt in Phase 0.1 (Commit 5863796): 2.3 legt `gomail/v1/rec/platform-cert` und `gomail/v1/rec/platform-succ` fest; `keys` ist angeglichen (D20, D46).
 - Stelle: 2.3, `admin-<gen>.cert`, `ingest-<gen>.cert`, `identity-<gen>.succ`; 4 Ablage.
 - Problem: Nur die Dateinamen und die Signierenden sind genannt, nicht die Felder.
 - Phase 0: Minimale Datensätze (DECISIONS D20).
@@ -89,3 +91,10 @@ Stand Phase 0.1: Version 1.1 der Spezifikation behandelt laut Auftrag S01, S02, 
 - Problem: Ob eine Signatur einer widerrufenen Generation "nachweislich vor dem Widerruf im Log stand", lässt sich erst mit dem Transparenzlog (Phase 6) prüfen. Phase 0 kann nur die Kette der Generationszertifikate prüfen.
 - Phase 0: `VerifyGenerationChain` prüft Lückenlosigkeit und Signaturen; die zeitliche Einordnung bleibt offen.
 - Vorschlag: Kein Änderungsbedarf an der Spezifikation; Hinweis für Phase 2 und 6 (siehe HANDOFF).
+
+## S14 Signaturdomäne der Plattformdatensätze verdoppelt das Präfix
+- Stelle: 2.3 (Version 1.1), "mit dem Präfix `"gomail/v1/sig/" || Datensatztyp || 0x00`".
+- Problem: Der Datensatztyp ist laut Tabelle der volle Typ-String, die signierte Nachricht beginnt also mit `gomail/v1/sig/gomail/v1/rec/platform-cert`. Das ist eindeutig, aber vermutlich nicht beabsichtigt; für das Generationszertifikat in 2.2 ist keine Domäne genannt (Phase 0 nutzt `generation`).
+- Phase 0.1: Wörtlich umgesetzt (DECISIONS D46).
+- Vorschlag: Entweder bestätigen oder in 2.3 einen Kurznamen (`platform-cert`, `platform-succ`) nennen und in 2.2 die Domäne des Generationszertifikats festlegen.
+
