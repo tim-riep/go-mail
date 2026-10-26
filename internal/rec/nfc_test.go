@@ -3,19 +3,29 @@ package rec
 import (
 	"testing"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // rs builds a string from code points. Test strings are written this way
 // so that combining marks and jamo are visible as numbers in the source.
 func rs(r ...rune) string { return string(r) }
 
+// TestUnicodeVersion records which Unicode version the normalization
+// tables of golang.org/x/text implement. A mismatch with the toolchain's
+// unicode package is not an error (the decoder uses only x/text), but it
+// is worth knowing when the dependency is updated.
 func TestUnicodeVersion(t *testing.T) {
-	if unicode.Version != nfcUnicodeVersion {
-		t.Fatalf("nfc_tables.go is generated from Unicode %s but the toolchain uses %s; regenerate with nfc_tables_gen.go",
-			nfcUnicodeVersion, unicode.Version)
+	if norm.Version != unicode.Version {
+		t.Logf("x/text normalizes by Unicode %s, the toolchain's unicode package is %s", norm.Version, unicode.Version)
 	}
 }
 
+// TestIsNFC keeps the cases of the phase 0 implementation. The "yes"
+// cases include strings that pass the NFC quick check only as "maybe"
+// and strings that need a full normalization to confirm; the "no" cases
+// include singletons, out-of-order marks, composable pairs and jamo
+// sequences, and invalid UTF-8.
 func TestIsNFC(t *testing.T) {
 	yes := []string{
 		"",
@@ -66,6 +76,7 @@ func TestIsNFC(t *testing.T) {
 		"\xff",                     // invalid UTF-8
 		"\xed\xa0\x80",             // surrogate
 		"\xc0\x80",                 // overlong NUL
+		"a\xffb",                   // invalid byte inside otherwise normalized text
 	}
 	for _, s := range yes {
 		if !isNFC(s) {
@@ -79,6 +90,21 @@ func TestIsNFC(t *testing.T) {
 	}
 }
 
+// TestInvalidUTF8NotNormalizedByXText documents why validUTF8 is checked
+// separately: x/text reports invalid bytes as normalized.
+func TestInvalidUTF8NotNormalizedByXText(t *testing.T) {
+	for _, s := range []string{"\xff", "\xed\xa0\x80", "\xc0\x80"} {
+		if !norm.NFC.IsNormalString(s) {
+			t.Logf("x/text now rejects %+q itself; the separate check stays", s)
+		}
+		if validUTF8(s) {
+			t.Errorf("validUTF8(%+q) = true", s)
+		}
+	}
+}
+
+// TestNormalizeNFCSamples keeps the phase 0 normalization samples as a
+// check on the dependency: the expected NFC form of each input.
 func TestNormalizeNFCSamples(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{rs('e', 0x0301), rs(0x00e9)},
@@ -93,78 +119,18 @@ func TestNormalizeNFCSamples(t *testing.T) {
 		{rs(0x1e69, 0x0316), rs(0x1e69, 0x0316)},
 		{rs(0x0f73), rs(0x0f71, 0x0f72)},
 		{rs('A', 0x0334, 0x0301), rs(0x00c1, 0x0334)},
+		{rs(0xac01), rs(0xac01)},
 	}
 	for _, c := range cases {
-		got := string(normalizeNFC([]rune(c.in)))
+		got := norm.NFC.String(c.in)
 		if got != c.want {
 			t.Errorf("nfc(%+q) = %+q, want %+q", c.in, got, c.want)
 		}
-	}
-}
-
-func TestCombiningClassAndQuickCheckSamples(t *testing.T) {
-	samples := []struct {
-		r   rune
-		ccc uint8
-		qc  uint8
-	}{
-		{'a', 0, qcYes},
-		{0x0301, 230, qcMaybe},
-		{0x0323, 220, qcMaybe},
-		{0x05bc, 21, qcYes}, // every composite with dagesh is excluded
-		{0x05bf, 23, qcYes},
-		{0x0344, 230, qcNo},
-		{0x212b, 0, qcNo},
-		{0x1161, 0, qcMaybe},
-		{0x11a8, 0, qcMaybe},
-		{0x1100, 0, qcYes},
-		{0xac00, 0, qcYes},
-		{0x0b3e, 0, qcMaybe},
-		{0x0f73, 0, qcNo},
-		{0x10ffff, 0, qcYes},
-	}
-	for _, s := range samples {
-		if got := combiningClass(s.r); got != s.ccc {
-			t.Errorf("ccc(%U) = %d, want %d", s.r, got, s.ccc)
+		if isNFC(c.want) != true {
+			t.Errorf("isNFC(%+q) = false for an NFC string", c.want)
 		}
-		if got := quickCheck(s.r); got != s.qc {
-			t.Errorf("qc(%U) = %d, want %d", s.r, got, s.qc)
+		if (c.in == c.want) != isNFC(c.in) {
+			t.Errorf("isNFC(%+q) disagrees with normalization", c.in)
 		}
-	}
-	type pc struct {
-		a, b, c rune
-		ok      bool
-	}
-	for _, p := range []pc{
-		{'e', 0x0301, 0x00e9, true},
-		{'q', 0x0301, 0, false},
-		{0x1100, 0x1161, 0xac00, true},
-		{0xac00, 0x11a8, 0xac01, true},
-		{0xac01, 0x11a8, 0, false},
-		{0x1161, 0x11a8, 0, false},
-		{0x05d1, 0x05bc, 0, false}, // excluded composite FB31
-	} {
-		c, ok := composePair(p.a, p.b)
-		if ok != p.ok || c != p.c {
-			t.Errorf("composePair(%U, %U) = %U, %v; want %U, %v", p.a, p.b, c, ok, p.c, p.ok)
-		}
-	}
-}
-
-func TestDecomposeDepthGuard(t *testing.T) {
-	// The depth guard only matters for malformed tables; it must still
-	// terminate and return something.
-	if out := decompose(nil, 'a', maxDecompDepth+1); len(out) != 1 || out[0] != 'a' {
-		t.Fatal("depth guard must return the rune unchanged")
-	}
-}
-
-func TestNormalizeHangulLVT(t *testing.T) {
-	// A precomposed LVT syllable decomposes to three jamo and recomposes.
-	if got := string(normalizeNFC([]rune{0xac01})); got != rs(0xac01) {
-		t.Fatalf("got %+q", got)
-	}
-	if d := decompose(nil, 0xac01, 0); len(d) != 3 || d[2] != 0x11a8 {
-		t.Fatalf("decomposition %U", d)
 	}
 }

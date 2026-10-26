@@ -3,6 +3,8 @@ package rec
 import (
 	"bytes"
 	"testing"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // FuzzDecode checks the decoder on arbitrary input: it must never panic,
@@ -42,11 +44,12 @@ func FuzzDecode(f *testing.F) {
 }
 
 // FuzzIsNFC checks that the NFC check never panics and agrees with a full
-// normalization of its input: a string is accepted if and only if
-// normalizing it changes nothing.
+// normalization of its input: a valid UTF-8 string is accepted if and
+// only if normalizing it with x/text changes nothing, and invalid UTF-8
+// is never accepted.
 func FuzzIsNFC(f *testing.F) {
 	for _, s := range []string{"", "abc", rs('e', 0x0301), rs(0x00e9), rs(0x1100, 0x1161), rs(0xac00, 0x11a8),
-		rs('q', 0x0323, 0x0301), rs(0x1e0b, 0x0323), rs(0x0f71, 0x0f72, 0x0f74)} {
+		rs('q', 0x0323, 0x0301), rs(0x1e0b, 0x0323), rs(0x0f71, 0x0f72, 0x0f74), "\xff", "a\xffb"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -57,7 +60,7 @@ func FuzzIsNFC(f *testing.F) {
 			}
 			return
 		}
-		want := string(normalizeNFC([]rune(s))) == s
+		want := norm.NFC.String(s) == s
 		if got != want {
 			t.Fatalf("isNFC(%+q) = %v, normalization says %v", s, got, want)
 		}
