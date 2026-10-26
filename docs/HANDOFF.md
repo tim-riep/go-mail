@@ -419,6 +419,57 @@ Nicht angelegt werden in Phase 1: `log/`, `checkpoints/`, `index/`, `platform/id
 - Der Server vertraut beim Prüfen der Epochenkette Epoche 1 beim ersten Kontakt; ein Benutzer mit Schreibzugriff könnte ein neues Postfach mit eigener Epoche 1 an eine fremde Adresse hängen, wenn er auch `addresses.json` ändern kann. Dagegen schützt erst das Log (Adresszuordnungen und Epochen sind dort eingetragen).
 - Dateirechte 0600/0700: Server und Client müssen in der Entwicklung als derselbe Betriebssystembenutzer laufen oder gemeinsame Gruppenrechte bekommen (9.1 verlangt für die Abnahme getrennte Maschinen).
 
+## Testabdeckung
+
+`go test -cover` (Phase 1):
+
+| Paket | Abdeckung | Mindestwert |
+|---|---|---|
+| `store` | 90,2 % | 85 % |
+| `ingest` | 88,9 % | 85 % |
+| `client` | 87,5 % | 85 % |
+| `smtpd` | 91,9 % | – |
+| `translog` | 100 % | – |
+| `ceremony` | 79,1 % | – |
+| `rec`, `shamir`, `envelope`, `keys` | 99,6 %, 100 %, 93,5 %, 88,5 % | – |
+
+Die nicht abgedeckten Zeilen in `store`, `ingest` und `client` fallen in vier Gruppen; keine gibt Daten heraus, alle brechen ab und reichen den Fehler weiter:
+
+| Gruppe | Beispiele | Begründung |
+|---|---|---|
+| Fehler des Dateisystems | `store/fs.go` (`MkdirAll`, `writeTemp`, `WriteFileAtomic`, `RenameDurable`, `ReadFileLimited` nach `Stat`), `store/store.go` (Anlegen von Verzeichnissen in `WriteEpoch`, `WriteWrap`, `WriteMailbox`, `CreateUser`), `ingest/delivery.go` (`Mkdir`, `OpenFile`, `Sync`, `Close`, Schreiben von Metadaten und Marker, Journal, Löschen des Journals), `ingest/ingest.go` (`Recover`: `RemoveAll`, `SyncDir`), `ingest/queue.go` (Schreiben der Begriffsliste, Löschen der Marker), `client` (Schreiben von Verpackung, Ordnern, `mailbox.rec`, `state.json`) | Treten nur bei Ein-/Ausgabefehlern, vollem Datenträger oder fehlenden Rechten auf. Stellvertretend getestet sind: ENOSPC als `452` (`TestDiskSpaceAndErrors`), Fehler beim Verschieben mit Rücknahme (`TestMoveFailureIsUndone`), fehlende Verzeichnisse und Dateien in allen Lesepfaden, Absturz an jedem Schritt (`TestCrashDuringReceipt`). |
+| Fehler von `crypto/rand` | `store.NewID`, `tempFile`, Nonces und Schlüssel in `ingest/queue.go`, Epochenschlüssel in `client/mailbox.go` | `crypto/rand` schlägt auf unterstützten Systemen nicht fehl; der Fehler wird trotzdem weitergegeben. |
+| Kodierfehler geprüfter Strukturen | `rec.Encode` in `User.Encode`, `Epoch.Sign`, `AddressAssignment.Sign`, `sealPending`, `writeMeta`, `createEpoch` | Die Werte sind vorher geprüft (feste Längen, bereinigte Zeichenketten); `rec.Encode` kann dann nicht fehlschlagen. |
+| Nicht erreichbare Prüfungen | `ecdh.X25519().NewPublicKey/NewPrivateKey` in `DecodeEpoch`, `DecodeEpochKeys` (32 Byte werden immer angenommen); `ParseID` nach erfolgreicher Zeichenprüfung; Kürzung in `CleanText`, wenn `cut > len(s)`; `hpke`-Fehlerpfade in `envelope`; Rückfall auf `time.Now` und `statfs` in `ingest.New` (Tests setzen beides) | Absicherungen gegen spätere Änderungen; die Bedingungen sind durch vorherige Prüfungen ausgeschlossen. |
+
+Die Programme unter `cmd/` haben keinen Mindestwert; ihr Ablauf ist zusätzlich durch `TestRunbook` (gebaute Programme, alle Schritte des RUNBOOK) abgedeckt, der nicht in die Abdeckung der Pakete eingeht.
+
+### Nicht abgedeckte Zeilen der Pakete aus Phase 0 (Stand Phase 0.1)
+
+Die Zeilennummern in `envelope/envelope.go` sind seit Phase 1 um eins verschoben (ein Import mehr).
+
+`go test -cover` (Phase 0.1): `rec` 99,6 %, `shamir` 100 %, `envelope` 93,5 %, `keys` 88,3 % (für `keys` ist kein Mindestwert gefordert). Nicht abgedeckte Zeilen in den drei Paketen mit Mindestanforderung:
+
+| Datei | Zeilen | Code | Begründung |
+|---|---|---|---|
+| rec/rec.go | 439-441 | `checkValue` in `Encode` für Listen schlägt fehl | Elemente werden bereits in `SetList` geprüft und die Slice kopiert; der zweite Aufruf ist eine Absicherung gegen spätere Änderung der Element-Records, die kein Test erzwingen kann, ohne die Prüfung in `SetList` zu umgehen. |
+| envelope/envelope.go | 214-216, 278-280, 341-343 | `Encode`-Fehler in `Header.encode`, `encodeRecipients`, `Trailer.encode` | Die Werte stammen aus validierten Strukturen mit festen Größen; `rec.Encode` kann dann nicht fehlschlagen. Die Zweige geben den Fehler nur weiter (fail closed). |
+| envelope/open.go | 71-73 | `hpke.NewDHKEMPrivateKey` schlägt fehl | Die Kurve wird vorher geprüft (`Curve() == ecdh.X25519()`); die Funktion schlägt nur bei anderen Kurven fehl. |
+| envelope/open.go | 83-85 | entpackter Dateischlüssel hat nicht 32 Byte | `wrapped_key` hat per Schema 48 Byte, AES-GCM liefert daraus immer 32 Byte; Absicherung. |
+| envelope/open.go | 90-92 | `contentAEAD` schlägt fehl | Siehe seal.go 221-232. |
+| envelope/parse.go | 145-147 | mehr als 800 Blöcke | Durch `MaxFileSize` (am Anfang von `Parse`) ist ein 801. Block nicht erreichbar, weil Kopf, Empfängerteil und Trailer höchstens etwa 21,5 KiB Spielraum lassen, ein Blockelement aber 65.557 Byte braucht; die Prüfung bleibt als eigenständige Garantie. `TestParseTooManyBlocksAndTooLarge` prüft, dass 801 Blöcke abgelehnt werden (über die Dateigröße). |
+| envelope/parse.go | 189-191, 193-195, 214-216 | `Encode`-Fehler in `Bytes` | `Bytes` wird nur auf Dateien aufgerufen, die `Parse` angenommen hat; deren Strukturen kodieren immer. |
+| envelope/seal.go | 78-83 | `Write`/`Close` in `Seal` schlagen fehl | `Seal` schreibt in einen `bytes.Buffer` (schlägt nie fehl) und prüft die Größe vorher; die Fehlerpfade sind für den `Writer` getestet (`TestWriterOutputErrors`). |
+| envelope/seal.go | 158-160 | `hdr.encode` schlägt fehl | Validierte Kopffelder mit festen Größen. |
+| envelope/seal.go | 168-170, 177-179 | `hpke.NewDHKEMPublicKey`, `sender.Seal` schlagen fehl | Kurve vorher geprüft; `Seal` schlägt im Base-Modus mit gültigem Kontext nicht fehl. `NewSender` (Punkt kleiner Ordnung) ist getestet. |
+| envelope/seal.go | 183-188 | `encodeRecipients` schlägt fehl; Empfängerteil über 16 KiB | Validierte Einträge; vier Einträge der Suite 1 belegen etwa 0,6 KiB. Die Grenze wird relevant für Suite 2 (S12). |
+| envelope/seal.go | 192-194, 221-232 | `contentAEAD`: HKDF, `aes.NewCipher`, `cipher.NewGCM` schlagen fehl | Feste Schlüssellänge 32 und feste Parameter; diese Funktionen schlagen nur bei falschen Längen fehl. |
+| envelope/seal.go | 238-240 | `emit` bei gesetztem `w.err` | `Write` und `Close` prüfen `w.err` vor dem Aufruf; Absicherung gegen neue Aufrufer. |
+| envelope/seal.go | 290-293 | 801. Block im Schreiber | Die Größenprüfung in `Write` (`MaxContentSize`) macht einen 801. Block unerreichbar; die Prüfung bleibt als eigenständige Garantie. `TestWriterLimits` prüft die Grenze über die Größe. |
+| envelope/seal.go | 346-360 | `signedStructure`, `keys.Sign`, `Trailer.encode` schlagen in `Close` fehl | Der Signer wird in `NewWriter` validiert (Typ, Generation, Schlüssellänge, `Extra` bis 4 KiB); danach können diese Aufrufe nicht fehlschlagen. |
+
+Alle nicht abgedeckten Zeilen sind Fehlerzweige, die Fehler nur weiterreichen oder Grenzen ein zweites Mal prüfen. Keiner gibt Daten heraus.
+
 ## Unabhängige Prüfung in Phase 1
 
 Zwei Subagenten prüften ohne Kenntnis von DECISIONS, HANDOFF, SPEC-ISSUES und der Commit-Historie.
@@ -438,6 +489,21 @@ Zur Kenntnis genommen: B4 (bleibt ein Rückgängigmachen hängen, liegen Teile b
 - B: Der unsignierte Zeiger auf den Posteingang in `mailbox.rec` ließ sich umbiegen, `list` zeigte dann ohne Warnung nichts. Jetzt kommt der Posteingang aus der signierten `folders.gml`, und der Client warnt bei Abweichung und bei unbekannten Ordnern (`TestInboxPointerRedirected`).
 - C: Der Arbeiter der Vorverarbeitung hatte keinen Schutz gegen Panics; jetzt abgefangen. Antworten auf abgewiesene Verbindungen liefen in unbegrenzt vielen Goroutinen; jetzt höchstens 16, `Close` wartet auf sie (`TestRefusalsAreBounded`).
 Zur Kenntnis genommen: Eine Mail mit 25 MB an 100 Postfächer schreibt 2,5 GB in den Spool und versiegelt 100-mal (begrenzt durch die Konstanten und den freien Platz, siehe Grenzen). Nur wegen des fehlenden Logs möglich (nicht als Fund gezählt): Zurückspielen gegenüber einem Client ohne Vorgeschichte, Umleiten von Adressen, widerrufene Generationen, unbemerktes Löschen von Mails.
+
+### Unabhängige Prüfung in Phase 0.1 (Verlauf)
+
+Ein Subagent ohne Kenntnis von DECISIONS, SPEC-ISSUES und HANDOFF prüfte `envelope` und `rec` gegen 3.1 bis 3.6 der Version 1.1 und fand keine Abweichung von der Spezifikation. Behoben (Commit 3b8cb50): Der Schreiber überschrieb seinen Klartextpuffer nur im Erfolgsfall; `Kind.String` lieferte für unbekannte Dateiarten einen Kunstnamen, den `keys.Sign` als Domäne angenommen hätte. Zur Kenntnis genommen, nicht geändert: `SealOptions.Rand` erlaubt Aufrufern die Wiederverwendung von Zufall (siehe Invarianten); `Decrypt` leitet das Flag aus der Position in der Blockliste ab, die `Parse` als `0x01* 0x02` garantiert; `Parse` kopiert die ganze Datei (bis 50 MiB) und hält sie für `FileHash`.
+
+## Fuzzing
+
+Fuzz-Ziele aus Phase 0: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`. Neu in Phase 1:
+
+- `store.FuzzDecodeRecords`: alle Datensätze von `store` (Benutzer, Postfach, Epoche, Epochenschlüssel, Metadaten, Begriffslisten, Vermerk, Journal, Plattformschlüssel und -identität, Adresszuordnung, Name, Ordner); angenommen wird nur, was byte-identisch zurückkodiert.
+- `smtpd.FuzzCommands`: beliebige Eingaben auf Befehlsebene; jede Antwortzeile wohlgeformt, nichts über der Größengrenze zugestellt.
+- `smtpd.FuzzData`: beliebige Daten nach `DATA`; zugestellt wird genau das Ergebnis einer Referenz für Dot-Unstuffing, ungültige Eingaben nie.
+- `ingest.FuzzTerms`: beliebige Header; alle Begriffe und Metadatenfelder speicherbar (UTF-8, NFC, ohne Nullbyte, innerhalb der Grenzen), keine doppelten Begriffe.
+
+Ergebnis Phase 1: FUZZ_RESULTS
 
 ## Was Phase 2 als Erstes wissen muss
 

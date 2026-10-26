@@ -996,3 +996,51 @@ func TestNameAndFolders(t *testing.T) {
 		t.Fatal("folders of missing mailbox")
 	}
 }
+
+func TestTempFilesLocksAndIncompleteEpochs(t *testing.T) {
+	s, _ := Init(t.TempDir())
+	p := s.Path("mailboxes", "x", tmpPrefix+"1")
+	MkdirAll(filepath.Dir(p))
+	os.WriteFile(p, nil, 0o600)
+	os.WriteFile(s.Path("mailboxes", "x", "keep"), nil, 0o600)
+	if err := s.RemoveTempFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("temporary file kept")
+	}
+	if _, err := os.Stat(s.Path("mailboxes", "x", "keep")); err != nil {
+		t.Fatal("data file removed")
+	}
+	unlock, err := LockFile(s.Path("l"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LockFile(s.Path("l")); !errors.Is(err, ErrLocked) {
+		t.Fatal("second lock")
+	}
+	unlock()
+	u2, err := LockFile(s.Path("l"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2()
+	tu := newTestUser(t, 1, 1)
+	mbx := ID{3}
+	if err := s.RemoveIncompleteEpoch(mbx, 1); err != nil {
+		t.Fatal("missing epoch dir")
+	}
+	MkdirAll(filepath.Join(s.EpochDir(mbx, 1), "members"))
+	os.WriteFile(s.WrapFile(mbx, 1, tu.user.ID), []byte("w"), 0o600)
+	if err := s.RemoveIncompleteEpoch(mbx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s.EpochDir(mbx, 1)); !os.IsNotExist(err) {
+		t.Fatal("incomplete epoch kept")
+	}
+	e, _ := newTestEpoch(t, tu, mbx, 1, 1, nil)
+	s.WriteEpoch(e)
+	if err := s.RemoveIncompleteEpoch(mbx, 1); !errors.Is(err, ErrExists) {
+		t.Fatal("complete epoch removed")
+	}
+}
