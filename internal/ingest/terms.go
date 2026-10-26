@@ -106,14 +106,21 @@ func term(prefix, value string) string {
 	return store.CleanText(strings.ToLower(prefix+value), store.MaxTermLen)
 }
 
-// Terms returns the term list of a header (5.4) for a mail received at
-// t: from, fromdomain, to (To and Cc), day, month, has:attachment and
-// thread. It reports false if the header cannot be evaluated.
-func Terms(header []byte, received time.Time) ([]string, bool) {
+// Terms returns the term list of a mail (5.4) received at t: from and
+// fromdomain from the header From (the envelope sender if From has no
+// parsable address), to from To, Cc and the envelope recipients of this
+// mailbox (so that a Bcc copy is found by its address), day, month,
+// has:attachment and thread. It reports false if the header cannot be
+// evaluated.
+func Terms(header []byte, received time.Time, envelopeFrom string, rcpts []string) ([]string, bool) {
 	f, ok := parseHeader(header)
 	if !ok {
 		return nil, false
 	}
+	if f.fromAddr == "" && envelopeFrom != "" {
+		f.fromAddr = envelopeFrom
+	}
+	f.rcptAddrs = append(append([]string(nil), rcpts...), f.rcptAddrs...)
 	return termsOf(&f, received), true
 }
 

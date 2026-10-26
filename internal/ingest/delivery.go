@@ -51,34 +51,75 @@ type target struct {
 }
 
 // chooseEpoch returns the epoch a mail received at t is encrypted for
-// (2.4, DECISIONS D50): the highest epoch whose begin is not after t. Its
-// signature is verified with the signer's user.rec. If that epoch began
-// in an earlier month, the supply of epochs ran out; the server keeps
-// using it and notes that.
+// (2.4, DECISIONS D50): the highest epoch whose begin is not after t,
+// out of the chain from epoch 1 to the head of mailbox.rec, which is
+// verified like the client does it (links, signatures by members, log).
+// If that epoch began in an earlier month, the supply of epochs ran out;
+// the server keeps using it and notes that.
 func (in *Ingest) chooseEpoch(mbx *store.Mailbox, t time.Time) (*store.Epoch, bool, error) {
 	ms := t.UnixMilli()
-	for n := mbx.Epoch; n >= 1; n-- {
-		e, _, err := in.st.ReadEpoch(mbx.ID, n)
+	var chosen, prev *store.Epoch
+	var prevData []byte
+	for n := uint32(1); n <= mbx.Epoch; n++ {
+		e, data, err := in.st.ReadEpoch(mbx.ID, n)
 		if err != nil {
 			return nil, false, err
 		}
-		if e.Begin > ms {
-			continue
+		if prev == nil {
+			if _, ok := e.Member(e.SignerID); !ok {
+				return nil, false, fmt.Errorf("%w: epoch 1 signed by a non-member", store.ErrChain)
+			}
+		} else if err := store.CheckLink(prev, prevData, e); err != nil {
+			return nil, false, err
 		}
-		u, _, err := in.st.ReadUser(e.SignerID)
+		pub, err := in.userKey(e.SignerID, e.SignerGen, data)
 		if err != nil {
 			return nil, false, err
 		}
-		g := u.Generation(e.SignerGen)
-		if g == nil {
-			return nil, false, fmt.Errorf("ingest: epoch %d signed by an unknown generation", n)
-		}
-		if err := e.VerifySignature(g.IdentityPub); err != nil {
+		if err := e.VerifySignature(pub); err != nil {
 			return nil, false, err
 		}
-		return e, monthIndex(time.UnixMilli(e.Begin)) < monthIndex(t), nil
+		// TODO(phase3-translog): epoch.rec included in the log (2.7).
+		if err := in.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
+			return nil, false, err
+		}
+		if e.Begin <= ms {
+			chosen = e
+		}
+		prev, prevData = e, data
 	}
-	return nil, false, fmt.Errorf("ingest: no epoch has begun")
+	if chosen == nil {
+		return nil, false, fmt.Errorf("ingest: no epoch has begun")
+	}
+	return chosen, monthIndex(time.UnixMilli(chosen.Begin)) < monthIndex(t), nil
+}
+
+// userKey returns the identity key of generation gen of a user for the
+// signature of a logged record.
+func (in *Ingest) userKey(id store.ID, gen uint32, logged []byte) ([]byte, error) {
+	u, raw, err := in.st.ReadUser(id)
+	if err != nil {
+		return nil, err
+	}
+	// TODO(phase3-translog): user.rec included in the log (2.7).
+	if err := in.cfg.Log.CheckUser(id, raw); err != nil {
+		return nil, err
+	}
+	g := u.Generation(gen)
+	if g == nil {
+		return nil, fmt.Errorf("ingest: unknown generation %d", gen)
+	}
+	// TODO(phase3-translog): generation valid only from its log entry on (2.2 rule 3).
+	if err := in.cfg.Log.CheckGeneration(id, gen); err != nil {
+		return nil, err
+	}
+	if gen != u.Current().Gen {
+		// TODO(phase3-translog): logged before the revocation (2.2 rule 4, S13).
+		if err := in.cfg.Log.CheckRevokedSignature(id, gen, logged); err != nil {
+			return nil, err
+		}
+	}
+	return g.IdentityPub, nil
 }
 
 // delivery is one message being received.
@@ -414,7 +455,7 @@ func (d *delivery) commit() error {
 	// mailbox; the term list replaces the marker later.
 	if parsed {
 		for _, t := range d.targets {
-			in.queue.enqueue(job{mailbox: t.mbx.ID, epoch: t.epoch.Number, metaPub: t.epoch.MetaPub, mail: t.mailID, received: d.received, header: d.header.Bytes()})
+			in.queue.enqueue(job{mailbox: t.mbx.ID, epoch: t.epoch.Number, metaPub: t.epoch.MetaPub, mail: t.mailID, received: d.received, header: d.header.Bytes(), from: d.from, rcpts: t.addresses})
 		}
 	}
 	wipe(d.header.Bytes())

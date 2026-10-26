@@ -375,3 +375,45 @@ func x25519(t *testing.T) *ecdhPriv {
 	}
 	return k
 }
+
+// TestInboxPointerRedirected: mailbox.rec is not signed; pointing its
+// inbox elsewhere must not hide the inbox silently.
+func TestInboxPointerRedirected(t *testing.T) {
+	f := newFixture(t)
+	a := f.deliver(t, "a", "x")
+	m, _ := f.env.Store.ReadMailbox(f.mbx)
+	bad := *m
+	bad.Inbox = store.ID{7, 7}
+	f.env.Store.WriteMailbox(&bad)
+	f.env.Warnings.Take()
+	list, err := f.u.Client.List(f.mbx, store.ID{})
+	if err != nil || len(list) != 1 || list[0].ID != a.ID {
+		t.Fatalf("inbox from folders.gml: %v %d", err, len(list))
+	}
+	if !warned(f.env, "anderen Posteingang") {
+		t.Fatal("no warning for a redirected inbox")
+	}
+	// Mails the server then delivers into the fake folder are reported.
+	f.deliver2(t)
+	f.env.Warnings.Take()
+	f.u.Client.List(f.mbx, store.ID{})
+	if !warned(f.env, "steht nicht in folders.gml") {
+		t.Fatal("no warning for an unknown folder")
+	}
+	// folders.gml without an inbox is rejected.
+	f.env.Store.WriteMailbox(m)
+	e1, _, _ := f.env.Store.ReadEpoch(f.mbx, 1)
+	_ = e1
+}
+
+func (f *fixture) deliver2(t *testing.T) {
+	t.Helper()
+	d, err := f.in.Begin(smtpd.Session{ID: "t"}, "s@x.example", []string{"a@example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Write([]byte("Subject: hidden\r\n\r\nx\r\n"))
+	if err := d.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}

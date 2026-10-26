@@ -177,6 +177,11 @@ func (in *Ingest) Recover() error {
 	if err := store.SyncDir(work); err != nil {
 		return err
 	}
+	// Temporary files of interrupted atomic writes anywhere in the data
+	// directory are never valid data.
+	if err := in.st.RemoveTempFiles(); err != nil {
+		return err
+	}
 	in.log.Info("ingest recovered", "spool_entries", len(entries), "work_entries", len(wentries))
 	return nil
 }

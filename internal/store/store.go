@@ -423,6 +423,9 @@ func (s *Store) WriteEpoch(e *Epoch) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := os.Lstat(s.EpochFile(e.MailboxID, e.Number)); err == nil {
+		return nil, fmt.Errorf("%w: epoch %d", ErrExists, e.Number)
+	}
 	dir := s.EpochDir(e.MailboxID, e.Number)
 	if err := MkdirAll(filepath.Join(dir, "members")); err != nil {
 		return nil, err
@@ -624,3 +627,44 @@ func (s *Store) ReadFolders(id ID) ([]byte, error) {
 
 // FoldersFile is mailboxes/<id>/folders.gml.
 func (s *Store) FoldersFile(id ID) string { return filepath.Join(s.MailboxDir(id), "folders.gml") }
+
+// RemoveIncompleteEpoch deletes epochs/<n>/ if it has no epoch.rec (the
+// leftovers of an interrupted epoch creation: wraps and public keys
+// without the signed record). An existing epoch.rec is reported as
+// ErrExists and nothing is removed.
+func (s *Store) RemoveIncompleteEpoch(id ID, n uint32) error {
+	if _, err := os.Lstat(s.EpochFile(id, n)); err == nil {
+		return fmt.Errorf("%w: epoch %d", ErrExists, n)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	dir := s.EpochDir(id, n)
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return SyncDir(filepath.Dir(dir))
+}
+
+// RemoveTempFiles deletes the temporary files of interrupted atomic
+// writes anywhere in the data directory (server start).
+func (s *Store) RemoveTempFiles() error {
+	return filepath.WalkDir(s.Root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), tmpPrefix) && d.Type().IsRegular() {
+			return RemoveDurable(p)
+		}
+		return nil
+	})
+}
+
+// LockFile takes an exclusive file lock on path without waiting; it
+// fails if another process holds it.
+func LockFile(path string) (func(), error) { return tryLockFile(path) }

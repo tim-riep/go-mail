@@ -27,7 +27,7 @@ func FuzzTerms(f *testing.F) {
 	}
 	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
 	f.Fuzz(func(t *testing.T, h []byte) {
-		terms, ok := Terms(h, now)
+		terms, ok := Terms(h, now, "env@x.example", []string{"rcpt@y.example"})
 		if !ok {
 			return
 		}

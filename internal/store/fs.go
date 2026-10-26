@@ -18,6 +18,8 @@ var (
 	ErrNotFound = errors.New("store: not found")
 	// ErrTooLarge reports a file above the size limit of its kind.
 	ErrTooLarge = errors.New("store: file too large")
+	// ErrLocked reports a lock held by another process.
+	ErrLocked = errors.New("store: in use by another process")
 )
 
 // tmpPrefix marks temporary files. They are never valid data files; a

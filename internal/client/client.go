@@ -105,6 +105,9 @@ type mailboxState struct {
 	Epoch     uint32            `json:"epoch"`
 	EpochHash string            `json:"epoch_hash"`
 	Versions  map[string]uint32 `json:"versions"`
+	// Begins holds the begin of every verified epoch, so that the epoch
+	// rule of 2.4 still holds when a later epoch is removed or replaced.
+	Begins map[string]int64 `json:"begins"`
 }
 
 func loadState(path string) (*state, error) {
@@ -142,6 +145,7 @@ type Client struct {
 	me    store.ID
 	state *state
 
+	unlock    func() // releases the lock of the client directory
 	mu        sync.Mutex
 	ingest    map[uint32]ingestKey
 	epochKeys map[epochRef]*store.EpochKeys
@@ -159,10 +163,24 @@ type epochRef struct {
 
 // Open unlocks the key store with passphrase and loads the registered
 // user. It warns on every start without a verifying log (translog).
-func Open(cfg Config, passphrase []byte) (*Client, error) {
+func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	if err := cfg.check(); err != nil {
 		return nil, err
 	}
+	// One client process per client directory: the local state (highest
+	// epoch, versions) must not be overwritten by a concurrent run.
+	if err := mkdirClient(cfg.Dir); err != nil {
+		return nil, err
+	}
+	unlock, err := store.LockFile(filepath.Join(cfg.Dir, "lock"))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			unlock()
+		}
+	}()
 	if !cfg.Log.Verified() {
 		cfg.Warn(translog.Warning)
 	}
@@ -214,7 +232,7 @@ func Open(cfg Config, passphrase []byte) (*Client, error) {
 		ks.Zero()
 		return nil, fmt.Errorf("client: the key store does not hold the current generation of the user")
 	}
-	return &Client{cfg: cfg, st: cfg.Store, ks: ks, user: user, me: me, state: st,
+	return &Client{cfg: cfg, st: cfg.Store, ks: ks, user: user, me: me, state: st, unlock: unlock,
 		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}, nil
 }
 
@@ -233,6 +251,10 @@ func (c *Client) Close() {
 		c.ks.Zero()
 		c.ks = nil
 	}
+	if c.unlock != nil {
+		c.unlock()
+		c.unlock = nil
+	}
 }
 
 func (c *Client) warn(format string, args ...any) { c.cfg.Warn(fmt.Sprintf(format, args...)) }
@@ -242,11 +264,14 @@ func (c *Client) save() error { return saveState(c.cfg.statePath(), c.state) }
 func (c *Client) mailboxState(id store.ID) *mailboxState {
 	ms := c.state.Mailboxes[id.String()]
 	if ms == nil {
-		ms = &mailboxState{Versions: map[string]uint32{}}
+		ms = &mailboxState{Versions: map[string]uint32{}, Begins: map[string]int64{}}
 		c.state.Mailboxes[id.String()] = ms
 	}
 	if ms.Versions == nil {
 		ms.Versions = map[string]uint32{}
+	}
+	if ms.Begins == nil {
+		ms.Begins = map[string]int64{}
 	}
 	return ms
 }

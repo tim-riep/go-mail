@@ -130,8 +130,12 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if e.Begin > m.Received {
 		return nil, fmt.Errorf("%w: epoch %d began after the receipt", ErrStaleEpoch, e.Number)
 	}
-	if next := ch.epoch(e.Number + 1); next != nil && next.Begin <= m.Received {
-		return nil, fmt.Errorf("%w: epoch %d had begun", ErrStaleEpoch, next.Number)
+	if nb, ok := c.nextBegin(ch, e.Number); ok && nb <= m.Received {
+		return nil, fmt.Errorf("%w: epoch %d had begun", ErrStaleEpoch, e.Number+1)
+	} else if !ok && ch.err != nil && int(e.Number) == len(ch.epochs) {
+		// The chain is broken right after this epoch and the next one was
+		// never seen: whether the mail is stale cannot be decided (2.4).
+		return nil, fmt.Errorf("%w: the chain ends after epoch %d", ErrEpoch, e.Number)
 	}
 	for _, a := range m.Recipients {
 		// TODO(phase3-translog): address assigned to this mailbox at receipt (2.3).
@@ -159,8 +163,27 @@ func (c *Client) List(mbx, folder store.ID) ([]*Mail, error) {
 	if err != nil {
 		return nil, err
 	}
+	inbox, known, err := c.inbox(ch)
+	if err != nil {
+		return nil, err
+	}
 	if folder.IsZero() {
-		folder = ch.mailbox.Inbox
+		folder = inbox
+	}
+	// Mails in folder directories that folders.gml does not name would
+	// never be listed: say so.
+	dirs, err := c.st.ListFolders(mbx)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range dirs {
+		found := false
+		for _, f := range known {
+			found = found || f.ID == d
+		}
+		if !found {
+			c.warn("WARNUNG: Ordner %s von %s steht nicht in folders.gml; seine Mails werden nicht angezeigt.", d, mbx)
+		}
 	}
 	ids, err := c.st.ListMails(mbx, folder)
 	if err != nil {
@@ -282,6 +305,7 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 	if err != nil {
 		return nil, err
 	}
+	var ik ingestKey
 	f, plain, err := envelope.Open(data, envelope.OpenOptions{
 		ExpectedSuite: e.Suite,
 		Key:           envelope.RecipientKey{Type: envelope.RecipientEpochMeta, ID: mbx, Gen: epoch, PrivateKey: k.Meta},
@@ -289,7 +313,8 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 			if ref.Type != envelope.SignerIngest || ref.ID != ([16]byte{}) {
 				return nil, ErrSigner
 			}
-			ik, err := c.ingestKeyFor(ref.Gen)
+			var err error
+			ik, err = c.ingestKeyFor(ref.Gen)
 			return ik.pub, err
 		},
 	})
@@ -298,15 +323,22 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 		return nil, signerErr(err)
 	}
 	defer keys.Wipe(plain)
+	reject := func(err error) (*store.Pending, error) {
+		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
+		return nil, err
+	}
 	if f.Header.Kind != envelope.KindPending || f.Header.MailboxID != mbx || f.Header.Epoch != epoch || f.Header.FileID != file {
-		return nil, ErrMismatch
+		return reject(ErrMismatch)
+	}
+	if f.Header.Created < ik.validFrom {
+		return reject(fmt.Errorf("%w: ingest key not yet valid", ErrPlatform))
 	}
 	p, err := store.DecodePending(plain)
 	if err != nil {
-		return nil, err
+		return reject(err)
 	}
 	if p.MailboxID != mbx || p.Epoch != epoch {
-		return nil, ErrMismatch
+		return reject(ErrMismatch)
 	}
 	return p, nil
 }

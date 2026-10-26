@@ -28,6 +28,8 @@ type job struct {
 	header   []byte // nil if spilled
 	spill    string // file in work/
 	size     int64
+	from     string   // envelope sender
+	rcpts    []string // envelope recipients of this mailbox
 }
 
 type batchKey struct {
@@ -60,7 +62,11 @@ type queue struct {
 
 	procMu  sync.Mutex // serializes processing and flushing
 	batches map[batchKey]*batch
+	noSpill bool // the ephemeral key could not be locked: never spill
 }
+
+// mlockFn is mlock; tests replace it.
+var mlockFn = mlock
 
 func newQueue(in *Ingest) (*queue, error) {
 	key := make([]byte, 32)
@@ -68,8 +74,12 @@ func newQueue(in *Ingest) (*queue, error) {
 		return nil, err
 	}
 	// The key never leaves memory; it is locked against swapping (5.3).
-	if err := mlock(key); err != nil {
-		in.log.Info("ingest could not lock the ephemeral key in memory", "reason", "mlock failed")
+	// Without the lock nothing is spilled to work/: mails that do not fit
+	// in memory keep their marker (fail closed).
+	noSpill := false
+	if err := mlockFn(key); err != nil {
+		in.log.Info("ingest could not lock the ephemeral key in memory; work/ disabled", "reason", "mlock failed")
+		noSpill = true
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -79,7 +89,7 @@ func newQueue(in *Ingest) (*queue, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &queue{in: in, key: key, aead: aead, wake: make(chan struct{}, 1), stop: make(chan struct{}), stopped: make(chan struct{}), batches: map[batchKey]*batch{}}, nil
+	return &queue{in: in, key: key, aead: aead, noSpill: noSpill, wake: make(chan struct{}, 1), stop: make(chan struct{}), stopped: make(chan struct{}), batches: map[batchKey]*batch{}}, nil
 }
 
 // enqueue adds a mail's header. If the memory bound would be exceeded,
@@ -95,7 +105,7 @@ func (q *queue) enqueue(j job) {
 		return
 	}
 	if q.mem+j.size > q.in.cfg.QueueMemory {
-		if q.work+j.size > q.in.cfg.WorkLimit {
+		if q.noSpill || q.work+j.size > q.in.cfg.WorkLimit {
 			wipe(j.header)
 			q.in.log.Info("ingest preprocessing queue full", "mail", j.mail.String(), "status", "unprocessed")
 			return
@@ -186,9 +196,20 @@ func (q *queue) run() {
 		case <-q.wake:
 		case <-t.C:
 		}
-		q.processJobs()
-		q.flushOld()
+		q.step()
 	}
+}
+
+// step runs one round of the worker. A panic (a bug on some input) is
+// contained: the affected mails keep their markers, the server goes on.
+func (q *queue) step() {
+	defer func() {
+		if r := recover(); r != nil {
+			q.in.log.Info("ingest preprocessing aborted", "reason", "internal error")
+		}
+	}()
+	q.processJobs()
+	q.flushOld()
 }
 
 // pop takes the next job.
@@ -225,7 +246,7 @@ func (q *queue) processJobs() {
 				continue
 			}
 		}
-		terms, ok := Terms(h, j.received)
+		terms, ok := Terms(h, j.received, j.from, j.rcpts)
 		wipe(h)
 		if !ok {
 			continue // the marker stays: a client processes the mail
@@ -249,6 +270,16 @@ func (q *queue) processJobs() {
 		b.bytes += size
 		if len(b.entries) >= q.in.cfg.BatchSize {
 			q.flushLocked(k)
+		}
+		// Open term lists count against the memory bound of 5.1 too.
+		total := 0
+		for _, b := range q.batches {
+			total += b.bytes
+		}
+		if int64(total) > q.in.cfg.QueueMemory {
+			for k := range q.batches {
+				q.flushLocked(k)
+			}
 		}
 	}
 }

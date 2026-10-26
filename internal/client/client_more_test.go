@@ -110,8 +110,11 @@ func TestNameAndFoldersTampered(t *testing.T) {
 		t.Fatal("missing folders")
 	}
 	f.env.Store.WriteFolders(f.mbx, m.Name)
-	if _, err := f.u.Client.Folders(f.mbx); !errors.Is(err, client.ErrMismatch) {
-		t.Fatalf("name as folders: %v", err)
+	if _, err := f.u.Client.Folders(f.mbx); err == nil {
+		t.Fatal("name accepted as folders")
+	}
+	if _, err := f.u.Client.List(f.mbx, store.ID{}); err == nil {
+		t.Fatal("list without a valid folders.gml")
 	}
 	// Without mailbox.rec nothing works.
 	os.Remove(f.env.Store.MailboxFile(f.mbx))
@@ -267,8 +270,11 @@ func TestRevokedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cl.Close()
-	if _, err := cl.List(mbx, store.ID{}); err != nil {
+	if err := cl.Sync(); err != nil {
 		t.Fatalf("epochs of the revoked generation must verify through the log: %v", err)
+	}
+	if _, err := cl.List(mbx, store.ID{}); !errors.Is(err, client.ErrWrap) {
+		t.Fatalf("folders.gml needs the keys of epoch 1: %v", err)
 	}
 	if _, err := cl.MailboxName(mbx); !errors.Is(err, client.ErrWrap) {
 		t.Fatalf("wrap of the revoked generation: %v", err)

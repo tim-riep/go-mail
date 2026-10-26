@@ -29,3 +29,19 @@ func lockFile(path string) (func(), error) {
 		f.Close()
 	}, nil
 }
+
+// tryLockFile is lockFile without waiting.
+func tryLockFile(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, ErrLocked
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
+}

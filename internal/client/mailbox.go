@@ -60,6 +60,11 @@ func (c *Client) sealMeta(e *store.Epoch, fileID store.ID, plain []byte) ([]byte
 // (2.4: random, not derived) and the wrap for this user. prev is the
 // encoded predecessor (nil for epoch 1). The caller holds the lock.
 func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.Reason, prev []byte) (*store.Epoch, []byte, error) {
+	// Leftovers of a crashed attempt (wrap and public keys without
+	// epoch.rec) are removed; an existing epoch.rec is never touched.
+	if err := c.st.RemoveIncompleteEpoch(mbx, n); err != nil {
+		return nil, nil, err
+	}
 	content, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -112,6 +117,7 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 	if err := c.cfg.Log.AppendEpoch(mbx, n, data); err != nil {
 		return nil, nil, err
 	}
+	c.mailboxState(mbx).Begins[fmt.Sprint(n)] = begin
 	return e, data, nil
 }
 
@@ -185,6 +191,11 @@ func (c *Client) supply(mbx store.ID, head *store.Epoch, headData []byte) (*stor
 		begin := monthStart(now, k)
 		if head.Begin >= begin {
 			continue
+		}
+		// An epoch created seconds before its month begins gets the same
+		// delay as an immediate one (DECISIONS D50).
+		if min := now.Add(ImmediateDelay).UnixMilli(); begin < min {
+			begin = min
 		}
 		e, d, err := c.createEpoch(mbx, head.Number+1, begin, store.ReasonMonthly, headData)
 		if err != nil {
@@ -270,17 +281,34 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 	}
 	var prev *store.Epoch
 	var prevData []byte
-	for n := uint32(1); n <= head; n++ {
+	for n := uint32(1); ; n++ {
 		e, data, err := c.st.ReadEpoch(id, n)
-		if err == nil {
-			err = c.checkEpoch(e, data, prev, prevData)
-		}
-		if err != nil {
-			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %v", id, n, err)
-			if ch.err == nil {
-				ch.err = fmt.Errorf("%w: epoch %d: %v", store.ErrChain, n, err)
+		if n > head {
+			// Epochs beyond the head of mailbox.rec exist after a crash
+			// between writing epochs and mailbox.rec (supply, 2.4). They
+			// are adopted if they verify like any other epoch; a missing
+			// or invalid one simply ends the chain.
+			if errors.Is(err, store.ErrNotFound) {
+				break
 			}
-			break
+			if err == nil {
+				err = c.checkEpoch(e, data, prev, prevData)
+			}
+			if err != nil {
+				c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %v", n, id, err)
+				break
+			}
+		} else {
+			if err == nil {
+				err = c.checkEpoch(e, data, prev, prevData)
+			}
+			if err != nil {
+				c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %v", id, n, err)
+				if ch.err == nil {
+					ch.err = fmt.Errorf("%w: epoch %d: %v", store.ErrChain, n, err)
+				}
+				break
+			}
 		}
 		ch.epochs = append(ch.epochs, e)
 		ch.data = append(ch.data, data)
@@ -300,14 +328,36 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 			ch.err = fmt.Errorf("%w: epoch %d replaced", store.ErrChain, ms.Epoch)
 		}
 	}
+	// Remember the begin of every verified epoch, the first value seen.
+	changed := false
+	for _, e := range ch.epochs {
+		k := fmt.Sprint(e.Number)
+		if _, ok := ms.Begins[k]; !ok {
+			ms.Begins[k] = e.Begin
+			changed = true
+		}
+	}
 	if ch.err == nil && len(ch.epochs) > 0 && uint32(len(ch.epochs)) > ms.Epoch {
 		top := len(ch.epochs)
 		ms.Epoch, ms.EpochHash = uint32(top), hashHex(ch.data[top-1])
+		changed = true
+	}
+	if changed {
 		if err := c.save(); err != nil {
 			return nil, err
 		}
 	}
 	return ch, nil
+}
+
+// nextBegin returns the begin of epoch n+1: from the verified chain, or
+// remembered from an earlier run if the chain now ends before it.
+func (c *Client) nextBegin(ch *chain, n uint32) (int64, bool) {
+	if next := ch.epoch(n + 1); next != nil {
+		return next.Begin, true
+	}
+	b, ok := c.mailboxState(ch.mailbox.ID).Begins[fmt.Sprint(n+1)]
+	return b, ok
 }
 
 func (c *Client) checkEpoch(e *store.Epoch, data []byte, prev *store.Epoch, prevData []byte) error {
@@ -479,16 +529,57 @@ func (c *Client) Folders(id store.ID) ([]store.Folder, error) {
 	if err != nil {
 		return nil, err
 	}
+	return c.folders(ch)
+}
+
+func (c *Client) folders(ch *chain) ([]store.Folder, error) {
+	id := ch.mailbox.ID
 	data, err := c.st.ReadFolders(id)
 	if err != nil {
 		return nil, err
 	}
-	plain, err := c.openUserMeta(ch, data, ch.mailbox.Inbox)
+	// folders.gml carries the inbox ID as its file ID; the inbox entry is
+	// checked below by the caller against the list itself.
+	f, err := envelope.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := c.openUserMeta(ch, data, store.ID(f.Header.FileID))
 	if err != nil {
 		return nil, err
 	}
 	defer keys.Wipe(plain)
-	return store.DecodeFolders(id, plain)
+	list, err := store.DecodeFolders(id, plain)
+	if err != nil {
+		return nil, err
+	}
+	for _, fo := range list {
+		if fo.Name == InboxName && fo.ID == store.ID(f.Header.FileID) {
+			return list, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: folders.gml names no inbox", ErrMismatch)
+}
+
+// inbox returns the inbox from the signed folders.gml (D56). mailbox.rec
+// is not signed; if it names another folder, the server delivers there
+// and the client warns.
+func (c *Client) inbox(ch *chain) (store.ID, []store.Folder, error) {
+	list, err := c.folders(ch)
+	if err != nil {
+		c.warn("WARNUNG: folders.gml von %s ist ungültig: %v", ch.mailbox.ID, err)
+		return store.ID{}, nil, err
+	}
+	var inbox store.ID
+	for _, f := range list {
+		if f.Name == InboxName {
+			inbox = f.ID
+		}
+	}
+	if inbox != ch.mailbox.Inbox {
+		c.warn("WARNUNG: mailbox.rec von %s nennt einen anderen Posteingang als die signierte folders.gml.", ch.mailbox.ID)
+	}
+	return inbox, list, nil
 }
 
 // openUserMeta opens a meta file signed by a member (name, folders).

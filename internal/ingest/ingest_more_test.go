@@ -306,7 +306,19 @@ func TestBatching(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// After the batch age, the rest is written too.
+	// Wait until the worker took every job, then pass the batch age: the
+	// rest is written too.
+	for {
+		in.queue.mu.Lock()
+		n := len(in.queue.jobs)
+		in.queue.mu.Unlock()
+		in.queue.procMu.Lock()
+		in.queue.procMu.Unlock()
+		if n == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	env.Clock.Advance(2 * time.Hour)
 	deadline = time.Now().Add(5 * time.Second)
 	for {
@@ -315,6 +327,9 @@ func TestBatching(t *testing.T) {
 		markers := 0
 		for _, id := range ids {
 			p, err := u.Client.OpenPending(mbx, 1, id)
+			if errors.Is(err, store.ErrNotFound) {
+				continue // a marker removed by the worker meanwhile
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

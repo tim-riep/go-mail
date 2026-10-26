@@ -77,12 +77,18 @@ type Server struct {
 	conns  map[net.Conn]struct{}
 	closed bool
 	wg     sync.WaitGroup
+	refuse chan struct{} // bounds the goroutines answering refused connections
 }
+
+// maxRefusing bounds concurrent "421 too many connections" answers;
+// beyond it a refused connection is closed without an answer.
+const maxRefusing = 16
 
 // NewServer returns a server with cfg (defaults for zero values).
 func NewServer(cfg Config, b Backend) *Server {
 	cfg = cfg.withDefaults()
-	return &Server{cfg: cfg, backend: b, limiter: newLimiter(cfg.MaxMailsPerIP, cfg.RateMemory), perIP: map[string]int{}, conns: map[net.Conn]struct{}{}}
+	return &Server{cfg: cfg, backend: b, limiter: newLimiter(cfg.MaxMailsPerIP, cfg.RateMemory), perIP: map[string]int{}, conns: map[net.Conn]struct{}{},
+		refuse: make(chan struct{}, maxRefusing)}
 }
 
 // ErrClosed is returned by Serve after Close.
@@ -133,13 +139,23 @@ func (s *Server) handle(c net.Conn) {
 	s.mu.Lock()
 	if s.closed || s.total >= s.cfg.MaxConns || s.perIP[ip] >= s.cfg.MaxConnsPerIP {
 		s.mu.Unlock()
-		// Answer without blocking the accept loop.
+		s.cfg.Logger.Info("smtp connection refused", "status", 421, "reason", "connection limit")
+		// Answer without blocking the accept loop, with a bounded number
+		// of helpers that Close waits for.
+		select {
+		case s.refuse <- struct{}{}:
+		default:
+			c.Close()
+			return
+		}
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
+			defer func() { <-s.refuse }()
 			c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			c.Write([]byte("421 4.7.0 Too many connections, try again later\r\n"))
 			c.Close()
 		}()
-		s.cfg.Logger.Info("smtp connection refused", "status", 421, "reason", "connection limit")
 		return
 	}
 	s.total++

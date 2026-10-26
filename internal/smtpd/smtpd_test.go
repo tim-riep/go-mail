@@ -614,3 +614,28 @@ func TestSanitizeHelo(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestRefusalsAreBounded(t *testing.T) {
+	b := newFake("info@x.example")
+	s, addr := startServer(t, Config{MaxConns: 1, MaxConnsPerIP: 1}, b)
+	dial(t, addr)
+	var conns []net.Conn
+	for i := 0; i < maxRefusing*3; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	for _, c := range conns {
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		line, _ := bufio.NewReader(c).ReadString('\n')
+		if line != "" && !strings.HasPrefix(line, "421") {
+			t.Fatalf("refused connection got %q", line)
+		}
+		c.Close()
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

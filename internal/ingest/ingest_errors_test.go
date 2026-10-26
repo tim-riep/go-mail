@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,7 @@ func TestRecoverCleansEverything(t *testing.T) {
 func TestTerms(t *testing.T) {
 	now := time.Date(2026, 10, 25, 23, 30, 0, 0, time.FixedZone("x", 2*3600))
 	h := "From: =?UTF-8?Q?M=C3=BCller?= <Rechnung@Lieferant.DE>\r\nTo: undisclosed-recipients:;\r\nSubject: =?UTF-8?B?R3LDvMOfZQ==?=\r\nIn-Reply-To: <Parent@X>\r\nContent-Type: text/plain\r\n\r\n"
-	terms, ok := Terms([]byte(h), now)
+	terms, ok := Terms([]byte(h), now, "", nil)
 	if !ok {
 		t.Fatal("not parsed")
 	}
@@ -170,10 +171,10 @@ func TestTerms(t *testing.T) {
 	if firstMsgID("<abc") != "" || firstMsgID("none") != "" || firstMsgID("x <a@b> <c@d>") != "<a@b>" {
 		t.Fatal("firstMsgID")
 	}
-	if _, ok := Terms(nil, now); ok {
+	if _, ok := Terms(nil, now, "", nil); ok {
 		t.Fatal("empty header")
 	}
-	if _, ok := Terms([]byte("no colon line\r\n\r\n"), now); ok {
+	if _, ok := Terms([]byte("no colon line\r\n\r\n"), now, "", nil); ok {
 		t.Fatal("malformed header")
 	}
 	// Many recipients: the other terms are kept.
@@ -181,8 +182,49 @@ func TestTerms(t *testing.T) {
 	for i := 0; i < 400; i++ {
 		to = append(to, "u"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+"@d"+strings.Repeat("y", i/26)+".de")
 	}
-	terms, _ = Terms([]byte("From: a@b.c\r\nTo: "+strings.Join(to, ", ")+"\r\nMessage-Id: <m@x>\r\n\r\n"), now)
+	terms, _ = Terms([]byte("From: a@b.c\r\nTo: "+strings.Join(to, ", ")+"\r\nMessage-Id: <m@x>\r\n\r\n"), now, "", nil)
 	if len(terms) != store.MaxTerms || !strings.Contains(strings.Join(terms, " "), "thread:<m@x>") {
 		t.Fatalf("%d terms", len(terms))
+	}
+}
+
+func TestBatchSplitsBeforeRecordLimit(t *testing.T) {
+	env := testenv.New(t)
+	u := env.NewUser("alice")
+	mbx := env.Mailbox(u, "A", "a@example.org")
+	in := newIngest(t, env, func(c *Config) { c.BatchAge = time.Hour })
+	// Each mail yields about 250 terms of about 900 bytes (≈ 230 KiB).
+	var to []string
+	for i := 0; i < 250; i++ {
+		to = append(to, strings.Repeat(string(rune('a'+i%26)), 880)+fmt.Sprint(i)+"@x.example")
+	}
+	h := "From: a@b.example\r\nTo: " + strings.Join(to, ",\r\n ") + "\r\n\r\nbody\r\n"
+	for i := 0; i < 3; i++ {
+		if err := deliver(t, in, "s", []string{"a@example.org"}, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := in.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	ids, _ := env.Store.ListPending(mbx, 1)
+	if len(ids) < 2 {
+		t.Fatalf("one term list for %d KiB of terms", 3*230)
+	}
+	total := 0
+	for _, id := range ids {
+		p, err := u.Client.OpenPending(mbx, 1, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range p.Entries {
+			if e.Unprocessed {
+				t.Fatal("marker left")
+			}
+			total++
+		}
+	}
+	if total != 3 {
+		t.Fatalf("%d entries", total)
 	}
 }
