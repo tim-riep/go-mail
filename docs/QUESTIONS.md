@@ -45,3 +45,10 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
 - Problem: Die Regel, dass eine Vertretung keine Epochen anlegen darf, ist nur prüfbar, wenn die Mitgliederliste der `epoch.rec` eine Vertretung von einem Mitglied unterscheidet. Heute gibt es dafür keine Art.
 - Vorschlag: Mitgliedsart 3 `delegate` in `gomail/v1/rec/epoch-member`. Eine Vertretung bekommt wie ein Mitglied eine Verpackung je Epoche ihres Zeitraums, darf aber weder Epochen signieren noch `folders.gml` oder Metadaten neu ausstellen; `share --from --to` trägt sie als Art 3 ein, `delegation-ended` entfernt sie.
 - Bis zur Antwort: Auftrag 02 baut die Art 3 als strengste Lesart (`TODO(Q6)`), kein Befehl verwendet sie, bevor die Frage entschieden ist.
+
+## Q7 Grund für `gomailctl mailbox rotate`
+
+- Haltepunkt 1 (signierter Datensatz).
+- Stelle: 9.2 `gomailctl mailbox rotate <postfach-id>`; 2.4 Tabelle der Gründe.
+- Problem: `rotate` legt eine neue Epoche ohne Änderung der Mitglieder an. Keiner der sechs Gründe passt (`regular` ist der monatliche Vorrat mit Vorlauf).
+- Vorschlag: `rotate` erzeugt eine Epoche mit Grund `regular` und sofortigem Beginn? Das widerspricht "geplant, mit Vorlauf". Besser: eigener Grund `rotated` (sofort, `discards` wie bei jeder sofortigen Epoche) in die Tabelle aufnehmen. Bis zur Antwort wird `rotate` nicht gebaut (`TODO(Q7)`), weil es nur einen neuen Grund braucht und nichts anderes davon abhängt.
