@@ -20,7 +20,7 @@ func TestCertVectors(t *testing.T) {
 		PlatformIdentityPub string `json:"platform_identity_pub"`
 		IngestCert          string `json:"ingest_cert"`
 		AdminCert           string `json:"admin_cert"`
-		IdentitySuccession  string `json:"identity_succession"`
+		PlatformSuccession  string `json:"platform_succession"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatal(err)
@@ -72,8 +72,8 @@ func TestCertVectors(t *testing.T) {
 			t.Fatalf("%s: re-encoding differs", name)
 		}
 	}
-	enc := unhex(t, v.IdentitySuccession)
-	s, err := DecodeIdentitySuccession(enc)
+	enc := unhex(t, v.PlatformSuccession)
+	s, err := DecodePlatformSuccession(enc)
 	if err != nil {
 		t.Fatal(err)
 	}

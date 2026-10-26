@@ -56,7 +56,7 @@ type certVectors struct {
 	PlatformIdentityPub string `json:"platform_identity_pub"`
 	IngestCert          string `json:"ingest_cert"`
 	AdminCert           string `json:"admin_cert"`
-	IdentitySuccession  string `json:"identity_succession"`
+	PlatformSuccession  string `json:"platform_succession"`
 }
 
 type keystoreVector struct {
@@ -136,7 +136,7 @@ func main() {
 	root, err := u.RootKey()
 	check(err)
 	cv := certVectors{
-		Comment: "Generation certificates 1..3 of the user derived from seed, signed by the root key; platform certificates signed by platform identity generation 1 of the same seed. created = 1761400000000 ms (+gen).",
+		Comment: "Generation certificates 1..3 of the user derived from seed, signed by the root key; platform certificates signed by platform identity generation 1 of the same seed. created (generation certificates) and valid_from (platform records) = 1761400000000 ms (+gen).",
 		Seed:    hex.EncodeToString(seed[:]),
 		RootPub: hex.EncodeToString(root.Public().(ed25519.PublicKey)),
 	}
@@ -167,9 +167,9 @@ func main() {
 	cv.AdminCert = hexEncode(ac.Encode())
 	pid2, err := p.IdentityKey(2)
 	check(err)
-	succ, err := keys.NewIdentitySuccession(pid, 2, pid2.Public().(ed25519.PublicKey), created)
+	succ, err := keys.NewPlatformSuccession(pid, 2, pid2.Public().(ed25519.PublicKey), created)
 	check(err)
-	cv.IdentitySuccession = hexEncode(succ.Encode())
+	cv.PlatformSuccession = hexEncode(succ.Encode())
 	writeJSON(filepath.Join(*out, "cert_vectors.json"), cv)
 
 	// Key store with fixed salt and nonce (28 bytes of injected randomness).

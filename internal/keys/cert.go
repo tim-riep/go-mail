@@ -11,12 +11,14 @@ import (
 // Signature domains. A signature is always over
 // "gomail/v1/sig/" || domain || 0x00 || body, so a signature made for one
 // purpose can never pass as a signature for another (specification 3.4).
+// For platform certificates and successions the domain is the record
+// type (2.3, version 1.1: prefix "gomail/v1/sig/" || record type || 0x00).
 const (
 	sigPrefix = "gomail/v1/sig/"
 
 	DomainGeneration         = "generation"
-	DomainPlatformCert       = "platform-cert"
-	DomainIdentitySuccession = "identity-succ"
+	DomainPlatformCert       = "gomail/v1/rec/platform-cert"
+	DomainPlatformSuccession = "gomail/v1/rec/platform-succ"
 )
 
 // signedMessage returns the bytes that are signed for domain and body.
@@ -237,33 +239,36 @@ const (
 )
 
 // PlatformCertSchema is the record of a platform admin or ingest key
-// certificate (2.3), signed by the platform identity under
-// DomainPlatformCert over the record without field 6.
+// certificate (2.3, version 1.1): role, generation, public key,
+// generation of the issuing identity, valid from, signature. It is
+// signed by the platform identity under DomainPlatformCert over the
+// record without field 6.
 var PlatformCertSchema = rec.MustSchema("gomail/v1/rec/platform-cert",
 	rec.Field{Num: 1, Name: "role", Kind: rec.U8, Required: true},
 	rec.Field{Num: 2, Name: "gen", Kind: rec.U32, Required: true},
 	rec.Field{Num: 3, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
-	rec.Field{Num: 4, Name: "created", Kind: rec.I64, Required: true},
-	rec.Field{Num: 5, Name: "identity_gen", Kind: rec.U32, Required: true},
+	rec.Field{Num: 4, Name: "identity_gen", Kind: rec.U32, Required: true},
+	rec.Field{Num: 5, Name: "valid_from", Kind: rec.I64, Required: true},
 	rec.Field{Num: 6, Name: "sig", Kind: rec.Bytes, Size: ed25519.SignatureSize},
 )
 
 // PlatformCert certifies an admin or ingest key of generation Gen. It
 // names the generation of the identity key that signed it, so a client
-// knows which identity to verify it with.
+// knows which identity to verify it with. ValidFrom is in milliseconds
+// since 1970 UTC.
 type PlatformCert struct {
 	Role        Role
 	Gen         uint32
 	Pub         ed25519.PublicKey
-	Created     int64
 	IdentityGen uint32
+	ValidFrom   int64
 	Signature   []byte
 }
 
 // NewPlatformCert signs a certificate for pub with the identity key of
 // generation identityGen.
-func NewPlatformCert(identity ed25519.PrivateKey, identityGen uint32, role Role, gen uint32, pub ed25519.PublicKey, created int64) (*PlatformCert, error) {
-	c := &PlatformCert{Role: role, Gen: gen, Pub: pub, Created: created, IdentityGen: identityGen}
+func NewPlatformCert(identity ed25519.PrivateKey, identityGen uint32, role Role, gen uint32, pub ed25519.PublicKey, validFrom int64) (*PlatformCert, error) {
+	c := &PlatformCert{Role: role, Gen: gen, Pub: pub, IdentityGen: identityGen, ValidFrom: validFrom}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -303,8 +308,8 @@ func (c *PlatformCert) toRecord(withSig bool) *rec.Record {
 		SetU8(1, uint8(c.Role)).
 		SetU32(2, c.Gen).
 		SetBytes(3, c.Pub).
-		SetI64(4, c.Created).
-		SetU32(5, c.IdentityGen)
+		SetU32(4, c.IdentityGen).
+		SetI64(5, c.ValidFrom)
 	if withSig {
 		r.SetBytes(6, c.Signature)
 	}
@@ -340,8 +345,8 @@ func DecodePlatformCert(data []byte) (*PlatformCert, error) {
 		Role:        Role(r.U8(1)),
 		Gen:         r.U32(2),
 		Pub:         ed25519.PublicKey(r.Bytes(3)),
-		Created:     r.I64(4),
-		IdentityGen: r.U32(5),
+		IdentityGen: r.U32(4),
+		ValidFrom:   r.I64(5),
 		Signature:   r.Bytes(6),
 	}
 	if err := c.validate(); err != nil {
@@ -366,31 +371,32 @@ func (c *PlatformCert) Verify(identityPub ed25519.PublicKey) error {
 	return nil
 }
 
-// IdentitySuccessionSchema is the record by which platform identity
-// generation n-1 names its successor n (2.3, "identity-<gen>.succ"),
-// signed by generation n-1 under DomainIdentitySuccession over the record
-// without field 4.
-var IdentitySuccessionSchema = rec.MustSchema("gomail/v1/rec/identity-succ",
+// PlatformSuccessionSchema is the record by which platform identity
+// generation n-1 names its successor n (2.3, version 1.1,
+// "identity-<gen>.succ"): new generation, new public identity key, valid
+// from, signature of the previous generation under
+// DomainPlatformSuccession over the record without field 4.
+var PlatformSuccessionSchema = rec.MustSchema("gomail/v1/rec/platform-succ",
 	rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
 	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
-	rec.Field{Num: 3, Name: "created", Kind: rec.I64, Required: true},
+	rec.Field{Num: 3, Name: "valid_from", Kind: rec.I64, Required: true},
 	rec.Field{Num: 4, Name: "sig", Kind: rec.Bytes, Size: ed25519.SignatureSize},
 )
 
-// IdentitySuccession is the regular hand-over from platform identity
+// PlatformSuccession is the regular hand-over from platform identity
 // generation Gen-1 to Gen. It is not usable after a compromise of Gen-1;
 // that case is handled by a client update (2.3).
-type IdentitySuccession struct {
+type PlatformSuccession struct {
 	Gen       uint32
 	Pub       ed25519.PublicKey
-	Created   int64
+	ValidFrom int64
 	Signature []byte
 }
 
-// NewIdentitySuccession signs the succession to generation gen with the
+// NewPlatformSuccession signs the succession to generation gen with the
 // identity key of generation gen-1.
-func NewIdentitySuccession(prev ed25519.PrivateKey, gen uint32, pub ed25519.PublicKey, created int64) (*IdentitySuccession, error) {
-	s := &IdentitySuccession{Gen: gen, Pub: pub, Created: created}
+func NewPlatformSuccession(prev ed25519.PrivateKey, gen uint32, pub ed25519.PublicKey, validFrom int64) (*PlatformSuccession, error) {
+	s := &PlatformSuccession{Gen: gen, Pub: pub, ValidFrom: validFrom}
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -398,7 +404,7 @@ func NewIdentitySuccession(prev ed25519.PrivateKey, gen uint32, pub ed25519.Publ
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCert, err)
 	}
-	sig, err := Sign(prev, DomainIdentitySuccession, tbs)
+	sig, err := Sign(prev, DomainPlatformSuccession, tbs)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +412,7 @@ func NewIdentitySuccession(prev ed25519.PrivateKey, gen uint32, pub ed25519.Publ
 	return s, nil
 }
 
-func (s *IdentitySuccession) validate() error {
+func (s *PlatformSuccession) validate() error {
 	if s == nil {
 		return fmt.Errorf("%w: nil", ErrCert)
 	}
@@ -419,11 +425,11 @@ func (s *IdentitySuccession) validate() error {
 	return nil
 }
 
-func (s *IdentitySuccession) toRecord(withSig bool) *rec.Record {
-	r := rec.New(IdentitySuccessionSchema).
+func (s *PlatformSuccession) toRecord(withSig bool) *rec.Record {
+	r := rec.New(PlatformSuccessionSchema).
 		SetU32(1, s.Gen).
 		SetBytes(2, s.Pub).
-		SetI64(3, s.Created)
+		SetI64(3, s.ValidFrom)
 	if withSig {
 		r.SetBytes(4, s.Signature)
 	}
@@ -431,7 +437,7 @@ func (s *IdentitySuccession) toRecord(withSig bool) *rec.Record {
 }
 
 // Encode returns the canonical encoding including the signature.
-func (s *IdentitySuccession) Encode() ([]byte, error) {
+func (s *PlatformSuccession) Encode() ([]byte, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -445,17 +451,17 @@ func (s *IdentitySuccession) Encode() ([]byte, error) {
 	return b, nil
 }
 
-// DecodeIdentitySuccession parses a succession record without verifying
+// DecodePlatformSuccession parses a succession record without verifying
 // the signature.
-func DecodeIdentitySuccession(data []byte) (*IdentitySuccession, error) {
-	r, err := rec.Decode(IdentitySuccessionSchema, data)
+func DecodePlatformSuccession(data []byte) (*PlatformSuccession, error) {
+	r, err := rec.Decode(PlatformSuccessionSchema, data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCert, err)
 	}
 	if !r.Has(4) {
 		return nil, fmt.Errorf("%w: missing signature", ErrCert)
 	}
-	s := &IdentitySuccession{Gen: r.U32(1), Pub: ed25519.PublicKey(r.Bytes(2)), Created: r.I64(3), Signature: r.Bytes(4)}
+	s := &PlatformSuccession{Gen: r.U32(1), Pub: ed25519.PublicKey(r.Bytes(2)), ValidFrom: r.I64(3), Signature: r.Bytes(4)}
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -464,7 +470,7 @@ func DecodeIdentitySuccession(data []byte) (*IdentitySuccession, error) {
 
 // Verify checks that s names the generation directly after prevGen and
 // is signed by prevPub, the identity key of generation prevGen.
-func (s *IdentitySuccession) Verify(prevPub ed25519.PublicKey, prevGen uint32) error {
+func (s *PlatformSuccession) Verify(prevPub ed25519.PublicKey, prevGen uint32) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
@@ -475,7 +481,7 @@ func (s *IdentitySuccession) Verify(prevPub ed25519.PublicKey, prevGen uint32) e
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrCert, err)
 	}
-	if !Verify(prevPub, DomainIdentitySuccession, tbs, s.Signature) {
+	if !Verify(prevPub, DomainPlatformSuccession, tbs, s.Signature) {
 		return fmt.Errorf("%w: identity succession", ErrSignature)
 	}
 	return nil

@@ -311,7 +311,7 @@ func TestPlatformCert(t *testing.T) {
 	}
 }
 
-func TestIdentitySuccession(t *testing.T) {
+func TestPlatformSuccession(t *testing.T) {
 	var seed Seed
 	seed[0] = 10
 	p := DerivePlatform(&seed)
@@ -320,7 +320,7 @@ func TestIdentitySuccession(t *testing.T) {
 	g3, _ := p.IdentityKey(3)
 	pub1 := g1.Public().(ed25519.PublicKey)
 	pub2 := g2.Public().(ed25519.PublicKey)
-	s, err := NewIdentitySuccession(g1, 2, pub2, 5)
+	s, err := NewPlatformSuccession(g1, 2, pub2, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestIdentitySuccession(t *testing.T) {
 		t.Fatal(err)
 	}
 	enc, _ := s.Encode()
-	dec, err := DecodeIdentitySuccession(enc)
+	dec, err := DecodePlatformSuccession(enc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,24 +344,24 @@ func TestIdentitySuccession(t *testing.T) {
 	if err := s.Verify(pub2, 1); !errors.Is(err, ErrSignature) {
 		t.Fatal("must be signed by the previous generation")
 	}
-	if _, err := NewIdentitySuccession(g1, 1, pub2, 0); !errors.Is(err, ErrGeneration) {
+	if _, err := NewPlatformSuccession(g1, 1, pub2, 0); !errors.Is(err, ErrGeneration) {
 		t.Fatal("generation 1 has no predecessor")
 	}
-	if _, err := NewIdentitySuccession(g1, 2, pub2[:3], 0); !errors.Is(err, ErrCert) {
+	if _, err := NewPlatformSuccession(g1, 2, pub2[:3], 0); !errors.Is(err, ErrCert) {
 		t.Fatal("short key must be rejected")
 	}
 	// A successor cannot be signed by a later generation.
-	s3, _ := NewIdentitySuccession(g3, 3, g3.Public().(ed25519.PublicKey), 0)
+	s3, _ := NewPlatformSuccession(g3, 3, g3.Public().(ed25519.PublicKey), 0)
 	if err := s3.Verify(pub2, 2); !errors.Is(err, ErrSignature) {
 		t.Fatal("self-signed succession must fail")
 	}
-	if _, err := DecodeIdentitySuccession([]byte("x")); err == nil {
+	if _, err := DecodePlatformSuccession([]byte("x")); err == nil {
 		t.Fatal("garbage accepted")
 	}
 }
 
 func TestSchemasExported(t *testing.T) {
-	for _, s := range []*rec.Schema{GenerationCertSchema, PlatformCertSchema, IdentitySuccessionSchema, KeystoreHeaderSchema, KeystoreContentSchema} {
+	for _, s := range []*rec.Schema{GenerationCertSchema, PlatformCertSchema, PlatformSuccessionSchema, KeystoreHeaderSchema, KeystoreContentSchema} {
 		if s == nil || s.Type == "" {
 			t.Fatal("schema missing")
 		}
@@ -369,3 +369,82 @@ func TestSchemasExported(t *testing.T) {
 }
 
 var _ = ecdh.X25519
+
+// TestPlatformRecordLayout pins the field order and the signature domain
+// of the platform records to 2.3 of specification 1.1: platform-cert is
+// role, gen, pub, identity_gen, valid_from, sig; platform-succ is gen,
+// pub, valid_from, sig; both are signed under "gomail/v1/sig/" || record
+// type || 0x00.
+func TestPlatformRecordLayout(t *testing.T) {
+	var seed Seed
+	seed[0] = 11
+	p := DerivePlatform(&seed)
+	idKey, _ := p.IdentityKey(1)
+	idPub := idKey.Public().(ed25519.PublicKey)
+	ingest, _ := p.IngestKey(1)
+	c, err := NewPlatformCert(idKey, 1, RoleIngest, 3, ingest.Public().(ed25519.PublicKey), 1_761_400_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, _ := c.Encode()
+	r, err := rec.Decode(PlatformCertSchema, enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.U8(1) != 2 || r.U32(2) != 3 || !bytes.Equal(r.Bytes(3), ingest.Public().(ed25519.PublicKey)) || r.U32(4) != 1 || r.I64(5) != 1_761_400_000_000 || len(r.Bytes(6)) != 64 {
+		t.Fatal("platform-cert field layout differs from 2.3")
+	}
+	if PlatformCertSchema.Fields[3].Name != "identity_gen" || PlatformCertSchema.Fields[4].Name != "valid_from" {
+		t.Fatal("field names")
+	}
+	if DomainPlatformCert != PlatformCertSchema.Type || DomainPlatformSuccession != PlatformSuccessionSchema.Type {
+		t.Fatal("the domain must be the record type")
+	}
+	if PlatformSuccessionSchema.Type != "gomail/v1/rec/platform-succ" {
+		t.Fatalf("succession record type %q", PlatformSuccessionSchema.Type)
+	}
+	// The signature is over the record without field 6 under the record
+	// type; the old short domain must not verify.
+	tbs, _ := c.toRecord(false).Encode()
+	if !Verify(idPub, "gomail/v1/rec/platform-cert", tbs, c.Signature) {
+		t.Fatal("signature under the record type must verify")
+	}
+	if Verify(idPub, "platform-cert", tbs, c.Signature) {
+		t.Fatal("old domain must not verify")
+	}
+	msg, _ := signedMessage(DomainPlatformCert, tbs)
+	if !bytes.HasPrefix(msg, []byte("gomail/v1/sig/gomail/v1/rec/platform-cert\x00")) {
+		t.Fatalf("signed message prefix %q", msg[:48])
+	}
+	// Same for the succession.
+	g2, _ := p.IdentityKey(2)
+	s, err := NewPlatformSuccession(idKey, 2, g2.Public().(ed25519.PublicKey), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	senc, _ := s.Encode()
+	sr, err := rec.Decode(PlatformSuccessionSchema, senc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sr.U32(1) != 2 || !bytes.Equal(sr.Bytes(2), g2.Public().(ed25519.PublicKey)) || sr.I64(3) != 7 || len(sr.Bytes(4)) != 64 {
+		t.Fatal("platform-succ field layout differs from 2.3")
+	}
+	stbs, _ := s.toRecord(false).Encode()
+	if !Verify(idPub, "gomail/v1/rec/platform-succ", stbs, s.Signature) || Verify(idPub, "identity-succ", stbs, s.Signature) {
+		t.Fatal("succession domain")
+	}
+	// A phase 0 platform certificate (created before identity_gen,
+	// short domain) does not decode: field 4 has the wrong width.
+	old := rec.MustSchema("gomail/v1/rec/platform-cert",
+		rec.Field{Num: 1, Name: "role", Kind: rec.U8, Required: true},
+		rec.Field{Num: 2, Name: "gen", Kind: rec.U32, Required: true},
+		rec.Field{Num: 3, Name: "pub", Kind: rec.Bytes, Size: 32, Required: true},
+		rec.Field{Num: 4, Name: "created", Kind: rec.I64, Required: true},
+		rec.Field{Num: 5, Name: "identity_gen", Kind: rec.U32, Required: true},
+		rec.Field{Num: 6, Name: "sig", Kind: rec.Bytes, Size: 64})
+	oldEnc, _ := rec.New(old).SetU8(1, 2).SetU32(2, 3).SetBytes(3, c.Pub).SetI64(4, c.ValidFrom).SetU32(5, 1).SetBytes(6, c.Signature).Encode()
+	if _, err := DecodePlatformCert(oldEnc); err == nil {
+		t.Fatal("phase 0 layout accepted")
+	}
+}
