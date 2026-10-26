@@ -82,7 +82,9 @@ func DerivePlatform(seed *Seed) *PlatformRoot
 func (p *PlatformRoot) IdentityKey/AdminKey/IngestKey(gen uint32) (ed25519.PrivateKey, error)
 func (p *PlatformRoot) Zero()
 
-func Sign(priv ed25519.PrivateKey, domain string, body []byte) ([]byte, error)   // "gomail/v1/sig/"+domain+0x00+body
+func Sign(priv ed25519.PrivateKey, domain string, body []byte) ([]byte, error)   // "gomail/v1/sig/"+domain+0x00+body, domain aus der Tabelle in 3.7
+func KnownDomain(d string) bool; RecordDomain(s *rec.Schema) (string, error)
+const DomainPlatformCert, DomainPlatformSuccession, DomainUserGen, DomainEpoch, DomainAddress, DomainCheckpoint, DomainMail, DomainMeta, DomainPending, DomainWrap, DomainIndex
 func Verify(pub ed25519.PublicKey, domain string, body, sig []byte) bool
 
 type GenerationCert struct { Gen uint32; IdentityPub ed25519.PublicKey; UnwrapPub *ecdh.PublicKey; Created int64; Revokes uint32; Signature []byte }
@@ -111,7 +113,7 @@ var ErrWordlist, ErrWordCount, ErrUnknownWord, ErrChecksum, ErrGeneration, ErrZe
 ### Invarianten
 - Generationen beginnen bei 1 und sind lückenlos; `VerifyGenerationChain` verlangt die vollständige Folge ab 1. Ob eine Signatur einer widerrufenen Generation vor dem Widerruf im Log stand (2.2 Punkt 4), prüft Phase 6 mit dem Transparenzlog.
 - `RootKey` nur kurz im Speicher halten und mit `keys.Wipe` löschen; `UserRoot.Zero` nach der Ableitung aufrufen. Der Seed wird nie gespeichert.
-- Signaturdomänen sind Konstanten (`DomainGeneration` = `generation`; `DomainPlatformCert` und `DomainPlatformSuccession` sind nach 2.3 der volle Datensatztyp, siehe DECISIONS D46; `envelope` nutzt die Dateiartnamen). Nie dieselbe Domäne für zwei Strukturen verwenden.
+- Signaturdomänen sind die Kurznamen aus 3.7 (Version 1.2) als Konstanten `Domain*`; `Sign` und `Verify` nehmen keine anderen an, `RecordDomain(schema)` liefert den Kurznamen eines Datensatztyps (DECISIONS D47). Ein neuer signierter Typ braucht eine neue Zeile in 3.7 und in `keys`.
 - `Decode*` prüft Struktur, nicht Signatur; `Verify` immer aufrufen.
 - Der Schlüsselspeicher enthält nur die aktuelle Generation. Beim Öffnen werden KDF-Parameter aus dem Kopf innerhalb fester Grenzen übernommen (64 bis 256 MiB, 3 bis 10 Durchläufe, 1 bis 16 Threads); schwächere als die Spezifikation nie.
 - Die Passphrase ist `[]byte` (damit sie überschreibbar ist) und darf nicht leer sein.

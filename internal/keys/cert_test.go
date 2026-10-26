@@ -44,39 +44,41 @@ func genCert(t *testing.T, u *UserRoot, root ed25519.PrivateKey, gen uint32) *Ge
 func TestSignVerify(t *testing.T) {
 	_, root := testUser(t, 1)
 	pub := root.Public().(ed25519.PublicKey)
-	sig, err := Sign(root, "test", []byte("body"))
+	sig, err := Sign(root, DomainEpoch, []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !Verify(pub, "test", []byte("body"), sig) {
+	if !Verify(pub, DomainEpoch, []byte("body"), sig) {
 		t.Fatal("valid signature rejected")
 	}
-	if Verify(pub, "other", []byte("body"), sig) {
+	if Verify(pub, DomainAddress, []byte("body"), sig) {
 		t.Fatal("signature must be bound to the domain")
 	}
-	if Verify(pub, "test", []byte("bodx"), sig) {
+	if Verify(pub, DomainEpoch, []byte("bodx"), sig) {
 		t.Fatal("signature must be bound to the body")
 	}
-	if Verify(pub, "test\x00", []byte("body"), sig) || Verify(pub, "", []byte("body"), sig) {
+	if Verify(pub, "epoch\x00", []byte("body"), sig) || Verify(pub, "", []byte("body"), sig) {
 		t.Fatal("invalid domains must never verify")
 	}
-	if Verify(pub[:31], "test", []byte("body"), sig) || Verify(pub, "test", []byte("body"), sig[:63]) {
+	if Verify(pub[:31], DomainEpoch, []byte("body"), sig) || Verify(pub, DomainEpoch, []byte("body"), sig[:63]) {
 		t.Fatal("wrong lengths must never verify")
 	}
 	// The signed message is the documented prefix.
-	msg, err := signedMessage("test", []byte("body"))
+	msg, err := signedMessage(DomainEpoch, []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(msg, []byte("gomail/v1/sig/test\x00body")) {
+	if !bytes.Equal(msg, []byte("gomail/v1/sig/epoch\x00body")) {
 		t.Fatalf("unexpected signed message %q", msg)
 	}
-	for _, d := range []string{"", "a\x00b", "ä", "with space"} {
+	// Only the short names of 3.7 are domains: no unknown names, no full
+	// record types, no slashes.
+	for _, d := range []string{"", "a\x00b", "ä", "with space", "test", "generation", "gomail/v1/rec/platform-cert", "platform/cert", "identity-succ", "Mail"} {
 		if _, err := Sign(root, d, nil); !errors.Is(err, ErrDomain) {
 			t.Fatalf("domain %q must be rejected", d)
 		}
 	}
-	if _, err := Sign(root[:10], "test", nil); err == nil {
+	if _, err := Sign(root[:10], DomainEpoch, nil); err == nil {
 		t.Fatal("short private key must be rejected")
 	}
 }
@@ -118,7 +120,7 @@ func TestGenerationCertRoundTrip(t *testing.T) {
 	}
 	// The record layout: the signature is over the record without field 6.
 	tbs, _ := c1.toRecord(false).Encode()
-	if !Verify(rootPub, DomainGeneration, tbs, c1.Signature) {
+	if !Verify(rootPub, DomainUserGen, tbs, c1.Signature) {
 		t.Fatal("signature is not over the unsigned record")
 	}
 }
@@ -222,7 +224,7 @@ func TestDecodeGenerationCertRejects(t *testing.T) {
 		"missing sig":   unsigned,
 		"truncated":     enc[:len(enc)-1],
 		"trailing byte": append(append([]byte(nil), enc...), 0),
-		"wrong type":    append([]byte("gomail/v1/rec/generatiox\x00"), enc[len("gomail/v1/rec/generation\x00"):]...),
+		"wrong type":    append([]byte("gomail/v1/rec/user-gex\x00"), enc[len("gomail/v1/rec/user-gen\x00"):]...),
 		"platform cert": func() []byte {
 			b, _ := (&PlatformCert{Role: RoleIngest, Gen: 1, Pub: c.IdentityPub, IdentityGen: 1, Signature: c.Signature}).Encode()
 			return b
@@ -370,11 +372,12 @@ func TestSchemasExported(t *testing.T) {
 
 var _ = ecdh.X25519
 
-// TestPlatformRecordLayout pins the field order and the signature domain
-// of the platform records to 2.3 of specification 1.1: platform-cert is
+// TestPlatformRecordLayout pins the field order of the platform records
+// to 2.3 and their signature domain to 3.7 (version 1.2): platform-cert is
 // role, gen, pub, identity_gen, valid_from, sig; platform-succ is gen,
-// pub, valid_from, sig; both are signed under "gomail/v1/sig/" || record
-// type || 0x00.
+// pub, valid_from, sig; both are signed under "gomail/v1/sig/" || short
+// name || 0x00, the short name being the record type without
+// "gomail/v1/rec/".
 func TestPlatformRecordLayout(t *testing.T) {
 	var seed Seed
 	seed[0] = 11
@@ -397,24 +400,32 @@ func TestPlatformRecordLayout(t *testing.T) {
 	if PlatformCertSchema.Fields[3].Name != "identity_gen" || PlatformCertSchema.Fields[4].Name != "valid_from" {
 		t.Fatal("field names")
 	}
-	if DomainPlatformCert != PlatformCertSchema.Type || DomainPlatformSuccession != PlatformSuccessionSchema.Type {
-		t.Fatal("the domain must be the record type")
+	if d, err := RecordDomain(PlatformCertSchema); err != nil || d != DomainPlatformCert {
+		t.Fatal("the domain must be the short name of the record type")
+	}
+	if d, err := RecordDomain(PlatformSuccessionSchema); err != nil || d != DomainPlatformSuccession {
+		t.Fatal("the succession domain must be the short name of the record type")
 	}
 	if PlatformSuccessionSchema.Type != "gomail/v1/rec/platform-succ" {
 		t.Fatalf("succession record type %q", PlatformSuccessionSchema.Type)
 	}
-	// The signature is over the record without field 6 under the record
-	// type; the old short domain must not verify.
+	// The signature is over the record without field 6 under the short
+	// name. The full record type of version 1.1 is no domain any more.
 	tbs, _ := c.toRecord(false).Encode()
-	if !Verify(idPub, "gomail/v1/rec/platform-cert", tbs, c.Signature) {
-		t.Fatal("signature under the record type must verify")
+	if !Verify(idPub, "platform-cert", tbs, c.Signature) {
+		t.Fatal("signature under the short name must verify")
 	}
-	if Verify(idPub, "platform-cert", tbs, c.Signature) {
-		t.Fatal("old domain must not verify")
+	if Verify(idPub, "gomail/v1/rec/platform-cert", tbs, c.Signature) {
+		t.Fatal("the full record type must not verify")
 	}
 	msg, _ := signedMessage(DomainPlatformCert, tbs)
-	if !bytes.HasPrefix(msg, []byte("gomail/v1/sig/gomail/v1/rec/platform-cert\x00")) {
-		t.Fatalf("signed message prefix %q", msg[:48])
+	if !bytes.HasPrefix(msg, []byte("gomail/v1/sig/platform-cert\x00")) || bytes.HasPrefix(msg, []byte("gomail/v1/sig/gomail/")) {
+		t.Fatalf("signed message prefix %q", msg[:30])
+	}
+	// A version 1.1 signature (domain = full record type) does not verify.
+	msg11 := append([]byte("gomail/v1/sig/gomail/v1/rec/platform-cert\x00"), tbs...)
+	if Verify(idPub, DomainPlatformCert, tbs, ed25519.Sign(idKey, msg11)) {
+		t.Fatal("a version 1.1 signature must not verify")
 	}
 	// Same for the succession.
 	g2, _ := p.IdentityKey(2)
@@ -431,7 +442,7 @@ func TestPlatformRecordLayout(t *testing.T) {
 		t.Fatal("platform-succ field layout differs from 2.3")
 	}
 	stbs, _ := s.toRecord(false).Encode()
-	if !Verify(idPub, "gomail/v1/rec/platform-succ", stbs, s.Signature) || Verify(idPub, "identity-succ", stbs, s.Signature) {
+	if !Verify(idPub, "platform-succ", stbs, s.Signature) || Verify(idPub, "gomail/v1/rec/platform-succ", stbs, s.Signature) || Verify(idPub, "identity-succ", stbs, s.Signature) {
 		t.Fatal("succession domain")
 	}
 	// A phase 0 platform certificate (created before identity_gen,
@@ -446,5 +457,62 @@ func TestPlatformRecordLayout(t *testing.T) {
 	oldEnc, _ := rec.New(old).SetU8(1, 2).SetU32(2, 3).SetBytes(3, c.Pub).SetI64(4, c.ValidFrom).SetU32(5, 1).SetBytes(6, c.Signature).Encode()
 	if _, err := DecodePlatformCert(oldEnc); err == nil {
 		t.Fatal("phase 0 layout accepted")
+	}
+}
+
+// TestDomainTable pins the short names of 3.7 (version 1.2): exactly the
+// eleven names of the table, unique, ASCII without a slash, and the record
+// types of the signed records carry them.
+func TestDomainTable(t *testing.T) {
+	want := []string{"platform-cert", "platform-succ", "user-gen", "epoch", "address", "checkpoint", "mail", "meta", "pending", "wrap", "index"}
+	if len(domains) != len(want) {
+		t.Fatalf("%d domains, want %d", len(domains), len(want))
+	}
+	seen := map[string]bool{}
+	for i, d := range domains {
+		if d != want[i] {
+			t.Fatalf("domain %d is %q, want %q", i, d, want[i])
+		}
+		if seen[d] {
+			t.Fatalf("duplicate domain %q", d)
+		}
+		seen[d] = true
+		for j := 0; j < len(d); j++ {
+			if c := d[j]; c < 0x21 || c > 0x7e || c == '/' {
+				t.Fatalf("domain %q is not ASCII without a slash", d)
+			}
+		}
+		if !KnownDomain(d) {
+			t.Fatalf("%q not known", d)
+		}
+	}
+	for s, d := range map[*rec.Schema]string{GenerationCertSchema: "user-gen", PlatformCertSchema: "platform-cert", PlatformSuccessionSchema: "platform-succ"} {
+		got, err := RecordDomain(s)
+		if err != nil || got != d {
+			t.Fatalf("RecordDomain(%s) = %q, %v", s.Type, got, err)
+		}
+	}
+	// Records that are not signed have no domain.
+	for _, s := range []*rec.Schema{KeystoreHeaderSchema, KeystoreContentSchema, nil, rec.MustSchema("other/epoch", rec.Field{Num: 1, Name: "a", Kind: rec.U8})} {
+		if _, err := RecordDomain(s); !errors.Is(err, ErrDomain) {
+			t.Fatal("unsigned or foreign record type must have no domain")
+		}
+	}
+	// The generation certificate signs under "gomail/v1/sig/user-gen".
+	seed := Seed{1}
+	u := DeriveUser(&seed)
+	root, _ := u.RootKey()
+	id, _ := u.IdentityKey(1)
+	uw, _ := u.UnwrapKey(1)
+	c, err := NewGenerationCert(root, 1, id.Public().(ed25519.PublicKey), uw.PublicKey(), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbs, _ := c.toRecord(false).Encode()
+	if !ed25519.Verify(root.Public().(ed25519.PublicKey), append([]byte("gomail/v1/sig/user-gen\x00"), tbs...), c.Signature) {
+		t.Fatal("generation certificate must be signed under gomail/v1/sig/user-gen")
+	}
+	if !bytes.HasPrefix(tbs, []byte("gomail/v1/rec/user-gen\x00")) {
+		t.Fatal("generation record type")
 	}
 }

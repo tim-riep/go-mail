@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/rec"
 )
 
@@ -134,22 +135,23 @@ const (
 	KindIndex   Kind = 5
 )
 
-// String returns the ASCII name used in the signature domain
-// "gomail/v1/sig/<kind>" (3.4). An unknown kind has no name: the empty
-// string is rejected as a domain by keys.Sign and keys.Verify, so an
+// String returns the short name used in the signature domain
+// "gomail/v1/sig/<kind>" (3.4, 3.7). The names are the constants of the
+// table in 3.7 kept by package keys. An unknown kind has no name: the
+// empty string is rejected as a domain by keys.Sign and keys.Verify, so an
 // unknown kind can never be signed or verified.
 func (k Kind) String() string {
 	switch k {
 	case KindMail:
-		return "mail"
+		return keys.DomainMail
 	case KindMeta:
-		return "meta"
+		return keys.DomainMeta
 	case KindPending:
-		return "pending"
+		return keys.DomainPending
 	case KindWrap:
-		return "wrap"
+		return keys.DomainWrap
 	case KindIndex:
-		return "index"
+		return keys.DomainIndex
 	}
 	return ""
 }

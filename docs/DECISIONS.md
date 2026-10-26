@@ -1,6 +1,8 @@
-# Entscheidungen in Phase 0 und 0.1
+# Entscheidungen in Phase 0, 0.1 und 1
 
 Die Spezifikation liegt in `docs/PLAN.md` (Version 1.0). Dieses Dokument hält jede Stelle fest, an der sie mehrdeutig ist oder etwas offen lässt, und welche Entscheidung die Umsetzung getroffen hat. Grundsatz: im Zweifel die konservativere Lesart, keine erfundenen Anforderungen. Widersprüche und Lücken, die eine Änderung der Spezifikation nahelegen, stehen zusätzlich in `docs/SPEC-ISSUES.md`.
+
+Phase 1 arbeitet gegen Version 1.2 (`docs/PLAN.md`, Abschnitt 14 listet die Änderungen gegenüber 1.1); ihre Entscheidungen stehen ab D47.
 
 Phase 0.1 setzt die Änderungen der Version 1.1 um. Die Version 1.1 liegt als `docs/PLAN.md` vor (Abschnitt 13 listet die Änderungen); die Umsetzung von `envelope` und `rec` begann nach dem Auftragstext, bevor die Datei im Repository lag, und wurde danach gegen den Text geprüft (D42, D43). Aufgehobene Entscheidungen bleiben als Verlauf stehen und sind mit "Aufgehoben in Phase 0.1" und dem Commit markiert.
 
@@ -117,6 +119,7 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Begründung: Die Tabelle nennt nur diese drei; nichts erfinden.
 
 ### D18 Generationszertifikat
+- Geändert in Phase 1 (Schritt 0, S14): Typ-String `gomail/v1/rec/user-gen` statt `gomail/v1/rec/generation`, Signaturdomäne `user-gen` statt `generation` (3.7, Version 1.2), siehe D47.
 - Stelle: 2.2 Generationen und Registrierung (JSON-Beispiel).
 - Frage: Welche Felder, was genau wird signiert, welche Regeln?
 - Entscheidung: Datensatz `gomail/v1/rec/generation` mit `gen`, `identity_pub`, `unwrap_pub`, `created` (int64 ms), optional `revokes`, `sig`. Signiert wird mit dem Root über `"gomail/v1/sig/generation" || 0x00 || kanonischer Datensatz ohne sig`. Regeln: `gen >= 1`; Generation 1 hat kein `revokes`; Generation n > 1 hat `revokes = n-1` und nichts anderes. Ein ausdrücklich kodiertes `revokes = 0` wird abgelehnt, weil es dieselbe Bedeutung wie das fehlende Feld hätte und die Kodierung sonst nicht eindeutig wäre (Fund des Fuzzers, Regressionsfall unter `internal/keys/testdata/fuzz/`). `VerifyGenerationChain` verlangt die lückenlose Folge 1..n, alle vom Root signiert. `created` wird nicht geprüft (keine Vorgabe).
@@ -276,7 +279,17 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
 - Begründung: Vorgabe des Textes.
 
 ### D46 Signaturdomäne der Plattformdatensätze
+- Aufgehoben in Phase 1 (Schritt 0, S14): Version 1.2 legt in 3.7 Kurznamen fest (`platform-cert`, `platform-succ`). Siehe D47.
 - Stelle: 2.3 (Version 1.1): "Signiert wird jeweils der Datensatz ohne das Signaturfeld, mit dem Präfix `"gomail/v1/sig/" || Datensatztyp || 0x00`."
 - Frage: "Datensatztyp" ist in der Tabelle davor der volle Typ-String (`gomail/v1/rec/platform-cert`). Gemeint sein könnte auch ein Kurzname.
 - Entscheidung: Wörtlich: Domäne ist der volle Typ-String, die signierte Nachricht beginnt mit `gomail/v1/sig/gomail/v1/rec/platform-cert\x00`. `DomainPlatformCert` und `DomainPlatformSuccession` sind gleich `PlatformCertSchema.Type` und `PlatformSuccessionSchema.Type`; ein Test pinnt das. Das Generationszertifikat der Benutzer (2.2, D18) ist nicht betroffen und behält die Domäne `generation`.
 - Begründung: Die konservative Lesart ist der Text; die Verdopplung des Präfixes ist eindeutig und kollidiert mit keiner anderen Domäne. Siehe SPEC-ISSUES S14.
+
+## Phase 1 (Version 1.2)
+
+### D47 Signaturdomänen nach 3.7
+- Stelle: 3.7 (Version 1.2), Abschnitt 14 Punkt S14; Auftrag Phase 1 Schritt 0 Punkt 1.
+- Frage: 3.7 leitet den Kurznamen eines Datensatzes aus seinem Typ ab ("Datensatztyp ohne das Präfix `gomail/v1/rec/`"), die Tabelle nennt für das Generationszertifikat aber `user-gen`, während dessen Typ seit Phase 0 `gomail/v1/rec/generation` heißt.
+- Entscheidung: Beide Regeln gelten wörtlich; deshalb heißt der Typ jetzt `gomail/v1/rec/user-gen`. `keys` führt die Tabelle aus 3.7 als einzige Liste (`DomainPlatformCert`, `DomainPlatformSuccession`, `DomainUserGen`, `DomainEpoch`, `DomainAddress`, `DomainCheckpoint`, `DomainMail`, `DomainMeta`, `DomainPending`, `DomainWrap`, `DomainIndex`). `keys.Sign` und `keys.Verify` nehmen nur diese elf Namen an (`ErrDomain` sonst), damit kein Aufrufer eine eigene Domäne erfindet und Kurznamen eindeutig bleiben. `keys.RecordDomain(schema)` liefert den Kurznamen eines Datensatztyps und lehnt Typen ab, die nicht in der Tabelle stehen. `envelope.Kind.String` liefert die Konstanten aus `keys`. Die Datensätze `epoch`, `address` und `checkpoint` heißen `gomail/v1/rec/epoch`, `gomail/v1/rec/address` und `gomail/v1/rec/checkpoint`.
+- Vektoren: In `keys/testdata/cert_vectors.json` ändern sich die drei Generationszertifikate (Typ-String und Signatur) sowie Admin-, Ingest-Zertifikat und Nachfolge (Signatur); öffentliche Schlüssel, Ableitung und Schlüsselspeicher sind byte-identisch. In `rec/testdata/records.json` ändern sich nur die zwei Generationszertifikate (Typ-String). `envelope` ist unverändert, die Dateiartnamen waren bereits die Kurznamen; die `.gml`-Dateien wurden deshalb nicht neu erzeugt. Der Fuzz-Regressionsfall `revokes = 0` liegt zusätzlich mit dem neuen Typ-String vor (`user-gen-revokes-zero`), der alte bleibt als Ablehnungsfall.
+- Begründung: Text der Version 1.2; die feste Liste setzt "Kurznamen sind eindeutig, ein neuer signierter Typ braucht einen neuen Kurznamen" mechanisch durch.

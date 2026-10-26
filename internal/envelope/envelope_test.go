@@ -558,3 +558,19 @@ func TestUnknownKindNeverSignedOrVerified(t *testing.T) {
 		t.Fatalf("expected ErrHeader, got %v", err)
 	}
 }
+
+// TestWrapInfoLayout pins info of 3.2 step 2 (version 1.2): the
+// concatenation "gomail/v1/wrap" || 0x00 || type (1) || id (16) || gen
+// (uint32 big endian), exactly 36 bytes, no record.
+func TestWrapInfoLayout(t *testing.T) {
+	var id [16]byte
+	for i := range id {
+		id[i] = byte(0xa0 + i)
+	}
+	got := wrapInfo(recipientRef{Type: RecipientUserUnwrap, ID: id, Gen: 0x01020304})
+	want := append([]byte("gomail/v1/wrap\x00\x03"), id[:]...)
+	want = append(want, 1, 2, 3, 4)
+	if len(got) != 36 || !bytes.Equal(got, want) {
+		t.Fatalf("info = %x (%d bytes), want %x", got, len(got), want)
+	}
+}

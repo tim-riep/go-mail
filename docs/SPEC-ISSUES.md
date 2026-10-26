@@ -4,7 +4,9 @@ Festgestellt bei der Umsetzung von Phase 0 (`rec`, `keys`, `shamir`, `envelope`)
 
 Keiner der Punkte ist ein Sicherheitsproblem, das den Bau hätte anhalten müssen. S01 und S06 betreffen die Robustheit des Formats, S09 ein Spannungsfeld im Entwurf, die übrigen sind Lücken oder Mehrdeutigkeiten.
 
-Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01, S02, S04, S06 (Lesepfad ab Phase 1), S07, S08, S09 und S12, jeweils unten mit Commit oder Verweis markiert. Offen bleiben S03, S05, S10, S11 und S13 (in 1.1 nicht aufgegriffen) und der neue Punkt S14.
+Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01, S02, S04, S06 (Lesepfad ab Phase 1), S07, S08, S09 und S12, jeweils unten mit Commit oder Verweis markiert.
+
+Stand Phase 1, Schritt 0 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt. Offen sind S11 und S13 (Vorschläge unten, Entscheidung durch den Auftraggeber) und die Punkte ab S15.
 
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
@@ -21,6 +23,7 @@ Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01
 - Vorschlag: Entweder `golang.org/x/text` (vom Go-Team gepflegt, wie `x/crypto`) ausdrücklich zulassen, oder festlegen, dass die eigenen Tabellen gewollt sind und wer sie pflegt.
 
 ## S03 Kodierung von `info` beim Verpacken
+- Erledigt in Version 1.2 (3.2 Schritt 2 und 4): `info` ist die Verkettung fester Breiten von genau 36 Byte, `Kopf` in der AAD ist der Kopfdatensatz ohne Längenfeld. Vollständig abgedeckt, entspricht D33; ein Test pinnt die 36 Byte (`TestWrapInfoLayout`).
 - Stelle: 3.2 Schritt 2, "`info = "gomail/v1/wrap" || 0x00 || type || id || gen`, kanonisch kodiert".
 - Problem: "Kanonisch kodiert" kann die Verkettung fester Breiten oder einen Datensatz nach 3.6 meinen. Beides ist eindeutig, aber inkompatibel zueinander.
 - Phase 0: Verkettung fester Breiten (DECISIONS D33).
@@ -34,6 +37,7 @@ Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01
 - Vorschlag: In 3.4 die Namen nennen oder die Zahl festlegen.
 
 ## S05 Abgrenzung von Listenelementen
+- Erledigt in Version 1.2 (3.6 Regel 4): Anzahl als uint32 Big Endian, jedes Element `Länge || eingebetteter Datensatz` mit Typ-String und Nullbyte, die Elementlängen füllen das Feld exakt. Vollständig abgedeckt, entspricht D05 und D06; der Decoder lehnt Restbytes nach dem letzten Element ab (`rec_test.go`, "list trailing bytes after elements").
 - Stelle: 3.6 Regel 4.
 - Problem: Datensätze sind nicht selbstbegrenzend; ohne Längenpräfix je Element ist die Kodierung einer Liste mehrdeutig.
 - Phase 0: `Anzahl || (Länge || Element)*` (DECISIONS D06).
@@ -68,6 +72,7 @@ Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01
 - Vorschlag: Entscheiden, ob (a) der Empfängerteil aus dem signierten Hash herausgenommen wird und stattdessen jeder Eintrag durch HPKE an Kopf und Dateischlüssel gebunden bleibt, oder (b) das Ergänzen von Empfängern bei signierten Dateien ein Neusignieren durch ein Mitglied verlangt und Abschnitt 7 das vorsieht, oder (c) Wiederherstellungsempfänger immer beim Schreiben eingetragen werden (siehe offene Entscheidung 1 in Abschnitt 12).
 
 ## S10 50 MB gegenüber 800 Blöcken
+- Erledigt in Version 1.2 (3.3 Regel 2): "50 MiB (52.428.800 Byte), also höchstens 800 Blöcke". Vollständig abgedeckt, entspricht D35. Die 25 MB in 5.1 (SMTP `SIZE`) und das 1 MB für Header in 5.2 sind davon unabhängig, siehe S15.
 - Stelle: 3.3 Regel 2.
 - Problem: 800 Blöcke zu 65.536 Byte sind 52.428.800 Byte (50 MiB, 52,4 MB), nicht 50 MB.
 - Phase 0: 800 Blöcke (DECISIONS D35).
@@ -93,6 +98,7 @@ Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01
 - Vorschlag: Kein Änderungsbedarf an der Spezifikation; Hinweis für Phase 2 und 6 (siehe HANDOFF).
 
 ## S14 Signaturdomäne der Plattformdatensätze verdoppelt das Präfix
+- Erledigt in Phase 1, Schritt 0: Version 1.2 legt in 3.7 Kurznamen für alle Signaturen fest; `keys` ist umgestellt, Vektoren neu erzeugt (DECISIONS D47).
 - Stelle: 2.3 (Version 1.1), "mit dem Präfix `"gomail/v1/sig/" || Datensatztyp || 0x00`".
 - Problem: Der Datensatztyp ist laut Tabelle der volle Typ-String, die signierte Nachricht beginnt also mit `gomail/v1/sig/gomail/v1/rec/platform-cert`. Das ist eindeutig, aber vermutlich nicht beabsichtigt; für das Generationszertifikat in 2.2 ist keine Domäne genannt (Phase 0 nutzt `generation`).
 - Phase 0.1: Wörtlich umgesetzt (DECISIONS D46).

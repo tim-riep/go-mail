@@ -8,28 +8,69 @@ import (
 	"github.com/tim-riep/go-mail/internal/rec"
 )
 
-// Signature domains. A signature is always over
-// "gomail/v1/sig/" || domain || 0x00 || body, so a signature made for one
-// purpose can never pass as a signature for another (specification 3.4).
-// For platform certificates and successions the domain is the record
-// type (2.3, version 1.1: prefix "gomail/v1/sig/" || record type || 0x00).
+// Signature domains (specification 3.7, version 1.2). Every Ed25519
+// signature in the system is over
+//
+//	"gomail/v1/sig/" || short name || 0x00 || signed bytes
+//
+// The short name is ASCII without a slash. For records it is the record
+// type without the prefix "gomail/v1/rec/", for .gml files the name of the
+// file kind. Short names are unique; signedMessage accepts exactly the
+// names of the table in 3.7 and nothing else, so a new signed type needs
+// a new entry here. Signatures over tree heads of the transparency log
+// and by witnesses use golang.org/x/mod/sumdb/note and are not covered.
 const (
 	sigPrefix = "gomail/v1/sig/"
+	recPrefix = "gomail/v1/rec/"
 
-	DomainGeneration         = "generation"
-	DomainPlatformCert       = "gomail/v1/rec/platform-cert"
-	DomainPlatformSuccession = "gomail/v1/rec/platform-succ"
+	DomainPlatformCert       = "platform-cert" // admin or ingest certificate, by the platform identity
+	DomainPlatformSuccession = "platform-succ" // succession of the platform identity, by the previous generation
+	DomainUserGen            = "user-gen"      // generation certificate of a user, by the user root
+	DomainEpoch              = "epoch"         // epoch.rec, by the identity of the creating member
+	DomainAddress            = "address"       // address assignment, by the admin key
+	DomainCheckpoint         = "checkpoint"    // client note on a tree head, by the user identity
+	DomainMail               = "mail"          // .gml files (3.4)
+	DomainMeta               = "meta"
+	DomainPending            = "pending"
+	DomainWrap               = "wrap"
+	DomainIndex              = "index"
 )
+
+// domains is the table of 3.7.
+var domains = [...]string{
+	DomainPlatformCert, DomainPlatformSuccession, DomainUserGen, DomainEpoch,
+	DomainAddress, DomainCheckpoint, DomainMail, DomainMeta, DomainPending,
+	DomainWrap, DomainIndex,
+}
+
+// KnownDomain reports whether d is a short name of the table in 3.7.
+func KnownDomain(d string) bool {
+	for _, k := range domains {
+		if d == k {
+			return true
+		}
+	}
+	return false
+}
+
+// RecordDomain returns the short name of a record type: the type without
+// the prefix "gomail/v1/rec/" (3.7). It fails if the type has no such
+// prefix or the short name is not in the table of 3.7.
+func RecordDomain(s *rec.Schema) (string, error) {
+	if s == nil || len(s.Type) <= len(recPrefix) || s.Type[:len(recPrefix)] != recPrefix {
+		return "", fmt.Errorf("%w: not a record type", ErrDomain)
+	}
+	d := s.Type[len(recPrefix):]
+	if !KnownDomain(d) {
+		return "", fmt.Errorf("%w: record type is not a signed type", ErrDomain)
+	}
+	return d, nil
+}
 
 // signedMessage returns the bytes that are signed for domain and body.
 func signedMessage(domain string, body []byte) ([]byte, error) {
-	if domain == "" {
-		return nil, fmt.Errorf("%w: empty", ErrDomain)
-	}
-	for i := 0; i < len(domain); i++ {
-		if c := domain[i]; c < 0x21 || c > 0x7e {
-			return nil, fmt.Errorf("%w: must be printable ASCII without spaces", ErrDomain)
-		}
+	if !KnownDomain(domain) {
+		return nil, fmt.Errorf("%w: unknown short name", ErrDomain)
 	}
 	msg := make([]byte, 0, len(sigPrefix)+len(domain)+1+len(body))
 	msg = append(msg, sigPrefix...)
@@ -65,8 +106,9 @@ func Verify(pub ed25519.PublicKey, domain string, body, sig []byte) bool {
 
 // GenerationCertSchema is the record of a user generation (2.2). The
 // signature (field 6) is made by the user's root key over the record
-// without that field, under DomainGeneration.
-var GenerationCertSchema = rec.MustSchema("gomail/v1/rec/generation",
+// without that field, under DomainUserGen (3.7). The record type carries
+// the short name of 3.7 ("user-gen").
+var GenerationCertSchema = rec.MustSchema("gomail/v1/rec/user-gen",
 	rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
 	rec.Field{Num: 2, Name: "identity_pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
 	rec.Field{Num: 3, Name: "unwrap_pub", Kind: rec.Bytes, Size: 32, Required: true},
@@ -99,7 +141,7 @@ func NewGenerationCert(root ed25519.PrivateKey, gen uint32, identityPub ed25519.
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCert, err)
 	}
-	sig, err := Sign(root, DomainGeneration, tbs)
+	sig, err := Sign(root, DomainUserGen, tbs)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +245,7 @@ func (c *GenerationCert) Verify(rootPub ed25519.PublicKey) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrCert, err)
 	}
-	if !Verify(rootPub, DomainGeneration, tbs, c.Signature) {
+	if !Verify(rootPub, DomainUserGen, tbs, c.Signature) {
 		return fmt.Errorf("%w: generation certificate", ErrSignature)
 	}
 	return nil
