@@ -611,30 +611,6 @@ func TestVerifyLines(t *testing.T) {
 	}
 }
 
-// TestGetCurRebuild (task 11, addendum point 2): an operator whose cached
-// state the committed tree no longer extends rebuilds it silently.
-func TestGetCurRebuild(t *testing.T) {
-	e := newEnv(t, 1, 1)
-	e.addresses(1)
-	n := e.tree().Size
-	f := &files{root: e.st.Root}
-	hr, _ := tlog.TreeHash(n-1, e.hashReader())
-	if err := f.writeTree(treeState{Size: n - 1, Hash: hr}); err != nil {
-		t.Fatal(err)
-	}
-	other := e.openOp()
-	if _, err := other.Append(KindUser, newUser(t).rec(t, 1)); err != nil {
-		t.Fatal(err)
-	}
-	// e.op still holds the old entry n-1 in its state.
-	if _, err := e.op.Append(KindUser, newUser(t).rec(t, 1)); err != nil {
-		t.Fatalf("append after the rollback: %v", err)
-	}
-	if e.tree().Size != n+1 {
-		t.Fatal("size")
-	}
-}
-
 // TestRefreshOwnErrStrict (task 11, addendum point 1): while an own
 // entry found replaced in a larger verified tree is unresolved, Refresh
 // takes over no head, even one that passes CheckHead and the Pending

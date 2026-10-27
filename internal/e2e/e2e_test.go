@@ -124,7 +124,7 @@ func stripReceived(t *testing.T, content []byte) []byte {
 }
 
 func TestRegisterCreateSendListRead(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	u := env.NewUser("alice")
 	mbx := env.Mailbox(u, "Büro", "info@brownbear.example")
 	s := startServer(t, env)
@@ -153,7 +153,7 @@ func TestRegisterCreateSendListRead(t *testing.T) {
 }
 
 func TestCopies(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	a := env.NewUser("alice")
 	b := env.NewUser("bob")
 	mbxA := env.Mailbox(a, "A", "info@a.example", "alias@a.example")
@@ -197,7 +197,7 @@ func TestCopies(t *testing.T) {
 }
 
 func TestUnknownRecipient550(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	u := env.NewUser("alice")
 	env.Mailbox(u, "A", "info@a.example")
 	s := startServer(t, env)
@@ -208,7 +208,7 @@ func TestUnknownRecipient550(t *testing.T) {
 }
 
 func TestDiskFull452(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	u := env.NewUser("alice")
 	mbx := env.Mailbox(u, "A", "info@a.example")
 	s := startServer(t, env)
@@ -264,7 +264,7 @@ func (s *rawSession) cmd(line, code string) {
 }
 
 func TestEpochChangeDuringReceipt(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	u := env.NewUser("alice")
 	mbx := env.Mailbox(u, "A", "info@a.example")
 	s := startServer(t, env)
@@ -300,7 +300,7 @@ func TestEpochChangeDuringReceipt(t *testing.T) {
 }
 
 func TestSupplyEmptyAtMonthChange(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	u := env.NewUser("alice")
 	mbx := env.Mailbox(u, "A", "info@a.example")
 	s := startServer(t, env)
@@ -333,7 +333,7 @@ func TestSupplyEmptyAtMonthChange(t *testing.T) {
 // client directory and every log line for it. The preprocessing queue is
 // forced to spill to work/ first.
 func TestNoPlaintext(t *testing.T) {
-	env := testenv.New(t)
+	env := testenv.NewLogged(t)
 	u := env.NewUser("alice")
 	mbx := env.Mailbox(u, "A", "info@a.example")
 	s := startServerWorker(t, env, false, func(c *ingest.Config) { c.QueueMemory = 1; c.BatchAge = time.Hour })

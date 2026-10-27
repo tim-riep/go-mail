@@ -5,7 +5,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,10 +118,17 @@ func TestAddressReassign(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.refused(t, "addresses.json only", s.addArgs("json-only@example.org", s.mbx), "json-only@example.org", s.mbx)
-	// Without the log (--insecure-no-log) addresses.json alone decides.
+	// There is no way around the log any more (task 15): --insecure-no-log
+	// is a usage error, nothing is logged or assigned.
 	noLog := []string{"address", "add", "json-only@example.org", "--mailbox", s.mbx.String(), "--data", s.data,
 		"--admin-key", filepath.Join(s.keys, ceremony.AdminKeyFile), "--insecure-no-log"}
-	s.refused(t, "without log", noLog, "json-only@example.org", s.mbx)
+	before, _ := os.ReadFile(s.st.AddressesFile())
+	if code := run(ctx, noLog, &out, &errb, nil); code != 2 || s.logged(t, "json-only@example.org") != 0 {
+		t.Fatalf("--insecure-no-log: %d", code)
+	}
+	if after, _ := os.ReadFile(s.st.AddressesFile()); !bytes.Equal(before, after) {
+		t.Fatal("--insecure-no-log: addresses.json changed")
+	}
 	// A malformed address: no address in the message either.
 	errb.Reset()
 	if code := run(ctx, s.addArgs("bad address@example.org", s.mbx), &out, &errb, nil); code != 1 || strings.Contains(errb.String(), "example.org") {
@@ -183,7 +192,8 @@ func TestPinSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer
-	if code := run(ctx, []string{"serve", "--data", s.data, "--listen", "127.0.0.1:0", "--ingest-key", keyLink, "--insecure-no-log"}, &out, &errb, nil); code != 1 ||
+	if code := run(ctx, []string{"serve", "--data", s.data, "--listen", "127.0.0.1:0", "--ingest-key", keyLink, "--pin", s.pin,
+		"--log-listen", "127.0.0.1:0"}, &out, &errb, nil); code != 1 ||
 		!strings.Contains(errb.String(), "Ingest-Schlüssel darf nicht im Datenverzeichnis") {
 		t.Fatalf("linked ingest key: %d %s", code, errb.String())
 	}
@@ -195,5 +205,133 @@ func TestPinSymlink(t *testing.T) {
 	args := []string{"address", "add", "a@example.org", "--mailbox", s.mbx.String(), "--data", dataLink, "--admin-key", adminKey, "--pin", good}
 	if code := run(ctx, args, &out, &errb, nil); code != 0 || s.logged(t, "a@example.org") != 1 {
 		t.Fatalf("linked pin outside: %d %s", code, errb.String())
+	}
+	// The admin key (task 15, from the verification of 11b): inside the
+	// data directory, directly or through a link, it is a usage error
+	// (exit 2) and nothing is logged.
+	adminIn := filepath.Join(s.data, "admin.key")
+	ad, err := os.ReadFile(adminKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WritePrivateFileAtomic(adminIn, ad); err != nil {
+		t.Fatal(err)
+	}
+	adminLink := filepath.Join(s.dir, "admin-link.key")
+	if err := os.Symlink(adminIn, adminLink); err != nil {
+		t.Fatal(err)
+	}
+	for name, key := range map[string]string{"admin key inside": adminIn, "admin key through a link": adminLink} {
+		errb.Reset()
+		args := []string{"address", "add", "k@example.org", "--mailbox", s.mbx.String(), "--data", s.data, "--admin-key", key, "--pin", s.pin}
+		if code := run(ctx, args, &out, &errb, nil); code != 2 || !strings.Contains(errb.String(), "Admin-Schlüssel darf nicht im Datenverzeichnis") ||
+			s.logged(t, "k@example.org") != 0 {
+			t.Fatalf("%s: %d %s", name, code, errb.String())
+		}
+	}
+	// A link outside the data directory to the admin key outside: accepted.
+	adminGood := filepath.Join(s.dir, "admin-good.key")
+	if err := os.Symlink(adminKey, adminGood); err != nil {
+		t.Fatal(err)
+	}
+	args = []string{"address", "add", "k@example.org", "--mailbox", s.mbx.String(), "--data", s.data, "--admin-key", adminGood, "--pin", s.pin}
+	if code := run(ctx, args, &out, &errb, nil); code != 0 || s.logged(t, "k@example.org") != 1 {
+		t.Fatalf("linked admin key outside: %d %s", code, errb.String())
+	}
+}
+
+// TestAddressAddParallel (task 15, from the verification of 11b): two
+// "address add" for the same address and different mailboxes at once;
+// exactly one wins, the other is a usage error that names no address,
+// and addresses.json and the log agree. The runs share this process, so
+// addresses.lock serializes them through the lock registry of store as
+// two processes through the record lock.
+func TestAddressAddParallel(t *testing.T) {
+	s := newLogSetup(t)
+	for i := 0; i < 8; i++ {
+		addr := "par" + strconv.Itoa(i) + "@example.org"
+		boxes := []store.ID{s.newMailbox(t), s.newMailbox(t)}
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		outs := make([]string, 2)
+		for j := range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var out, errb bytes.Buffer
+				codes[j] = run(context.Background(), s.addArgs(addr, boxes[j]), &out, &errb, nil)
+				outs[j] = out.String() + errb.String()
+			}()
+		}
+		wg.Wait()
+		s.checkOneWinner(t, addr, boxes, codes, outs)
+	}
+}
+
+// TestAddressAddInjected: the injection point between the check under
+// addresses.lock and the Append. A second "address add" for another
+// mailbox started there waits for the lock, finds the first one's log
+// entry and refuses.
+func TestAddressAddInjected(t *testing.T) {
+	s := newLogSetup(t)
+	addr := "inject@example.org"
+	boxes := []store.ID{s.newMailbox(t), s.newMailbox(t)}
+	codes := make([]int, 2)
+	outs := make([]string, 2)
+	second := make(chan struct{})
+	addressHook = func() {
+		addressHook = nil
+		go func() {
+			defer close(second)
+			var out, errb bytes.Buffer
+			codes[1] = run(context.Background(), s.addArgs(addr, boxes[1]), &out, &errb, nil)
+			outs[1] = out.String() + errb.String()
+		}()
+		// Give the second run time to reach addresses.lock.
+		time.Sleep(50 * time.Millisecond)
+	}
+	defer func() { addressHook = nil }()
+	var out, errb bytes.Buffer
+	codes[0] = run(context.Background(), s.addArgs(addr, boxes[0]), &out, &errb, nil)
+	outs[0] = out.String() + errb.String()
+	<-second
+	if codes[0] != 0 {
+		t.Fatalf("first: %d %s", codes[0], outs[0])
+	}
+	s.checkOneWinner(t, addr, boxes, codes, outs)
+}
+
+// checkOneWinner requires exactly one exit status 0 and one 2, no
+// address in the loser's output, and addresses.json and the log naming
+// the winner's mailbox only.
+func (s *logSetup) checkOneWinner(t *testing.T, addr string, boxes []store.ID, codes []int, outs []string) {
+	t.Helper()
+	var winner int
+	switch {
+	case codes[0] == 0 && codes[1] == 2:
+		winner = 0
+	case codes[1] == 0 && codes[0] == 2:
+		winner = 1
+	default:
+		t.Fatalf("exit codes %v\n%s\n%s", codes, outs[0], outs[1])
+	}
+	loser := 1 - winner
+	if strings.Contains(strings.ToLower(outs[loser]), addr) || strings.Contains(outs[loser], "example.org") {
+		t.Fatalf("address in the loser's output: %q", outs[loser])
+	}
+	cur, err := s.st.LoadAddresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur[addr] != boxes[winner] {
+		t.Fatalf("addresses.json names %s, winner %s", cur[addr], boxes[winner])
+	}
+	es, err := s.operator(t).Lookup(translog.KindAddress, []byte(addr))
+	if err != nil || len(es) != 1 {
+		t.Fatalf("log entries %d %v", len(es), err)
+	}
+	a, err := store.DecodeAddressAssignment(es[0].Content)
+	if err != nil || a.MailboxID != boxes[winner] {
+		t.Fatalf("log names another mailbox than the winner %s", boxes[winner])
 	}
 }

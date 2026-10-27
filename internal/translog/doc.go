@@ -965,6 +965,59 @@
 //     Refresh returned, before it relies on the log (Log.Refresh).
 //   - 15: the server, ingest, ceremony and store sites below; the
 //     server's pin (--pin, Options.Identities, finding 03d-2).
+//     Built by task 15 (the ceremony part, point 3 of the task, is
+//     deferred to task 15b): ingest checks before every delivery
+//     CheckEpoch for the whole chain up to the head of mailbox.rec and
+//     refuses a head below the newest valid epoch entry of the mailbox
+//     (Lookup(KindEpoch), ingest.ErrRollback: the residual risk of D71),
+//     CheckUser, CheckGeneration and CheckRevokedSignature for the
+//     signers, CheckAddress at the receipt time for every recipient
+//     (550 without a valid assignment in the log, 451 for other log
+//     failures), CheckPlatform for its own ingest certificate at the
+//     start, and refuses to sign once ingest-<g+1>.cert in the log is
+//     valid from the receipt time on (ingest.ErrSuperseded, "Platform
+//     generations"). gomail-server serve always runs with the log (no
+//     --insecure-no-log), checks platform/ against the identity list of
+//     its pin at the start (translog.ErrMismatch for a generation the
+//     pin does not know: operating rule (5) above) and the log head
+//     with SignHead, and refuses to start on an inconsistent log.
+//     Role locks (9.1, D70): the server holds locks/server exclusively
+//     from ingest.New on and checks that the lock is in force through a
+//     second open file description; gomailctl holds locks/client
+//     (shared) and refuses unless store.CheckPeerLock finds the server
+//     lock in force. "address add" reads the admin key through its
+//     resolved path outside the data directory; the check under
+//     addresses.lock and the Append stay one hold, the write of
+//     addresses.json follows (reading in cmd/gomail-server).
+//     Task 15c (findings of the verification of task 15): ingest checks
+//     the ingest generation again in the commit under the mailbox locks
+//     (ingest-<g+1>.cert logged while the data arrive: 451). A committed
+//     tree that shrinks while a process runs is handled differently by
+//     the two kinds of log (strictest reading for the operator; "What
+//     write access to log/ gives an attacker" stays as it is for the
+//     client):
+//     client log: its checks answer from the audit index of the
+//     verified reference head (ref), so a cached state of the committed
+//     tree that the tree no longer extends is rebuilt silently from ref
+//     (getCur, task 11 addendum point 2), and nothing the client
+//     accepts depends on tree.rec;
+//     operator log: its checks answer from the committed tree itself,
+//     so it fails closed. A tree.rec smaller than the largest tree the
+//     process has accepted, of that size with another root, or not
+//     extending it is ErrConsistency for Lookup, every Check method,
+//     Append, SignHead and PublishHead, without a silent rebuild
+//     (operatorCur); view also applies refuse (an entry beyond the next
+//     index or a published head beyond the size), so a new process that
+//     never saw the larger tree fails the same way. Only a new process
+//     heals, after "gomail-server log repair" (RepairTree) where the
+//     files show the rollback; a rollback by exactly one entry that no
+//     head covers stays the gap named above. Head keeps serving the
+//     published heads with the log keys of the last accepted tree.
+//     ingest answers ErrConsistency with 451 (the server accepts no
+//     mail), loghttp.Tick logs the refusal of SignHead and drops its
+//     candidate. "gomail-server serve --require-client-lock" requires
+//     a client lock in force at the start (ingest.Config.PeerCheck; off
+//     by default, D70).
 //
 // # Open phase-3 log sites
 //
@@ -998,6 +1051,14 @@
 // cmd/gomail-server/main.go ("address add" appends with
 // Append(KindAddress) to the operator log of --pin before AddAddress;
 // only --insecure-no-log still uses Unverified until task 15): 30 sites.
+// Task 15 resolves the four sites in internal/ingest/delivery.go (the
+// server's ingest checks against its operator log, see the rows below)
+// and the one in ceremony.InitDev (the certificates go into the operator
+// log of the new data directory, which also gets witnesses.rec): 25
+// sites, internal/client 14 (task 14) and translogtest 11. gomail-server
+// has no --insecure-no-log any more and imports no translogtest;
+// gomailctl keeps the switch until task 14 builds the client log, and
+// gomail-ceremony until task 15b takes the ceremony to the log.
 //
 //	file, function                         check today            replaced by (new interface)                          task
 //	client/client.go Open                  CheckFresh             Refresh(now), head into state.json, CheckFresh       14
@@ -1011,12 +1072,13 @@
 //	client/read.go ingestKeyFor            CheckPlatform          CheckPlatform (identity list), LogKeys from certs    14
 //	client/read.go checkMeta               CheckAddress           CheckAddress (newest valid_from <= receipt, Q9)      14
 //	client/keygen.go Register              AppendUser             client dir, Append(KindUser, data), then user.rec    14
-//	ingest/delivery.go chooseEpoch         CheckEpoch             CheckEpoch (operator log)                            15
-//	ingest/delivery.go userKey             CheckUser              CheckUser (operator log)                             15
-//	ingest/delivery.go userKey             CheckGeneration        CheckGeneration (operator log)                       15
-//	ingest/delivery.go userKey             CheckRevokedSignature  CheckRevokedSignature (operator log)                 15
+//	ingest/delivery.go chooseEpoch         CheckEpoch             CheckEpoch (operator log) + Lookup(KindEpoch) head   15 (done)
+//	ingest/delivery.go userKey             CheckUser              CheckUser (operator log)                             15 (done)
+//	ingest/delivery.go userKey             CheckGeneration        CheckGeneration (operator log)                       15 (done)
+//	ingest/delivery.go userKey             CheckRevokedSignature  CheckRevokedSignature (operator log)                 15 (done)
 //	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc) (done by task 11)            11
-//	ceremony/ceremony.go InitDev           AppendPlatform         Append(KindPlatform, data); real ceremony: Publish   15 (10)
+//	ceremony/ceremony.go InitDev           AppendPlatform         Append(KindPlatform, data) to the operator log        15 (done);
+//	                                                              real ceremony: Publish                                15b (10)
 //	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15
 //
 // Not a tagged site, but changed by this design:

@@ -68,6 +68,18 @@ type fileLog struct {
 	// signed is the last head SignHead returned (operator log, task 11),
 	// without signatures; in memory only.
 	signed *Head
+	// seen is the largest committed tree this operator log has accepted
+	// in this process (task 15c finding 2): a tree.rec below it, or of
+	// its size with another root, or one that does not extend it, is
+	// ErrConsistency (operatorCur). In memory only: a new process
+	// starts from tree.rec, which "gomail-server log repair"
+	// (RepairTree) restores.
+	seen treeState
+	// seenKeys are the log keys of the tree of seen (operator log). They
+	// open the heads published before when the committed tree fails the
+	// checks (logKeys): Head keeps serving the newest published head,
+	// while every Check, Lookup and Append fails.
+	seenKeys []LogKey
 }
 
 // operatorLog is the log of the server and the ceremony; SignHead and
@@ -286,14 +298,20 @@ func (l *fileLog) sync(s *state, tree treeState) error {
 
 // getCur returns the state of the committed tree.
 //
-// A cached state that the committed tree no longer extends (tree.rec
-// rolled back by one and another entry appended at the same index, doc.go
-// "What write access to log/ gives an attacker") is discarded silently
-// and rebuilt once from its base, the verified reference index of a
-// client (entry 0 for an operator), instead of failing the call once
-// with ErrConsistency (task 11, addendum point 2). Only a state built in
-// this very call that does not match the tree is ErrConsistency.
+// Client log: a cached state that the committed tree no longer extends
+// (tree.rec rolled back by one and another entry appended at the same
+// index, doc.go "What write access to log/ gives an attacker") is
+// discarded silently and rebuilt once from its base, the verified
+// reference index, instead of failing the call once with ErrConsistency
+// (task 11, addendum point 2): the client's checks answer from the
+// reference index, not from this state. Only a state built in this very
+// call that does not match the tree is ErrConsistency. An operator log
+// answers its checks from this state and never rebuilds it silently
+// (operatorCur, task 15c finding 2).
 func (l *fileLog) getCur(tree treeState) (*state, error) {
+	if l.v == nil {
+		return l.operatorCur(tree)
+	}
 	base := func() *state {
 		if l.ref != nil {
 			return l.ref.clone()
@@ -314,6 +332,55 @@ func (l *fileLog) getCur(tree treeState) (*state, error) {
 		return nil, err
 	}
 	return l.cur, nil
+}
+
+// operatorCur is getCur of an operator log (task 15c finding 2): it
+// fails closed instead of rebuilding. The committed tree must extend the
+// largest tree this process has accepted (seen): a smaller tree.rec, one
+// of the same size with another root, or one whose prefix of that size
+// has another root is ErrConsistency, and so is a cached state that the
+// tree does not extend (sync); nothing is rebuilt from entry 0 then.
+// Without this, a tree.rec rolled back while the server runs would be
+// taken as the new reference: Lookup would no longer see the newer
+// epochs of a mailbox (ingest.checkLogHead), and the server would
+// encrypt for an older epoch again. Only a new process, after "gomail-
+// server log repair" (RepairTree) where the files demand it, accepts
+// the tree again (doc.go "Tasks", 15c). A state that was dropped for
+// another reason (retry after errIndex, a failed write) is rebuilt from
+// entry 0, but only into a tree that extends seen.
+func (l *fileLog) operatorCur(tree treeState) (*state, error) {
+	if seen := l.seen; seen.Size > 0 {
+		switch {
+		case tree.Size < seen.Size:
+			l.cur = nil
+			return nil, fmt.Errorf("%w: tree.rec names %d entries, this process saw %d (tree.rec rolled back?)", ErrConsistency, tree.Size, seen.Size)
+		case tree.Size == seen.Size && tree.Hash != seen.Hash:
+			l.cur = nil
+			return nil, fmt.Errorf("%w: tree.rec holds another tree of the size this process saw (tree.rec rolled back?)", ErrConsistency)
+		case tree.Size > seen.Size && l.cur == nil:
+			if h, err := tlog.TreeHash(seen.Size, l.f.reader(tree)); err != nil || h != seen.Hash {
+				return nil, fmt.Errorf("%w: the committed tree does not extend the tree this process saw", ErrConsistency)
+			}
+		}
+	}
+	if l.cur == nil {
+		l.cur = newState(l.f, l.ids)
+	}
+	if err := l.sync(l.cur, tree); err != nil {
+		l.cur = nil
+		return nil, err
+	}
+	l.see(l.cur)
+	return l.cur, nil
+}
+
+// see records the tree of the operator state s as seen (operatorCur).
+func (l *fileLog) see(s *state) {
+	if l.v != nil || s.Size < l.seen.Size || (s.Size == l.seen.Size && l.seenKeys != nil) {
+		return
+	}
+	l.seen = treeState{Size: s.Size, Hash: s.Root}
+	l.seenKeys = logKeysOf(s, s.Size)
 }
 
 // -------------------------------------------------------------- append
@@ -428,6 +495,7 @@ func (l *fileLog) appendLocked(e *Entry, obj any, enc []byte, leaf tlog.Hash) (i
 	}
 	ch.commit(tree.Size)
 	cur.Size, cur.Root = tree.Size+1, root
+	l.see(cur)
 	l.addPending(tree.Size, leaf)
 	return tree.Size, nil
 }
@@ -587,13 +655,21 @@ func (l *fileLog) addPending(index int64, leaf tlog.Hash) {
 // ------------------------------------------------------------- reading
 
 // view returns the state the Check methods answer from: the audit index
-// of a client, the committed tree of an operator.
+// of a client, the committed tree of an operator. An operator log first
+// refuses a committed tree that an entry beyond the next index or a
+// published head beyond its size shows to be rolled back (refuse, task
+// 15c finding 2), so that Lookup and every Check fail closed like Append
+// and SignHead; operatorCur refuses a tree smaller than the one this
+// process saw.
 func (l *fileLog) view() (*state, error) {
 	if l.v != nil {
 		return l.ref, nil
 	}
 	tree, err := l.f.readTree()
 	if err != nil {
+		return nil, err
+	}
+	if err := l.refuse(tree); err != nil {
 		return nil, err
 	}
 	return l.getCur(tree)
@@ -1087,7 +1163,12 @@ func (l *fileLog) logKeys() []LogKey {
 	if l.v == nil {
 		s, err := l.view()
 		if err != nil {
-			return nil
+			// The committed tree fails the checks (task 15c finding 2):
+			// the heads published before still open with the keys of the
+			// last tree this process accepted, so that the server keeps
+			// serving them to its witnesses; nothing is checked against
+			// them.
+			return l.seenKeys
 		}
 		return logKeysOf(s, s.Size)
 	}

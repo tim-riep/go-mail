@@ -68,10 +68,29 @@ type Env struct {
 	Clock     *Clock
 	Warnings  *Warnings
 	// Witness is the pinned witness (quorum 1 of 1) and WitnessSigner
-	// its note signer, for tests that cosign heads.
-	Witness       witness.Key
-	WitnessSigner note.Signer
+	// its note signer, for tests that cosign heads; WitnessKeyFile holds
+	// its note signer key (0600, outside the data directory) for
+	// witness.Config.KeyFile.
+	Witness        witness.Key
+	WitnessSigner  note.Signer
+	WitnessKeyFile string
+	// Operator is the operator log of the data directory in an
+	// environment from NewLogged (Log is the same log), nil in one from
+	// New.
+	Operator translog.Operator
 }
+
+// clientLog is the operator log as the in-process clients of a logged
+// environment see it: every append and check goes to the real log of
+// the data directory, but Verified reports false, because the client
+// refuses the development pin of InitDev with a verified log
+// (client.ErrDevIdentity) and prints translog.Warning instead.
+// TODO(task-14): the client log (Options.Verifier, Refresh, state.json)
+// and client.Config.AllowDevIdentity replace this view.
+type clientLog struct{ translog.Log }
+
+// Verified is false: see clientLog.
+func (clientLog) Verified() bool { return false }
 
 // Warnings collects client warnings.
 type Warnings struct {
@@ -98,14 +117,35 @@ func (w *Warnings) Take() []string {
 // Start is the default clock start: 2026-10-26 10:00 UTC.
 var Start = time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
 
-// New runs the development ceremony in a temporary directory.
+// New runs the development ceremony in a temporary directory. Clients
+// and the server of the environment use the accepting placeholder
+// translogtest.Unverified as their log; the certificates are in the
+// operator log of the data directory all the same (InitDev).
 func New(t testing.TB) *Env {
 	t.Helper()
+	return newEnv(t, false)
+}
+
+// NewLogged is New with the transparency log: Log and Operator are the
+// operator log of the data directory, opened against the identity list,
+// origin and witnesses of the pin as gomail-server opens it, so that
+// ingest checks every user, epoch, address and certificate against it.
+// The in-process clients append to and check against the same log
+// (clientLog), and Mailbox logs every address assignment, signed with
+// the admin key, before addresses.json changes.
+func NewLogged(t testing.TB) *Env {
+	t.Helper()
+	return newEnv(t, true)
+}
+
+func newEnv(t testing.TB, logged bool) *Env {
+	t.Helper()
 	base := t.TempDir()
-	log, err := translogtest.NewUnverified(true)
+	unv, err := translogtest.NewUnverified(true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var log translog.Log = unv
 	// One witness, quorum 1 of 1 (2.7: the PoC runs one witness).
 	// witness.Keygen is built by task 08; the key comes from note.
 	skey, vkey, err := note.GenerateKey(rand.Reader, WitnessName)
@@ -121,14 +161,23 @@ func New(t testing.TB) *Env {
 		t.Fatal("witness key", err)
 	}
 	wkey := witness.Key{Name: WitnessName, Pub: ed25519.PublicKey(raw[1:])}
+	wkeyFile := filepath.Join(base, "witness.key")
+	if err := store.CreatePrivateFileAtomic(wkeyFile, []byte(skey+"\n")); err != nil {
+		t.Fatal(err)
+	}
 	clock := &Clock{t: Start}
-	res, err := ceremony.InitDev(filepath.Join(base, "data"), filepath.Join(base, "keys"), clock.Now().Add(-time.Hour), log, []witness.Key{wkey}, 1)
+	res, err := ceremony.InitDev(filepath.Join(base, "data"), filepath.Join(base, "keys"), clock.Now().Add(-time.Hour), nil, []witness.Key{wkey}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st, err := store.Open(filepath.Join(base, "data"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	var op translog.Operator
+	if logged {
+		op = openOperator(t, st, res.Pin)
+		log = op
 	}
 	ingest, _, err := ceremony.ReadKey(filepath.Join(res.KeyDir, ceremony.IngestKeyFile), store.KeyRoleIngest)
 	if err != nil {
@@ -139,7 +188,43 @@ func New(t testing.TB) *Env {
 		t.Fatal(err)
 	}
 	return &Env{T: t, Base: base, Store: st, Log: log, Pin: res.Pin, IngestKey: ingest, AdminKey: admin, KeyDir: res.KeyDir,
-		Clock: clock, Warnings: &Warnings{}, Witness: wkey, WitnessSigner: wsigner}
+		Clock: clock, Warnings: &Warnings{}, Witness: wkey, WitnessSigner: wsigner, WitnessKeyFile: wkeyFile, Operator: op}
+}
+
+// openOperator opens the operator log of st as gomail-server does: the
+// identity list and origin of the pin, the witnesses and quorum of
+// platform/witnesses.rec.
+func openOperator(t testing.TB, st *store.Store, pin *store.PlatformPin) translog.Operator {
+	t.Helper()
+	ids := make([]translog.Identity, 0, len(pin.Identities))
+	for _, id := range pin.Identities {
+		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: id.Pub})
+	}
+	wr, err := st.ReadPlatformFile("witnesses.rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := witness.DecodeWitnesses(wr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wvs, err := ws.Verifiers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin, Known: note.VerifierList(wvs...),
+		Witnesses: wvs, MinWitnesses: ws.Min})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l.(translog.Operator)
+}
+
+// OpenOperator opens another operator log on the data directory, as a
+// restarted server or a second process would.
+func (e *Env) OpenOperator() translog.Operator {
+	e.T.Helper()
+	return openOperator(e.T, e.Store, e.Pin)
 }
 
 // WitnessName is the name of the witness of a test platform.
@@ -147,7 +232,37 @@ const WitnessName = "testenv-witness"
 
 // ClientConfig returns the configuration of a client in dir.
 func (e *Env) ClientConfig(dir string) client.Config {
-	return client.Config{Store: e.Store, Dir: dir, Pin: e.Pin, Log: e.Log, Now: e.Clock.Now, Warn: e.Warnings.Add}
+	var log translog.Log = e.Log
+	if e.Operator != nil {
+		log = clientLog{e.Log}
+	}
+	return client.Config{Store: e.Store, Dir: dir, Pin: e.Pin, Log: log, Now: e.Clock.Now, Warn: e.Warnings.Add}
+}
+
+// AssignAddress logs the assignment of addr to mailbox mbx, signed with
+// the admin key and valid from now (2.3), as "gomail-server address add"
+// does; in an environment from New there is no log to write to and it
+// does nothing. The caller changes addresses.json.
+func (e *Env) AssignAddress(addr string, mbx store.ID) {
+	e.T.Helper()
+	if e.Operator == nil {
+		return
+	}
+	a, err := store.NormalizeAddress(addr)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	as := &store.AddressAssignment{Address: a, MailboxID: mbx, ValidFrom: e.Clock.Now().UnixMilli(), AdminGen: 1}
+	if err := as.Sign(e.AdminKey); err != nil {
+		e.T.Fatal(err)
+	}
+	enc, err := as.Encode()
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	if _, err := e.Operator.Append(translog.KindAddress, enc); err != nil {
+		e.T.Fatal(err)
+	}
 }
 
 // Echo answers the seed confirmation correctly.
@@ -261,7 +376,8 @@ func (e *Env) Reopen(u *User) *client.Client {
 	return c
 }
 
-// Mailbox creates a mailbox of u and assigns the addresses to it.
+// Mailbox creates a mailbox of u and assigns the addresses to it (in a
+// logged environment logged first, AssignAddress).
 func (e *Env) Mailbox(u *User, name string, addrs ...string) store.ID {
 	e.T.Helper()
 	id, err := u.Client.CreateMailbox(name)
@@ -269,6 +385,7 @@ func (e *Env) Mailbox(u *User, name string, addrs ...string) store.ID {
 		e.T.Fatal(err)
 	}
 	for _, a := range addrs {
+		e.AssignAddress(a, id)
 		if _, err := e.Store.AddAddress(a, id); err != nil {
 			e.T.Fatal(err)
 		}

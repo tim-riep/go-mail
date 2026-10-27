@@ -15,7 +15,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
-	"github.com/tim-riep/go-mail/internal/translog/translogtest"
+
 	"github.com/tim-riep/go-mail/internal/witness"
 )
 
@@ -32,37 +32,13 @@ func newLogSetup(t *testing.T) *logSetup {
 	t.Helper()
 	dir := t.TempDir()
 	s := &logSetup{dir: dir, data: filepath.Join(dir, "data"), keys: filepath.Join(dir, "keys")}
-	unv, _ := translogtest.NewUnverified(true)
-	res, err := ceremony.InitDev(s.data, s.keys, time.Now().Add(-time.Hour), unv, nil, 0)
+	// InitDev logs the certificates and writes witnesses.rec (task 15).
+	res, err := ceremony.InitDev(s.data, s.keys, time.Now().Add(-time.Hour), nil, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.p, s.pin = res.Pin, filepath.Join(s.keys, ceremony.PinFile)
 	if s.st, err = store.Open(s.data); err != nil {
-		t.Fatal(err)
-	}
-	l, err := translog.Open(translog.Options{Store: s.st, Identities: []translog.Identity{{Gen: 1, Pub: res.IdentityPub}}, Origin: s.p.Origin})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"admin-1.cert", "ingest-1.cert"} {
-		data, err := s.st.ReadPlatformFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := l.Append(translog.KindPlatform, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ws := witness.Witnesses{Min: s.p.MinWitnesses}
-	for _, w := range s.p.Witnesses {
-		ws.List = append(ws.List, witness.Key{Name: w.Name, Pub: w.Pub})
-	}
-	wr, err := ws.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.st.WritePlatformFile("witnesses.rec", wr); err != nil {
 		t.Fatal(err)
 	}
 	if s.mbx, err = store.NewID(nil); err != nil {
@@ -104,8 +80,16 @@ func TestAddressAddLogged(t *testing.T) {
 	ctx := context.Background()
 	adminKey := filepath.Join(s.keys, ceremony.AdminKeyFile)
 	base := []string{"address", "add", "Info@Example.org", "--mailbox", s.mbx.String(), "--data", s.data, "--admin-key", adminKey}
+	// --insecure-no-log is no switch any more (task 15), and --pin is
+	// required.
 	if code := run(ctx, append(append([]string(nil), base...), "--pin", s.pin, "--insecure-no-log"), &out, &errb, nil); code != 2 {
 		t.Fatalf("--pin with --insecure-no-log: %d", code)
+	}
+	if code := run(ctx, append(append([]string(nil), base...), "--insecure-no-log"), &out, &errb, nil); code != 2 {
+		t.Fatalf("--insecure-no-log: %d", code)
+	}
+	if code := run(ctx, base, &out, &errb, nil); code != 2 {
+		t.Fatalf("without --pin: %d", code)
 	}
 	inside := filepath.Join(s.data, "identity-1.pin")
 	data, _ := os.ReadFile(s.pin)
@@ -157,7 +141,8 @@ func TestServeLog(t *testing.T) {
 		args []string
 		code int
 	}{
-		"no log":              {nil, 1},
+		"no log":              {nil, 2},
+		"no-log switch":       {[]string{"--insecure-no-log"}, 2},
 		"pin and no-log":      {[]string{"--pin", s.pin, "--log-listen", "127.0.0.1:0", "--insecure-no-log"}, 2},
 		"pin without listen":  {[]string{"--pin", s.pin}, 2},
 		"listen without pin":  {[]string{"--log-listen", "127.0.0.1:0"}, 2},

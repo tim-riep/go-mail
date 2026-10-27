@@ -66,8 +66,18 @@ func inside(dir, root string) bool {
 	return err == nil && (rel == "." || filepath.IsLocal(rel))
 }
 
-// InitDev runs the development ceremony. log receives the certificates
-// (until task 15: translogtest.Unverified, which ignores them).
+// InitDev runs the development ceremony.
+//
+// The certificates admin-1.cert and ingest-1.cert are appended to the
+// operator log of the new data directory (translog.Open with the
+// identity list of the pin; translog doc.go "Who writes": the ceremony
+// writes platform entries), and the pinned witnesses with their quorum
+// are written to platform/witnesses.rec, the server's working copy, so
+// that gomail-server, which always runs with the log since task 15,
+// starts on a development platform. log, when not nil, receives the
+// certificates as well: it is the accepting placeholder of
+// "gomail-ceremony init --dev". TODO(task-15b): the parameter goes
+// together with --insecure-no-log of gomail-ceremony.
 //
 // The pin carries the origin DevOrigin, the witnesses and their quorum
 // (CheckWitnesses: 1 <= minWitnesses <= len(witnesses) and
@@ -197,12 +207,36 @@ func InitDev(dataDir, keyDir string, now time.Time, log translog.Log, witnesses 
 		if err := st.WritePlatformFile(name, data); err != nil {
 			return nil, err
 		}
-		if strings.HasSuffix(name, ".cert") {
-			// TODO(phase3-translog): certificates into the log (2.7).
-			if err := log.AppendPlatform(name, data); err != nil {
+	}
+	// The certificates into the operator log of the data directory
+	// (2.7), admin before ingest; the anchor is the identity list of the
+	// pin just written.
+	oplog, err := translog.Open(translog.Options{Store: st, Identities: []translog.Identity{{Gen: 1, Pub: idPub}}})
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{store.PlatformFileName("admin", 1, "cert"), store.PlatformFileName("ingest", 1, "cert")} {
+		if _, err := oplog.Append(translog.KindPlatform, files[name]); err != nil {
+			return nil, err
+		}
+		if log != nil {
+			if err := log.AppendPlatform(name, files[name]); err != nil {
 				return nil, err
 			}
 		}
+	}
+	// platform/witnesses.rec, the server's working copy of the pinned
+	// witnesses (translog doc.go "Heads").
+	ws := witness.Witnesses{Min: minWitnesses}
+	for _, w := range pinned {
+		ws.List = append(ws.List, witness.Key{Name: w.Name, Pub: w.Pub})
+	}
+	wr, err := ws.Encode()
+	if err != nil {
+		return nil, err
+	}
+	if err := st.WritePlatformFile("witnesses.rec", wr); err != nil {
+		return nil, err
 	}
 	return &Result{KeyDir: keyDir, IdentityPub: idPub, Pin: pin}, nil
 }

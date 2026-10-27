@@ -11,6 +11,7 @@ import (
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 	"github.com/tim-riep/go-mail/internal/witness"
 )
@@ -94,6 +95,59 @@ func TestInitDev(t *testing.T) {
 	if _, err := InitDev(filepath.Join(base, "k2", "data"), filepath.Join(base, "k2"), now, log, nil, 0); !errors.Is(err, ErrKeyDir) {
 		t.Fatal("data directory inside the key directory")
 	}
+}
+
+// TestInitDevLog: InitDev appends both certificates to the operator log
+// of the new data directory, where they are valid against the pin's
+// identity list, passes them to a given log as well, and writes
+// platform/witnesses.rec with the pinned witnesses (task 15).
+func TestInitDevLog(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, "data")
+	rec := &recordingLog{}
+	res, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), rec, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.names) != 2 || rec.names[0] != "admin-1.cert" || rec.names[1] != "ingest-1.cert" {
+		t.Fatalf("given log: %v", rec.names)
+	}
+	st, err := store.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := translog.Open(translog.Options{Store: st, Identities: []translog.Identity{{Gen: 1, Pub: res.IdentityPub}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"admin-1.cert", "ingest-1.cert"} {
+		raw, err := st.ReadPlatformFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.CheckPlatform(name, raw); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	wr, err := st.ReadPlatformFile("witnesses.rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := witness.DecodeWitnesses(wr)
+	if err != nil || ws.Min != 1 || len(ws.List) != 1 || ws.List[0].Name != DevWitnessName || !ws.List[0].Pub.Equal(res.Pin.Witnesses[0].Pub) {
+		t.Fatalf("witnesses.rec: %+v %v", ws, err)
+	}
+}
+
+// recordingLog records the names AppendPlatform received.
+type recordingLog struct {
+	translogtest.Unverified
+	names []string
+}
+
+func (r *recordingLog) AppendPlatform(name string, _ []byte) error {
+	r.names = append(r.names, name)
+	return nil
 }
 
 // TestInitDevWitnesses: the pin carries origin, witnesses, quorum and

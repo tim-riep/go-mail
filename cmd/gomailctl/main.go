@@ -11,9 +11,13 @@
 // Common flags: --data <dir> (data directory), --dir <dir> (client
 // directory, default ~/.config/gomailctl), --platform <file> (trusted
 // platform identity, identity-1.pin of the ceremony) and
-// --insecure-no-log (required in phase 1). The passphrase of the key
-// store is read from GOMAILCTL_PASSPHRASE, from --passphrase-file or from
-// standard input.
+// --insecure-no-log (required until task 14 builds the client log). The
+// passphrase of the key store is read from GOMAILCTL_PASSPHRASE, from
+// --passphrase-file or from standard input.
+//
+// Every command but inspect holds the shared client lock locks/client
+// and works only while the lock of a running gomail-server is in force
+// on the data directory (9.1, "Testsperre"; config).
 package main
 
 import (
@@ -49,7 +53,7 @@ Gemeinsame Optionen:
   --data <dir>             Datenverzeichnis
   --dir <dir>              Client-Verzeichnis (Standard ~/.config/gomailctl)
   --platform <datei>       Plattformidentität (identity-1.pin)
-  --insecure-no-log        ohne Transparenzlog (in Phase 1 erforderlich)
+  --insecure-no-log        ohne Transparenzlog (bis zum Client-Log erforderlich)
   --passphrase-file <datei> Passphrase aus Datei (sonst GOMAILCTL_PASSPHRASE oder Eingabe)
 `
 
@@ -121,10 +125,11 @@ func (e *env) run(args []string) int {
 	if cmd == "inspect" {
 		return e.inspect(pos[0])
 	}
-	cfg, err := e.config()
+	cfg, release, err := e.config()
 	if err != nil {
 		return e.fail(err)
 	}
+	defer release()
 	switch cmd {
 	case "keygen":
 		return e.keygen(cfg)
@@ -175,32 +180,53 @@ func (e *env) fail(err error) int {
 	return 1
 }
 
-func (e *env) config() (client.Config, error) {
+// config builds the client configuration and takes the client's side of
+// the start check of 9.1 (D70, "Testsperre"): the shared client lock
+// locks/client, held until release is called at the end of the command,
+// and the check that the server's exclusive lock on locks/server is in
+// force here (store.CheckPeerLock). Without a running gomail-server whose
+// lock this machine sees (no server, or locks that the file system does
+// not enforce across machines, such as SSHFS) the client refuses to work
+// on the data directory. The server holds its lock for its whole run;
+// the client cannot tell a stopped server from an ineffective lock, so
+// both are refused (fail closed).
+func (e *env) config() (client.Config, func(), error) {
 	if e.data == "" || e.platform == "" {
-		return client.Config{}, errors.New("--data und --platform sind erforderlich")
+		return client.Config{}, nil, errors.New("--data und --platform sind erforderlich")
 	}
+	// TODO(task-14): the client log (translog.Open with a Verifier,
+	// Refresh, state.json) replaces the placeholder and --insecure-no-log.
 	log, err := translogtest.NewUnverified(e.noLog)
 	if err != nil {
-		return client.Config{}, err
+		return client.Config{}, nil, err
 	}
 	st, err := store.Open(e.data)
 	if err != nil {
-		return client.Config{}, err
+		return client.Config{}, nil, err
 	}
 	pin, err := ceremony.ReadPin(e.platform)
 	if err != nil {
-		return client.Config{}, err
+		return client.Config{}, nil, err
 	}
 	dir := e.dir
 	if dir == "" {
 		cfgDir, err := os.UserConfigDir()
 		if err != nil {
-			return client.Config{}, err
+			return client.Config{}, nil, err
 		}
 		dir = filepath.Join(cfgDir, "gomailctl")
 	}
+	release, err := st.HoldRoleLock(store.RoleClient)
+	if err != nil {
+		return client.Config{}, nil, fmt.Errorf("Client-Sperre locks/client (9.1): %w", err)
+	}
+	if err := st.CheckPeerLock(store.RoleServer); err != nil {
+		release()
+		return client.Config{}, nil, fmt.Errorf("Testsperre (9.1): keine wirksame Sperre eines laufenden gomail-server auf locks/server; "+
+			"der Client arbeitet nur neben einem Server, dessen Sperre hier wirkt: %w", err)
+	}
 	return client.Config{Store: st, Dir: dir, Pin: pin, Log: log, Now: e.now,
-		Warn: func(s string) { fmt.Fprintln(e.stderr, s) }}, nil
+		Warn: func(s string) { fmt.Fprintln(e.stderr, s) }}, release, nil
 }
 
 // passphrase reads the passphrase: GOMAILCTL_PASSPHRASE, the file, or a

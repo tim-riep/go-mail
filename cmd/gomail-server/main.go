@@ -3,31 +3,63 @@
 //
 //	gomail-server serve --data <dir> --listen 127.0.0.1:2525 --ingest-key <file>
 //	                    --pin <file> --log-listen 127.0.0.1:<port> [--head-interval 1h]
-//	gomail-server serve --data <dir> --listen 127.0.0.1:2525 --ingest-key <file> --insecure-no-log
+//	                    [--require-client-lock]
 //	gomail-server invite create --data <dir>
 //	gomail-server address add <address> --mailbox <id> --data <dir> --admin-key <file> --pin <file>
 //	gomail-server log repair --data <dir> --pin <file>
 //
-// With --pin (identity-<gen>.pin, outside the data directory) serve opens
-// the operator log of the data directory against the pin's identity list
-// and origin (translog.Options), reads platform/witnesses.rec as the
-// working copy of the witnesses (a warning when it differs from the pin),
-// signs heads with the ingest key (Q4) on the cadence of package loghttp
-// and serves the witness protocol on --log-listen; ingest checks against
-// the same operator log. "address add" logs the signed assignment with
-// Append(KindAddress) before it changes addresses.json, and only when the
-// address is free or already assigned to that mailbox (exit status 2
-// otherwise; no message names the address). "log repair"
-// rebuilds tree.rec, the tiles and keys/ from the entries and the signed
-// heads (translog.RepairTree) while no server runs.
+// serve always runs with the transparency log (task 15: there is no
+// switch to run without it; tests use package testenv and
+// translogtest). --pin (identity-<gen>.pin, outside the data directory)
+// and --log-listen are required. At the start serve checks, in this
+// order, and refuses to start when a check fails:
 //
-// --insecure-no-log (until task 15) keeps the accepting placeholder
-// translogtest.Unverified and serves no log; it cannot be combined with
-// --pin or --log-listen. Both listeners accept only a loopback address
-// unless --isolated-test-network is given (5.1). Pin and ingest key must
-// lie outside the data directory, compared with symbolic links resolved
-// (a pin inside it: exit status 2). Logs contain IDs, sizes, hash
-// prefixes and status codes only.
+//  1. the rights of 9.1 on the data directory and its top-level entries
+//     only (checkDataDir: nothing open to others; a directory without
+//     setgid, missing group rights and a foreign group are warnings;
+//     deeper entries are not walked, they inherit the group through the
+//     setgid bit);
+//  2. the pin and platform/ (checkPlatformPin, translog.ErrMismatch): no
+//     identity generation the pin does not know (operating rule after a
+//     succession, Q10 point 5), no contradiction to its identity list;
+//  3. platform/witnesses.rec, the working copy of the witnesses (a
+//     warning when it differs from the pin), and the operator log of the
+//     data directory opened against the pin's identity list and origin
+//     (translog.Open checks the tiles against tree.rec and the quorum);
+//  4. ingest.New: the server lock locks/server, held exclusively until
+//     the end (a second server fails), the ingest key against its
+//     certificate, the certificate in the log and not superseded; with
+//     --require-client-lock also a client lock locks/client that is in
+//     force (ingest.Config.PeerCheck, store.CheckPeerLock(RoleClient));
+//  5. the start test of the locks (checkLocks, 9.1 "Testsperre");
+//  6. the log head (checkHead: Operator.SignHead without publishing).
+//
+// --require-client-lock (task 15c finding 3, reading D70 of 9.1 "each
+// side checks the lock of the other"): off by default, because a
+// long-running server cannot assume a running client at its start; the
+// test of two machines (task 16) turns it on to show both directions.
+// A server whose platform cannot tell the free space of the data
+// directory (NetBSD, Windows) starts, but says that it accepts no mail
+// (5.1, ingest.Ingest.DiskSpace). The free space limit of 5.1 has no
+// switch in this program; only a test build (go build -tags gomail_test,
+// as internal/e2e builds it) reads GOMAIL_TEST_MIN_FREE
+// (testconfig_tagged.go, task 15c finding 7).
+//
+// Then it signs heads with the ingest key (Q4) on the cadence of package
+// loghttp, serves the witness protocol on --log-listen and SMTP on
+// --listen; ingest checks every delivery against the same operator log.
+// "address add" logs the signed assignment with Append(KindAddress)
+// before it changes addresses.json, and only when the address is free
+// or already assigned to that mailbox (exit status 2 otherwise; no
+// message names the address). "log repair" rebuilds tree.rec, the tiles
+// and keys/ from the entries and the signed heads (translog.RepairTree)
+// while no server runs.
+//
+// Both listeners accept only a loopback address unless
+// --isolated-test-network is given (5.1). Pin, ingest key and admin key
+// must lie outside the data directory, compared with symbolic links
+// resolved (pin or admin key inside it: exit status 2). Logs contain
+// IDs, sizes, hash prefixes and status codes only.
 package main
 
 import (
@@ -55,7 +87,6 @@ import (
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
-	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 	"github.com/tim-riep/go-mail/internal/witness"
 )
 
@@ -68,12 +99,9 @@ func main() {
 const usage = `Aufruf:
   gomail-server serve --data <dir> [--listen 127.0.0.1:2525] --ingest-key <datei>
                       --pin <datei> --log-listen <adresse> [--head-interval 1h]
-                      [--hostname <name>] [--isolated-test-network]
-  gomail-server serve --data <dir> [--listen 127.0.0.1:2525] --ingest-key <datei> --insecure-no-log
-                      [--hostname <name>] [--isolated-test-network]
+                      [--hostname <name>] [--isolated-test-network] [--require-client-lock]
   gomail-server invite create --data <dir>
   gomail-server address add <adresse> --mailbox <postfach-id> --data <dir> --admin-key <datei> --pin <datei>
-  gomail-server address add <adresse> --mailbox <postfach-id> --data <dir> --admin-key <datei> --insecure-no-log
   gomail-server log repair --data <dir> --pin <datei>
 `
 
@@ -93,8 +121,7 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// ready receives the listening addresses of SMTP and of the log ("" with
-// --insecure-no-log) (tests).
+// ready receives the listening addresses of SMTP and of the log (tests).
 type ready func(smtp, log string)
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, onReady ready) int {
@@ -229,36 +256,31 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	keyFile := fs.String("ingest-key", "", "privater Ingest-Schlüssel (nicht im Datenverzeichnis)")
 	hostname := fs.String("hostname", "localhost", "Name im SMTP-Gruß")
 	isolated := fs.Bool("isolated-test-network", false, "erlaubt eine Adresse außerhalb von Loopback in einem isolierten Testnetz")
-	noLog := fs.Bool("insecure-no-log", false, "ohne Transparenzlog (nur Entwicklung)")
 	pinFile := fs.String("pin", "", "Pin der Plattform (identity-<gen>.pin, nicht im Datenverzeichnis)")
 	logListen := fs.String("log-listen", "", "Adresse für das Zeugenprotokoll (HTTP)")
 	headInterval := fs.Duration("head-interval", translog.HeadInterval, "längster Abstand zweier signierter Köpfe")
+	requireClient := fs.Bool("require-client-lock", false, "beim Start eine wirksame Client-Sperre locks/client verlangen (9.1, Testsperre)")
 	if pos, err := parse(fs, args); err != nil || len(pos) != 0 || *data == "" || *keyFile == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	switch {
-	case *noLog && (*pinFile != "" || *logListen != ""):
-		fmt.Fprintln(stderr, "gomail-server: --insecure-no-log schließt --pin und --log-listen aus")
-		fmt.Fprint(stderr, usage)
-		return 2
-	case !*noLog && *pinFile == "" && *logListen == "":
-		return fail(stderr, translog.ErrNoLog)
-	case !*noLog && (*pinFile == "" || *logListen == ""):
-		fmt.Fprintln(stderr, "gomail-server: --pin und --log-listen gehören zusammen")
+	if *pinFile == "" || *logListen == "" {
+		fmt.Fprintln(stderr, "gomail-server: --pin und --log-listen sind erforderlich (der Server läuft nur mit Transparenzlog, 2.7)")
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
 	if err := checkListen(*listen, *isolated); err != nil {
 		return fail(stderr, err)
 	}
-	if !*noLog {
-		if err := checkListen(*logListen, *isolated); err != nil {
-			return fail(stderr, err)
-		}
+	if err := checkListen(*logListen, *isolated); err != nil {
+		return fail(stderr, err)
 	}
 	st, err := store.Open(*data)
 	if err != nil {
+		return fail(stderr, err)
+	}
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	if err := checkDataDir(st, logger); err != nil {
 		return fail(stderr, err)
 	}
 	kf, inside, err := outsideData(*keyFile, st.Root, "Ingest-Schlüssel")
@@ -273,27 +295,36 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 		return fail(stderr, err)
 	}
 	defer keys.Wipe(key)
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
-	var tl translog.Log
-	var side *loghttp.Server
-	if *noLog {
-		if tl, err = translogtest.NewUnverified(true); err != nil {
-			return fail(stderr, err)
-		}
-		logger.Warn("running without transparency log (--insecure-no-log)")
-	} else {
-		op, ls, err := openLogSide(st, *pinFile, key, *headInterval, logger)
-		if err != nil {
-			return fail(stderr, err)
-		}
-		tl, side = op, ls
-	}
-	// TODO(task-15): HoldRoleLock(RoleClient)/CheckPeerLock in gomailctl and PeerCheck here (9.1).
-	in, err := ingest.New(ingest.Config{Store: st, Log: tl, IngestKey: key, IngestGen: gen, Logger: logger})
+	op, side, signer, err := openLogSide(st, *pinFile, key, *headInterval, logger)
 	if err != nil {
 		return fail(stderr, err)
 	}
+	// ingest.New takes the server lock (9.1, D70) and holds it until
+	// Close. PeerCheck only with --require-client-lock (D70: by default a
+	// server cannot require a running client; the client refuses without
+	// an effective server lock).
+	cfg := ingest.Config{Store: st, Log: op, IngestKey: key, IngestGen: gen, Logger: logger, PeerCheck: *requireClient}
+	if err := testConfig(&cfg); err != nil {
+		return fail(stderr, err)
+	}
+	in, err := ingest.New(cfg)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrLocked):
+			err = fmt.Errorf("ein anderer Server hält die Serversperre locks/server (9.1): %w", err)
+		case errors.Is(err, store.ErrPeerLock):
+			err = fmt.Errorf("Testsperre: --require-client-lock verlangt eine wirksame Client-Sperre locks/client (9.1): %w", err)
+		}
+		return fail(stderr, err)
+	}
 	defer in.Close()
+	if err := checkLocks(st, *requireClient, logger); err != nil {
+		return fail(stderr, err)
+	}
+	checkDiskSpace(in.DiskSpace, logger)
+	if err := checkHead(op, signer, time.Now(), logger); err != nil {
+		return fail(stderr, err)
+	}
 	if err := in.Recover(); err != nil {
 		return fail(stderr, err)
 	}
@@ -304,29 +335,26 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	}
 	srv := smtpd.NewServer(smtpd.Config{Hostname: *hostname, Logger: logger}, in)
 	logger.Info("smtp listening", "addr", ln.Addr().String())
-	logAddr := ""
 	served := make(chan error, 1)
-	if side != nil {
-		lln, err := net.Listen("tcp", *logListen)
-		if err != nil {
-			ln.Close()
-			return fail(stderr, err)
-		}
-		logAddr = lln.Addr().String()
-		logger.Info("log listening", "addr", logAddr)
-		hs := loghttp.NewHTTPServer(side)
-		go func() { served <- hs.Serve(lln) }()
-		logCtx, stopLog := context.WithCancel(ctx)
-		ran := make(chan struct{})
-		go func() { side.Run(logCtx); close(ran) }()
-		// The signer refers to key: the log side stops before the
-		// deferred Wipe of key runs.
-		defer func() {
-			stopLog()
-			hs.Close()
-			<-ran
-		}()
+	lln, err := net.Listen("tcp", *logListen)
+	if err != nil {
+		ln.Close()
+		return fail(stderr, err)
 	}
+	logAddr := lln.Addr().String()
+	logger.Info("log listening", "addr", logAddr)
+	hs := loghttp.NewHTTPServer(side)
+	go func() { served <- hs.Serve(lln) }()
+	logCtx, stopLog := context.WithCancel(ctx)
+	ran := make(chan struct{})
+	go func() { side.Run(logCtx); close(ran) }()
+	// The signer refers to key: the log side stops before the deferred
+	// Wipe of key runs.
+	defer func() {
+		stopLog()
+		hs.Close()
+		<-ran
+	}()
 	if onReady != nil {
 		onReady(ln.Addr().String(), logAddr)
 	}
@@ -347,46 +375,50 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	}
 }
 
-// openLogSide opens the operator log of the pin and the log side of the
-// server (task 11).
-func openLogSide(st *store.Store, pinFile string, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, error) {
+// openLogSide reads the pin, checks platform/ against it
+// (checkPlatformPin), opens the operator log of the pin and the log
+// side of the server (task 11) and returns the log signer of key.
+func openLogSide(st *store.Store, pinFile string, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, note.Signer, error) {
 	pin, ids, err := readPin(pinFile, st.Root)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if pin.Dev {
 		logger.Warn("development pin (gomail-ceremony init --dev)")
 	}
+	if err := checkPlatformPin(st, pin); err != nil {
+		return nil, nil, nil, err
+	}
 	ws, differs, err := readWitnesses(st, pin)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if differs {
 		logger.Warn("platform/witnesses.rec differs from the pin; heads need the quorum of witnesses.rec, clients that of the pin")
 	}
 	wvs, err := ws.Verifiers()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin, Known: note.VerifierList(wvs...),
 		Witnesses: wvs, MinWitnesses: ws.Min})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	op := l.(translog.Operator)
 	signer, err := translog.NewLogSigner(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	lk, err := translog.NewLogVerifier(key.Public().(ed25519.PublicKey))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	side, err := loghttp.New(loghttp.Config{Log: op, Signer: signer, LogKey: lk, Witnesses: wvs, HeadInterval: interval, Logger: logger})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return op, side, nil
+	return op, side, signer, nil
 }
 
 func invite(args []string, stdout, stderr io.Writer) int {
@@ -415,34 +447,34 @@ func address(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	data := fs.String("data", "", "Datenverzeichnis")
 	mailbox := fs.String("mailbox", "", "Postfach-ID")
-	keyFile := fs.String("admin-key", "", "privater Admin-Schlüssel")
-	noLog := fs.Bool("insecure-no-log", false, "ohne Transparenzlog (nur Entwicklung)")
+	keyFile := fs.String("admin-key", "", "privater Admin-Schlüssel (nicht im Datenverzeichnis)")
 	pinFile := fs.String("pin", "", "Pin der Plattform (identity-<gen>.pin, nicht im Datenverzeichnis)")
 	pos, err := parse(fs, args)
-	if err != nil || len(pos) != 2 || pos[0] != "add" || *data == "" || *mailbox == "" || *keyFile == "" || (*noLog && *pinFile != "") {
+	if err != nil || len(pos) != 2 || pos[0] != "add" || *data == "" || *mailbox == "" || *keyFile == "" || *pinFile == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
-	}
-	if !*noLog && *pinFile == "" {
-		return fail(stderr, translog.ErrNoLog)
 	}
 	st, err := store.Open(*data)
 	if err != nil {
 		return fail(stderr, err)
 	}
-	var tl translog.Log
-	if *noLog {
-		if tl, err = translogtest.NewUnverified(true); err != nil {
-			return fail(stderr, err)
-		}
-	} else {
-		pin, ids, err := readPin(*pinFile, st.Root)
-		if err != nil {
-			return fail(stderr, err)
-		}
-		if tl, err = translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin}); err != nil {
-			return fail(stderr, err)
-		}
+	pin, ids, err := readPin(*pinFile, st.Root)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	tl, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin})
+	if err != nil {
+		return fail(stderr, err)
+	}
+	// The admin key lies outside the data directory like pin and ingest
+	// key (section 4, 9.1), compared with symbolic links resolved and read
+	// through its resolved path (task 11b finding 6).
+	akf, inside, err := outsideData(*keyFile, st.Root, "Admin-Schlüssel")
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if inside {
+		return fail(stderr, usageError{"der Admin-Schlüssel darf nicht im Datenverzeichnis liegen (Abschnitt 4)"})
 	}
 	mbx, err := store.ParseID(*mailbox)
 	if err != nil {
@@ -455,7 +487,7 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return failAddr(stderr, err, pos[1], "")
 	}
-	admin, gen, err := ceremony.ReadKey(*keyFile, store.KeyRoleAdmin)
+	admin, gen, err := ceremony.ReadKey(akf, store.KeyRoleAdmin)
 	if err != nil {
 		return failAddr(stderr, err, pos[1], addr)
 	}
@@ -484,11 +516,17 @@ func address(args []string, stdout, stderr io.Writer) int {
 	// TODO(ask): no reassignment of an address to another mailbox in
 	// the PoC (strictest reading; proposal for SPEC-ISSUES in the report
 	// of task 11b: how a reassignment is logged and applied).
-	// TODO(task-15): the check and the write of addresses.json belong
-	// under one hold of addresses.lock (a store function that takes a
-	// log callback); AddAddress takes the lock itself, so it is released
-	// before AddAddress, and a concurrent "address add" for another
-	// mailbox then finds the log entry and refuses.
+	//
+	// Reading (task 15, instead of a store function that writes
+	// addresses.json under the same hold of addresses.lock): the lock is
+	// released after Append, because AddAddress takes it itself. That
+	// is safe because the log entry decides: from the Append on, every
+	// concurrent "address add" for another mailbox finds it under
+	// addresses.lock in checkAddressFree and refuses, and ingest accepts
+	// mail only for an assignment the log holds (Log.CheckAddress); a
+	// crash before AddAddress leaves the address unassigned in
+	// addresses.json, and "address add" for the same mailbox repeats.
+	// TestAddressAddParallel pins it.
 	unlock, err := store.LockPath(st.Path("addresses.lock"))
 	if err != nil {
 		return failAddr(stderr, err, pos[1], addr)
@@ -496,6 +534,9 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if err := checkAddressFree(st, tl, addr, mbx); err != nil {
 		unlock()
 		return failAddr(stderr, err, pos[1], addr)
+	}
+	if addressHook != nil {
+		addressHook()
 	}
 	_, err = tl.Append(translog.KindAddress, enc)
 	unlock()
@@ -511,6 +552,11 @@ func address(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "%s -> %s\n", addr, mbx)
 	return 0
 }
+
+// addressHook is the injection point of "address add" between the check
+// under addresses.lock and the Append (task 11b finding 2); nil in
+// production, set only by tests of this package.
+var addressHook func()
 
 // checkAddressFree reports a usageError unless addr is unassigned or
 // assigned to mbx in addresses.json and in every valid entry of the log

@@ -15,6 +15,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/envelope"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 const journalName = "journal.rec"
@@ -59,7 +60,16 @@ type target struct {
 // unchanged (chainCache). Epochs beyond the head of mailbox.rec are not
 // used; one that exists is noted in the log (only IDs). The caller holds
 // the mailbox lock (K8).
+//
+// The head of mailbox.rec must not lie below the newest valid epoch of
+// the mailbox in the log (checkLogHead, ErrRollback): resetting
+// epoch.rec and mailbox.rec to an older epoch, which a server without
+// memory could not notice (D71), is caught by the log, also right after
+// a restart.
 func (in *Ingest) verifyChain(mbx *store.Mailbox) (*store.Chain, [32]byte, error) {
+	if err := in.checkLogHead(mbx); err != nil {
+		return nil, [32]byte{}, err
+	}
 	links, head, ok := in.cachedChain(mbx)
 	if !ok {
 		entry, err := in.verifyChainFull(mbx)
@@ -74,6 +84,33 @@ func (in *Ingest) verifyChain(mbx *store.Mailbox) (*store.Chain, [32]byte, error
 		in.log.Info("ingest ignored an epoch beyond the head of mailbox.rec", "mailbox", mbx.ID.String(), "head", mbx.Epoch, "epoch", mbx.Epoch+1)
 	}
 	return links, head, nil
+}
+
+// checkLogHead compares the head of mailbox.rec with the valid epoch
+// entries of the mailbox in the log (Log.Lookup; translog Log.CheckEpoch:
+// "a lower head is a rollback", 2.4). A logged epoch beyond the head is
+// refused as ErrRollback, whether its epoch.rec is still there or not:
+// the server never chooses an epoch below the newest one the log knows.
+// Reading (strictest): this also refuses, until a client advances
+// mailbox.rec, the window of a client that crashed after logging an
+// epoch and before writing mailbox.rec (the client holds the mailbox
+// lock across both, so the server never sees that window otherwise);
+// 451 lets the sender retry. Only IDs and numbers are logged.
+func (in *Ingest) checkLogHead(mbx *store.Mailbox) error {
+	es, err := in.cfg.Log.Lookup(translog.KindEpoch, mbx.ID[:])
+	if err != nil {
+		return err
+	}
+	var newest int64
+	for _, e := range es {
+		newest = max(newest, e.Seq)
+	}
+	if newest > int64(mbx.Epoch) {
+		in.log.Warn("ingest refused a mailbox whose mailbox.rec is behind the log (rollback)", "mailbox", mbx.ID.String(),
+			"head", mbx.Epoch, "logged", newest, "status", 451)
+		return fmt.Errorf("%w: head %d, logged %d", ErrRollback, mbx.Epoch, newest)
+	}
+	return nil
 }
 
 // verifyChainFull verifies the chain without the cache and returns it
@@ -95,7 +132,9 @@ func (in *Ingest) verifyChainFull(mbx *store.Mailbox) (*chainEntry, error) {
 		if err := e.VerifySignature(uk.pub); err != nil {
 			return nil, err
 		}
-		// TODO(phase3-translog): epoch.rec included in the log (2.7).
+		// epoch.rec included in the log with exactly these bytes (2.7, K2
+		// rule 4: of two epochs with one number the first logged one is
+		// the only valid one).
 		if err := in.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
 			return nil, err
 		}
@@ -187,6 +226,14 @@ func (d *delivery) stillValid(t *target) error {
 			return refuse("overtaken")
 		}
 	}
+	// The assignments at the receipt time, once more under the locks:
+	// the log only grows, but a backdated assignment (Q9) may have been
+	// logged meanwhile.
+	for _, a := range t.addresses {
+		if in.cfg.Log.CheckAddress(a, t.mbx.ID, ms) != nil {
+			return refuse("address")
+		}
+	}
 	return nil
 }
 
@@ -205,7 +252,8 @@ func (in *Ingest) userKey(id store.ID, gen uint32, logged []byte) (userKeyResult
 	if err != nil {
 		return res, err
 	}
-	// TODO(phase3-translog): user.rec included in the log (2.7).
+	// user.rec included in the log, and no user entry with more
+	// generations (2.7; ErrSuperseded: a rolled back user.rec).
 	if err := in.cfg.Log.CheckUser(id, raw); err != nil {
 		return res, err
 	}
@@ -213,13 +261,14 @@ func (in *Ingest) userKey(id store.ID, gen uint32, logged []byte) (userKeyResult
 	if g == nil {
 		return res, fmt.Errorf("ingest: unknown generation %d", gen)
 	}
-	// TODO(phase3-translog): generation valid only from its log entry on (2.2 rule 3).
+	// The generation is valid only from its log entry on (2.2 rule 3).
 	if err := in.cfg.Log.CheckGeneration(id, gen); err != nil {
 		return res, err
 	}
 	if gen != u.Current().Gen {
 		res.revoked = true
-		// TODO(phase3-translog): logged before the revocation (2.2 rule 4, S13).
+		// A record signed by a revoked generation counts only if it was
+		// logged before the revocation (2.2 rule 4, S13).
 		if err := in.cfg.Log.CheckRevokedSignature(id, gen, logged); err != nil {
 			return res, err
 		}
@@ -251,10 +300,14 @@ type delivery struct {
 // and opens one encryption writer per mailbox into spool/.
 func (in *Ingest) Begin(s smtpd.Session, from string, rcpts []string) (smtpd.Delivery, error) {
 	now := in.now()
+	if err := in.checkGeneration(now); err != nil {
+		in.log.Warn("ingest refused delivery: the ingest generation is superseded or the log failed", "session", s.ID, "gen", in.cfg.IngestGen, "status", 451)
+		return nil, smtpd.ErrTemporary
+	}
 	byMailbox := map[store.ID][]string{}
 	var order []store.ID
 	for _, r := range rcpts {
-		id, addr, err := in.lookup(r)
+		id, addr, err := in.lookup(r, now)
 		if err != nil {
 			return nil, err
 		}
@@ -536,6 +589,17 @@ func (d *delivery) commit() error {
 		if err := d.stillValid(t); err != nil {
 			return err
 		}
+	}
+	// The ingest generation, once more under the locks (task 15c finding
+	// 1): ingest-<g+1>.cert may have been logged while the data were
+	// received (up to ten minutes, 5.1) with a valid_from at or before
+	// the receipt. The metadata in spool/ are signed with generation g
+	// for that receipt time, which every client would reject; nothing is
+	// moved into a mailbox, the sender retries (451) and Begin refuses
+	// from then on.
+	if err := in.checkGeneration(d.received); err != nil {
+		in.log.Warn("ingest refused delivery: the ingest generation is superseded or the log failed", "session", d.session, "gen", in.cfg.IngestGen, "status", 451)
+		return smtpd.ErrTemporary
 	}
 
 	// The journal lists every rename, marker first, then metadata, then
