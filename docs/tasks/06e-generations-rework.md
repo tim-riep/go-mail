@@ -1,0 +1,24 @@
+# Auftrag 06e: Nacharbeit Generationen (Funde der Verifikation von 06b)
+
+Branch `worktree-agent-a6d46049621490a1e`, Worktree `/home/user/go-mail/.claude/worktrees/agent-a6d46049621490a1e` (Stand f11b70d). Feste Vorgaben: `/home/user/go-mail/docs/tasks/00-vorgaben.md` (gelten wörtlich). Auftrag 06b bleibt gültig. Lies `internal/client/devicelost.go` (`rewrapGenerations`, `otherWraps`, `reissueWraps`, `sealAgain`, `rewrapOwn`), `accept.go` (`checkAccept`), `mailbox.go` (`keysFor`, `userKey`, `wrapSignerKey`), `recovery.go` (`RecoverRead`), `internal/store/epoch.go` (Mitgliederliste). Prüftests der Verifizierer als Vorlage (prüfen, anpassen, umbenennen): `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/verify06c-spec/tests/verify06c_test.go` (`TestVerifyPlantedWrapSync`, `TestVerifyPlantedWrapDeviceLost`) und `verify06c_more_test.go` (`TestVerifyAcceptOfOwnRevokedGeneration`, `TestVerifyPlantedOwnWrapBlocksDeviceLost`), `.../verify06c-attack/attackverify_test.go.kept`.
+
+## Funde hoch
+
+1. **`Sync` verpackt für jeden, dessen `.wrap`-Datei im Verzeichnis liegt.** `rewrapGenerations` entscheidet anhand einer parsebaren Datei `epochs/<n>/members/<id>.wrap` (Empfänger-Generation kleiner als aktuell), ohne Mitgliedschaft von `<id>` in der signierten `epoch.rec` und ohne Prüfung von Unterzeichner und Signatur der alten Verpackung. Angriff: Server pflanzt für einen registrierten Strohmann (nie Mitglied, Generation einmal erhöht) Attrappen in jede Epoche; beim nächsten `Sync` eines Mitglieds erhält er gültige Verpackungen aller Epochen (`TestVerifyPlantedWrapSync`).
+2. **`DeviceLost` stellt für jeden neu aus, dessen `.wrap` im Trailer „ich, Generation < g+1“ nennt**, ohne Signaturprüfung und ohne Mitgliedschaft (`reissueWraps`; `TestVerifyPlantedWrapDeviceLost`).
+
+Umsetzen für beide: Quelle der Neuausstellung ist die **Mitgliederliste der signierten `epoch.rec`** (Benutzer Art 1, Vertretungen Art 3, Wiederherstellungsempfänger Art 2 nur mit lokal bestätigtem Datensatz, wie bereits), nicht die Dateiliste; der Empfänger `r.ID` muss dem Eintrag entsprechen, `r.Gen` dem Eintrag oder kleiner als die aktuelle Generation laut `user.rec`. Zusätzlich wird die **alte Verpackung geprüft**, bevor sie als Vorlage dient: Signatur eines Benutzer-Mitglieds der Epoche (bei `DeviceLost`: meine Generation g mit dem alten Schlüsselspeicher), Kopf passt zum Ort, Schlüssel passen zur `epoch.rec` (`Matches`); eine Attrappe wird nie zur Vorlage. Für **Leser vergangener Zeiträume** (Share mit `To`, stehen in keiner Mitgliederliste) gilt die strengste Lesart (`TODO(Q15)`): neu ausgestellt wird nur, wenn ihre alte Verpackung mit gültiger Generation eines Benutzer-Mitglieds signiert ist **oder** ihr eigenes `.accept` der aktuellen Generation genau den Hash der alten Verpackung nennt; sonst keine Neuausstellung und Warnung (der Teilende teilt erneut). Tests: beide Vorlagen der Verifizierer (Strohmann liest nach `Sync` bzw. `DeviceLost` nichts, Warnung nennt nur IDs); Leser vergangener Zeiträume mit gültiger alter Verpackung wird neu versorgt, mit Attrappe nicht; Mutationen „Mitgliedschaft nicht geprüft“, „Signatur der alten Verpackung nicht geprüft“ müssen brechen.
+
+## Fund mittel
+
+3. **Testlücke:** Mutation „`.accept` einer widerrufenen eigenen Generation zählt“ (`checkAccept`, Zweig `if revoked`) überlebt die Suite. Test `TestVerifyAcceptOfOwnRevokedGeneration` übernehmen.
+
+## Funde niedrig
+
+4. **`rewrapOwn` überspringt die eigene Verpackung anhand ungeprüften Dateiinhalts** (Empfänger-Gen == aktuell → return); eine gepflanzte eigene Verpackung „für g+1“ kostet dauerhaft den Zugriff auf die Epoche. Umsetzen: die Datei mit dem neuen Schlüsselspeicher öffnen und gegen `epoch.rec` prüfen; sonst aus den in Schritt 2 zwischengespeicherten Schlüsseln (`c.epochKeys`) neu versiegeln; Test `TestVerifyPlantedOwnWrapBlocksDeviceLost` übernehmen (erwartet jetzt Zugriff).
+5. **Worteingabe uneinheitlich:** `RecoverRead` normalisiert nicht, `DeviceLost`/`Restore` schon. Umsetzen: alle drei normalisieren im Paket `client` (`normalizeList`), Test für `RecoverRead` mit Groß-/Kleinschreibung und Leerraum.
+6. **`rewrapGenerations` liest `user.rec` des Empfängers zweimal je Verpackung:** Cache hält Generation und Schlüssel.
+
+Außerdem (aus dem Angreiferbericht, niedrig): `normalizeWords` begrenzt die Zahl der Tokens vor der Normalisierung (z. B. 512) und lehnt längere Eingaben mit einem Fehler ohne Inhalt ab.
+
+Fertig: `gofmt -l .` leer, `go vet ./...`, `go test -race ./internal/client ./internal/store`, `GOARCH=386 go test ./internal/client`, Abdeckung `client` ≥ 85 %, Vektoren byte-gleich. Ein Commit `client: rewrap only members of the signed epoch after a checked wrap, pinned accept and own-wrap tests (task 06e)`; kein Modellname. Bericht je Fund: Änderung, Testname, Mutationsnachweis für 1, 2, 3.
