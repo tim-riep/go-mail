@@ -163,7 +163,8 @@ Erst mit dem Quorum der Zeugen veröffentlicht der Server einen Kopf (`log/heads
 - **SIGKILL und SIGSTOP** lassen sich nicht abfangen: Echo und Flusssteuerung bleiben aus, ein gezeigter Anteil bleibt stehen. Das Terminal mit `stty sane` zurücksetzen und den Bildschirm samt Verlauf von Hand löschen.
 - **Restgrenze:** Ein Terminal, das nie wieder liest (angehalten, voll, getrennt), zeigt das Löschen nicht; ein Anteil kann dann auf ihm stehen bleiben. Verlauf und Scrollback eines Terminal-Emulators liegen außerhalb des Programms: für die Zeremonie ein Terminal ohne Verlauf verwenden.
 
-<!-- 15n: Bestätigungsverzögerung -->
+- **Bestätigungen:** Jede Bestätigung mit der Eingabetaste („Inhaber an den Bildschirm“, „Anteil notiert?“) zählt erst, wenn die Aufforderung mindestens eine Sekunde vollständig zu sehen ist. Eine frühere oder doppelte Eingabe wird verworfen, und die Zeremonie fragt mit „Eingabe zu früh, bitte erneut bestätigen“ noch einmal. Dann einmal ruhig warten und erneut die Eingabetaste drücken. Ein Doppel-Enter bestätigt nie für den nächsten Inhaber.
+- **Angehaltene Ausgabe:** Ist die Bildschirmausgabe länger als 2 s angehalten oder voll, endet die Zeremonie mit Exit 130 und löscht den Bildschirm vorher. Ursachen sind Scroll Lock, Strg-S oder ein anderes Programm am Terminal. Terminal prüfen und die Zeremonie neu beginnen; es ist nichts geschrieben.
 
 ## 3. Benutzer anlegen
 

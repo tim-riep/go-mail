@@ -27,10 +27,14 @@ import (
 // tty plays the operator and the share holders: it answers every prompt
 // the tool writes to stderr, from the shares the tool showed on stdout.
 type tty struct {
-	shares  map[int]string // index -> line of words as shown
-	queue   []string       // input lines for "Anteil eingeben"
-	answer  func(want int) string
-	in      bytes.Buffer
+	shares map[int]string // index -> line of words as shown
+	queue  []string       // input lines for "Anteil eingeben"
+	answer func(want int) string
+	in     bytes.Buffer
+	// due is the answer to a confirmation (task 15n finding 3): the
+	// holder confirms after confirmDelay, so it reaches in only when the
+	// command reads (Read), after it discarded what arrived before.
+	due     bytes.Buffer
 	out     bytes.Buffer // everything on stdout
 	msgs    bytes.Buffer // everything on stderr
 	screen  bytes.Buffer // stdout, stderr and the input of stdin, in order
@@ -97,6 +101,10 @@ func (t ttyIn) flushInput() error {
 	return nil
 }
 
+// inputPending reports the input that arrived and was not read
+// (pendingStandIn): an answer due later is not there yet.
+func (t ttyIn) inputPending() (int, error) { return t.in.Len(), nil }
+
 func (t ttyOut) Write(p []byte) (int, error) {
 	t.out.Write(p)
 	t.screen.Write(p)
@@ -129,7 +137,7 @@ func (t ttyErr) Write(p []byte) (int, error) {
 	switch {
 	case strings.HasPrefix(s, "Inhaber von Anteil"), strings.HasPrefix(s, "Anteil notiert?"):
 		t.prompts++
-		t.in.WriteString("\n")
+		t.due.WriteString("\n")
 	case strings.HasPrefix(s, "Anteil Nr."):
 		fmt.Sscanf(s, "Anteil Nr. %d", &want)
 		if t.answer != nil {
@@ -156,6 +164,9 @@ func (t ttyErr) Write(p []byte) (int, error) {
 // does.
 func (t ttyIn) Read(p []byte) (int, error) {
 	t.reads++
+	if t.in.Len() == 0 && t.due.Len() > 0 {
+		t.in.ReadFrom(&t.due)
+	}
 	if t.in.Len() == 0 {
 		return 0, io.EOF
 	}

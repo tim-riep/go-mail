@@ -32,14 +32,51 @@
 // screen is cleared after every share typed, after every share shown
 // once its holder confirmed, at the end of every command and on every
 // error (type term), on standard error as well when that is another
-// terminal (task 15b point 6). From the first prompt to the end of the
+// terminal (task 15b point 6); standard output, which shows the shares,
+// is cleared first (task 15l). From the first prompt to the end of the
 // command the terminal has no software flow control (IXON, IXOFF, IXANY
-// cleared), and neither has standard output when it is another terminal
-// (task 15b point 0b): Ctrl-S cannot stop the output, so that no share
-// stays on the screen with the program stuck (task 10e finding 1); a
-// write to the screen that blocks all the same holds up neither the
-// signal handling nor the end of the program (abortWait). Input typed
-// ahead is discarded before every holder is called. SIGINT, SIGTERM,
+// cleared), and neither has standard output nor standard error when it
+// is another terminal (task 15b point 0b, task 15l): Ctrl-S cannot stop
+// the output, so that no share stays on the screen with the program
+// stuck (task 10e finding 1); a write to the screen that blocks all the
+// same holds up neither the signal handling nor the end of the program
+// (abortWait, abortTotal: the abort path waits for no write longer and
+// ends within 2 s, and none of its requests to a terminal waits, task
+// 15m point 1). Before every clear the output of the terminal runs
+// again, should another program have stopped it (TCOOFF) or Scroll
+// Lock on the Linux console; when a write does not get through all the
+// same, the abort path discards the output not yet sent, so that a
+// terminal whose output is full takes the clear (task 15m point 2).
+// Before the commit no write keeps a share on the screen with the
+// program stuck longer than outputGrace (2 s) and the abort path after
+// it (task 15n finding 2): every share line, every clear, and every
+// prompt while a share is on the screen, restarts the output of its
+// terminal first and again every millisecond as long as it does not
+// return; one that fails (any write error, a part written included) or
+// does not get through within outputGrace ends the ceremony through the
+// abort path (screen cleared, exit code 130), and the next holder is
+// never called while the clear of a share is not written completely
+// (task 15n finding 1). Before every clear and every share line
+// O_NONBLOCK is cleared on standard output and standard error: another
+// program that shares their open file description can set it, and a
+// clear would then fail at once on a terminal that takes nothing. The
+// abort path counts every failed write of a clear as one that does not
+// return in time: it discards the output not yet sent, restarts the
+// output and writes the clear again, until its time is up. The last
+// limit stays as before: a terminal that never takes output again (one
+// whose output another program stops again and again, faster than it
+// is restarted, until the end) never shows the clear, and after exit
+// code 130 nothing tries again.
+//
+// A confirmation (Enter when a holder is called, Enter when a holder
+// noted the share) counts only when it arrives at least confirmDelay (1
+// s) after its prompt was written completely (task 15n finding 3):
+// what arrives before is discarded, from the terminal and from the read
+// buffer, and the prompt is asked again with the note "Eingabe zu früh,
+// bitte erneut bestätigen". So an Enter typed twice, also with up to
+// confirmDelay between the two, never answers the next prompt: it
+// neither calls the next holder nor clears a share before its holder
+// saw it. SIGINT, SIGTERM,
 // SIGHUP, SIGQUIT and SIGTSTP restore the terminal, clear the screen and
 // end the program with exit code 130; while the files are written they
 // are deferred: a signal before the commit point (the rename of the
@@ -59,6 +96,39 @@
 // "stty sane"). SIGABRT, SIGILL, SIGTRAP, SIGBUS, SIGFPE, SIGSEGV and
 // SIGSYS sent with kill take the same way, so that no stack trace of the
 // runtime appears on the screen (abortSignals).
+//
+// The prompts go to standard error, which need not be a terminal; but
+// it must be a terminal, a pipe or a regular file, open for writing
+// (task 15l, task 15m point 3). Before the
+// terminal check, before anything is shown, read or written, the four
+// commands refuse with a usage error (exit code 2) a standard error that
+// is closed: the runtime puts /dev/null in place of a descriptor 2 that
+// is closed when the program starts, and every prompt would vanish
+// there, with the ceremony waiting at a prompt nobody sees and a share
+// on the screen. /dev/null itself (its device, or the file a fresh open
+// of /dev/null gives) is refused the same way, and so is a descriptor
+// not open for writing (opened read-only, the read end of a pipe,
+// O_PATH) and every other kind of file (a socket, a device that is no
+// terminal). Whether a pipe still has a reader is not visible before a
+// write; one without a reader is handled as follows (task 15i). From the
+// first step of the program until it exits, SIGPIPE and SIGXFSZ are
+// taken in on a channel nobody reads (brokenPipe, task 15m point 4), so
+// that a pipe on standard error whose reader is gone, or a socket
+// without a peer, never ends the program by a signal, neither past the
+// abort path (the runtime would end it with SIGPIPE at the next prompt,
+// a share on the screen and the flow control off) nor before its exit
+// code (a usage error, a refusal). A write error on standard error is
+// ignored, with one exception: when a prompt fails before the files
+// are written (commit), with EPIPE or any other error (EFBIG of a file at
+// RLIMIT_FSIZE, EIO, ENOSPC, ...; task 15m point 3), or does not get
+// through within outputGrace while a share is on the screen (task 15n
+// finding 2), nobody can see it or maybe any prompt after it, and the
+// ceremony ends through the abort path at once, before it waits for an
+// answer and before another share is shown (screen cleared, terminal
+// restored, nothing written, exit code 130; "abgebrochen" then goes to
+// standard output). After the
+// commit point the ceremony is complete and ends with its results as
+// documented above.
 //
 // The pin (identity-<gen>.pin) carries the origin of the log, the
 // witnesses with their quorum and the identity list 1..gen (fields 4 to
@@ -158,11 +228,13 @@ const usage = `Aufruf:
 init, ingest-rotate, reshare und succeed laufen auf einem Rechner ohne Netzwerk.
 Die Anteile erscheinen nur auf diesem Bildschirm, nie in einer Datei:
 Standardeingabe und Standardausgabe müssen ein Terminal sein, dessen Echo sich
-abschalten lässt (keine Umleitung, keine Pipe). --valid-from liegt nicht in der
-Vergangenheit. succeed übernimmt Origin, Zeugen und Quorum aus dem Pin;
---witness und --min-witnesses ändern sie ausdrücklich. publish läuft auf dem
-Server, solange er angehalten ist, und trägt ein Exportverzeichnis in
-Datenverzeichnis und Log ein; danach startet der Server mit diesem Pin.
+abschalten lässt (keine Umleitung, keine Pipe); die Standardfehlerausgabe mit
+den Eingabeaufforderungen ist ein Terminal, eine Pipe oder eine Datei, zum
+Schreiben geöffnet. --valid-from liegt nicht in der Vergangenheit. succeed übernimmt
+Origin, Zeugen und Quorum aus dem Pin; --witness und --min-witnesses ändern sie
+ausdrücklich. publish läuft auf dem Server, solange er angehalten ist, und
+trägt ein Exportverzeichnis in Datenverzeichnis und Log ein; danach startet der
+Server mit diesem Pin.
 --replace-witnesses ersetzt platform/witnesses.rec durch Zeugen und Quorum des
 Pins (nach succeed --witness/--min-witnesses). Die Pin-Datei ist nicht
 signiert: mit --replace-witnesses hängen die Zeugen, denen der Server traut,
@@ -196,7 +268,31 @@ func newEnv(stdin io.Reader, stdout, stderr io.Writer) *env {
 	return &env{in: stdin, src: src, stdin: bufio.NewReaderSize(src, maxLine), stdout: stdout, stderr: stderr}
 }
 
+// lostOutput takes in brokenPipe (SIGPIPE, SIGXFSZ) from the first step
+// of run until the program exits (task 15i, task 15m point 4); nobody
+// reads it, and os/signal drops a signal for a channel that is full. It
+// is never stopped, for the reason close gives for the abortSignals.
+var (
+	lostOutput     = make(chan os.Signal, 1)
+	lostOutputOnce sync.Once
+)
+
+// catchLostOutput starts lostOutput, once per program. Before task 15m
+// it started with openTerm: a usage error, a refusal or a failure
+// written before (usage, refuse, fail) to a standard error that is a
+// pipe without a reader or a socket without a peer ended the program by
+// SIGPIPE instead of its exit code 2 or 1.
+func catchLostOutput() {
+	lostOutputOnce.Do(func() {
+		if len(brokenPipe) > 0 {
+			// Notify without signals would relay every signal.
+			signal.Notify(lostOutput, brokenPipe...)
+		}
+	})
+}
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	catchLostOutput() // first: task 15m point 4
 	e := newEnv(stdin, stdout, stderr)
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage+devUsage)
@@ -422,6 +518,13 @@ type echoStandIn interface {
 	flushInput() error
 }
 
+// pendingStandIn is a stand-in terminal for stdin that reports the input
+// it holds and the command has not read (control.pending); only the
+// tests of this package implement it.
+type pendingStandIn interface {
+	inputPending() (int, error)
+}
+
 // isTerminal reports whether v is a terminal: an *os.File whose terminal
 // attributes can be read (ioctl TCGETS, TIOCGETA on BSD).
 func isTerminal(v any) bool {
@@ -444,10 +547,34 @@ type control struct {
 	echo  echoSwitch   // ECHO, ISIG, IEXTEN (disableEcho)
 	flow  echoSwitch   // IXON, IXOFF, IXANY (disableFlow)
 	flush func() error // discards the input not read yet (flushInput)
+	// pending reports how many bytes of input the terminal received and
+	// the program has not read (inputPending; task 15n finding 3); nil
+	// for a stand-in without pendingStandIn.
+	pending func() (int, error)
 	// outFlow clears IXON, IXOFF and IXANY of stdout (disableFlowOut)
 	// when stdout is a terminal other than stdin (task 15b point 0b);
 	// nil when it is the same terminal (flow covers it) or a stand-in.
 	outFlow echoSwitch
+	// errFlow clears IXON, IXOFF and IXANY of stderr (disableFlowOut)
+	// when stderr is a terminal other than stdin and stdout (task 15l
+	// point 1); nil when it is one of them or not a terminal.
+	errFlow echoSwitch
+}
+
+// outputWake returns the function that lets the output of the terminal
+// w run again (wakeOutput, task 15m point 2), with the output not yet
+// sent discarded when its argument is true; nil when w is no terminal
+// (*os.File) or a stand-in of the tests.
+func outputWake(w any) func(discard bool) error {
+	f, ok := w.(*os.File)
+	if !ok {
+		return nil
+	}
+	fd := f.Fd()
+	if !isTerminalFd(fd) {
+		return nil
+	}
+	return func(discard bool) error { return wakeOutput(fd, discard) }
 }
 
 // echoControl returns the switches of stdin v, or nil if v is not a
@@ -460,15 +587,20 @@ func echoControl(v any) *control {
 			return nil
 		}
 		return &control{
-			echo:  func() (func() error, error) { return disableEcho(fd) },
-			flow:  func() (func() error, error) { return disableFlow(fd) },
-			flush: func() error { return flushInput(fd) },
+			echo:    func() (func() error, error) { return disableEcho(fd) },
+			flow:    func() (func() error, error) { return disableFlow(fd) },
+			flush:   func() error { return flushInput(fd) },
+			pending: func() (int, error) { return inputPending(fd) },
 		}
 	case echoStandIn:
 		if !f.terminal() {
 			return nil
 		}
-		return &control{echo: f.disableEcho, flow: f.disableFlow, flush: f.flushInput}
+		c := &control{echo: f.disableEcho, flow: f.disableFlow, flush: f.flushInput}
+		if p, ok := f.(pendingStandIn); ok {
+			c.pending = p.inputPending
+		}
+		return c
 	}
 	return nil
 }
@@ -494,15 +626,84 @@ func outFlowControl(in, out any) echoSwitch {
 	return func() (func() error, error) { return disableFlowOut(fd) }
 }
 
+// errFlowControl returns the switch of the flow control of stderr errw
+// when errw is a terminal other than stdin in and stdout out (task 15l
+// point 1): an XOFF typed on that terminal would stop every prompt and
+// the clear of stderr, and with them the clear of a share in the abort
+// path. On the terminal of stdin or stdout their switch covers it.
+func errFlowControl(in, out, errw any) echoSwitch {
+	ef, ok := errw.(*os.File)
+	if !ok {
+		return nil
+	}
+	fd := ef.Fd()
+	if !isTerminalFd(fd) {
+		return nil
+	}
+	for _, v := range []any{in, out} {
+		if f, ok := v.(*os.File); ok && sameTerminal(f.Fd(), fd) {
+			return nil
+		}
+	}
+	return func() (func() error, error) { return disableFlowOut(fd) }
+}
+
+// errStderrClosed and errStderrKind refuse, with a usage error (exit
+// code 2), a command that shows or reads shares when standard error is
+// closed, is not open for writing (errStderrReadOnly, task 15m point 3)
+// or is no terminal, pipe or regular file (task 15l point 2;
+// checkStderr).
+var (
+	errStderrClosed = errors.New("die Standardfehlerausgabe ist geschlossen")
+	errStderrKind   = errors.New("die Standardfehlerausgabe ist weder Terminal noch Pipe noch Datei")
+	// errStderrReadOnly: standard error is open, but not for writing
+	// (task 15m point 3, writable); every prompt would fail.
+	errStderrReadOnly = fmt.Errorf("%w (nicht zum Schreiben geöffnet)", errStderrClosed)
+)
+
+// checkStderr is the first step of checkTerminal (task 15l point 2):
+// standard error must be a terminal, a pipe or a regular file, open for
+// writing (stderrFile). A descriptor 2 that is closed when the program
+// starts is /dev/null to the program (the runtime opens it in that
+// slot), and the prompts would go nowhere: errStderrClosed, as for
+// /dev/null itself and for a descriptor not open for writing
+// (errStderrReadOnly: O_RDONLY, O_PATH, the read end of a pipe; task 15m
+// point 3); errStderrKind for every other kind of file. A stand-in of the tests
+// (not an *os.File) passes.
+func (e *env) checkStderr() error {
+	f, ok := e.stderr.(*os.File)
+	if !ok {
+		return nil
+	}
+	if err := stderrFile(f.Fd()); err != nil {
+		return fmt.Errorf("%w: die Eingabeaufforderungen wären nicht zu sehen%s", err, noTerminalEnd)
+	}
+	return nil
+}
+
+// refuse ends a command that checkTerminal refused: a standard error
+// that is closed or of the wrong kind is a usage error (exit code 2),
+// every other refusal errNoTerminal (exit code 1, fail).
+func (e *env) refuse(err error) int {
+	if errors.Is(err, errStderrClosed) || errors.Is(err, errStderrKind) {
+		return e.usage(err.Error())
+	}
+	return e.fail(err)
+}
+
 // checkTerminal is the first step of every command that shows or reads
 // shares (init, reshare, ingest-rotate, succeed; task 10c finding 1):
+// standard error must be usable (checkStderr, first: task 15l point 2),
 // standard output must be a terminal, and standard input a terminal
-// whose attributes can be read. Otherwise errNoTerminal, before
-// anything is shown, read or written. A file or a pipe on standard
-// input is refused as well: a share must never be on disk. Whether the
-// echo can be switched off is tried by openTerm, once the signals are
-// handled.
+// whose attributes can be read. Otherwise errStderrClosed or
+// errStderrKind (refuse: exit code 2) or errNoTerminal, before anything
+// is shown, read or written. A file or a pipe on standard input is
+// refused as well: a share must never be on disk. Whether the echo can
+// be switched off is tried by openTerm, once the signals are handled.
 func (e *env) checkTerminal() error {
+	if err := e.checkStderr(); err != nil {
+		return err
+	}
 	if !isTerminal(e.stdout) {
 		return fmt.Errorf("%w: die Standardausgabe ist keins (umgeleitet in eine Datei oder Pipe)%s", errNoTerminal, noTerminalEnd)
 	}
@@ -517,10 +718,10 @@ func (e *env) checkTerminal() error {
 // shares, after checkTerminal and before the first prompt: first the
 // signals are handled (newTerm), then the flow control of stdin is
 // switched off until close (flowFlags cleared and read back, task 10e
-// finding 1), and that of stdout when it is another terminal (task 15b
-// point 0b), then the echo is switched off (quietFlags cleared and read
-// back) and restored at once, so that a signal in between restores it
-// too (task 10d finding 3). If that fails, the signal handling ends
+// finding 1), and that of stdout and of stderr when they are other
+// terminals (task 15b point 0b, task 15l point 1), then the echo is
+// switched off (quietFlags cleared and read back) and restored at once,
+// so that a signal in between restores it too (task 10d finding 3). If that fails, the signal handling ends
 // again, the flow control is restored, and the command is refused with
 // errNoTerminal, before anything is shown, read or written (the screen
 // is not cleared either).
@@ -534,6 +735,11 @@ func (e *env) openTerm() (*term, error) {
 		if t.ctl.outFlow != nil {
 			if t.outFlowRestore, err = t.ctl.outFlow(); err != nil {
 				err = fmt.Errorf("Flusssteuerung der Standardausgabe: %w", err)
+			}
+		}
+		if err == nil && t.ctl.errFlow != nil {
+			if t.errFlowRestore, err = t.ctl.errFlow(); err != nil {
+				err = fmt.Errorf("Flusssteuerung der Standardfehlerausgabe: %w", err)
 			}
 		}
 		if err == nil {
@@ -583,9 +789,11 @@ var (
 // close and, after the clear, by the abort path), so that no Ctrl-S
 // stops the output and with it the clear of a share on the screen;
 // when stdout is another terminal than stdin, its flow control is
-// cleared and restored as well (task 15b point 0b). Unread input is
-// discarded before every holder is called (Handover), so that an Enter
-// typed ahead does not call the next holder. While a
+// cleared and restored as well (task 15b point 0b), and so is that of
+// stderr when it is a third terminal (task 15l point 1). A confirmation
+// counts only when it arrives confirmDelay after its prompt (confirm,
+// task 15n finding 3); what arrives before is discarded, so that an
+// Enter typed ahead or twice does not call the next holder. While a
 // share is typed, the terminal does not echo it and raises no signals
 // (ECHO, ISIG and IEXTEN cleared, restored afterwards, on errors and on
 // the abortSignals; an abort key in the input is errAborted). The
@@ -603,8 +811,11 @@ var (
 // that blocks keeps it waiting at most abortWait per step, and the
 // program ends all the same (a write still blocked then is never
 // completed). So no share appears after the clear of the abort path
-// (task 10c finding 4). While the ceremony writes its files (commit) a
-// signal only sets a flag (task 10c finding 3). A signal that arrived
+// (task 10c finding 4). Before the commit the writes of the command to
+// the screen and the prompts while a share is on it are bounded as well
+// (push, outputGrace; task 15n): one that fails or does not get through
+// takes the abort path (screenLost, promptLost). While the ceremony
+// writes its files (commit) a signal only sets a flag (task 10c finding 3). A signal that arrived
 // before the commit point (CommitPoint, just before the rename of the
 // export) rolls the files back and ends the program with exit code 130
 // once they are; a signal after the commit point is ignored: the
@@ -616,6 +827,14 @@ var (
 // complete, and a SIGTSTP would stop it; task 15b point 0a); a signal
 // that the handler took in while close ran is discarded as well (task
 // 10d finding 4).
+//
+// The prompts and messages of the term go to stderr (prompt), which
+// may be a pipe (task 15i): SIGPIPE is taken in on lostOutput, a channel
+// nobody reads, from the start of run until the program exits; it is
+// never stopped, for the reason close gives for the abortSignals. A
+// write error on stderr is ignored, except on a prompt before the commit
+// (promptLost, whatever the error: task 15m point 3), which takes the
+// abort path.
 type term struct {
 	e     *env
 	shown bool // a share is on the screen
@@ -626,16 +845,36 @@ type term struct {
 	// errTerm: stderr is a terminal other than stdout; every clear of
 	// the screen goes there too (task 15b point 6).
 	errTerm bool
-	dead    atomic.Bool // the abort path runs: nothing more on the screen
+	// outWake and errWake let the output of stdout and of stderr run
+	// again before a clear (outputWake, task 15m point 2) and before a
+	// prompt while a share is on the screen (task 15n finding 2); nil
+	// when that is no terminal and for a stand-in of the tests. errWake
+	// is set whenever stderr is a terminal, also the one of stdout.
+	outWake, errWake func(discard bool) error
+	dead             atomic.Bool // the abort path runs: nothing more on the screen
+	// visible: a share line was written to stdout, completely or in part,
+	// and no clear of stdout after it was written completely yet (task
+	// 15n finding 1). Set and cleared while t.out is held.
+	visible atomic.Bool
+	// stallEnd is the deadline of the share line last written (display),
+	// which the prompt after it shares (prompt, task 15n finding 2): from
+	// the share line to the prompt that asks whether it is noted the
+	// ceremony waits for nobody, and the two writes together get
+	// outputGrace. Zero once that prompt took it, or after a clear. Read
+	// and written while t.out is held.
+	stallEnd time.Time
 
 	mu             sync.Mutex
 	restore        func() error // set while echo is off
 	flowRestore    func() error // set while the flow control of stdin is off
 	outFlowRestore func() error // set while the flow control of stdout is off
+	errFlowRestore func() error // set while the flow control of stderr is off
 	deferred       bool         // signals are deferred (commit)
 	pending        bool         // a signal arrived while deferred, before the commit point
 	committed      bool         // the commit point is passed
 	late           bool         // a signal arrived after the commit point
+	lost           bool         // a prompt failed (promptLost)
+	blocked        bool         // a clear or a share line failed (screenLost)
 	sig            chan os.Signal
 	done           chan struct{}
 	closed         bool
@@ -644,11 +883,19 @@ type term struct {
 // newTerm starts the signal handling of a term (openTerm); e.fail and
 // t.finish end it.
 func (e *env) newTerm() *term {
-	t := &term{e: e, ctl: echoControl(e.in), out: make(chan struct{}, 1), sig: make(chan os.Signal, 1), done: make(chan struct{})}
+	t := &term{e: e, ctl: echoControl(e.in), out: make(chan struct{}, 1), sig: make(chan os.Signal, 1),
+		done: make(chan struct{})}
 	if t.ctl != nil {
 		t.ctl.outFlow = outFlowControl(e.in, e.stdout)
+		t.ctl.errFlow = errFlowControl(e.in, e.stdout, e.stderr)
 	}
 	t.errTerm = otherTerminal(e.stdout, e.stderr)
+	t.outWake = outputWake(e.stdout)
+	t.errWake = outputWake(e.stderr)
+	// Task 15i: a write to a pipe without a reader on stderr fails with
+	// EPIPE instead of ending the program; run started that already
+	// (task 15m point 4), this covers a term opened without run (tests).
+	catchLostOutput()
 	signal.Notify(t.sig, abortSignals...)
 	go func() {
 		for {
@@ -683,73 +930,502 @@ func (e *env) newTerm() *term {
 	return t
 }
 
-// abortWait bounds every step of the abort path that waits for a write
-// to a terminal (task 15b point 0b): a write that does not return
-// within it does not keep the program from ending.
+// abortWait bounds every step of the abort path that may wait (task 15b
+// point 0b, task 15l point 1, task 15m point 1): a write or a request
+// that does not return within it does not keep the program from ending.
+// The steps are the restart of the output of stdout and stderr, the
+// wait for t.out (a prompt, a share line or a clear of the command that
+// blocks), the clear of stdout and of stderr (each with its retry),
+// each restore of the terminal modes and the last line; each one is
+// bounded on its own, so that a descriptor that blocks holds up none of
+// the others.
 const abortWait = 400 * time.Millisecond
 
-// bounded runs f and waits for it at most abortWait.
-func bounded(f func()) {
+// abortTotal bounds the abort path as a whole (task 15m point 1: it ends
+// within 2 s): a step that begins with less than abortWait left waits
+// only for the rest, but at least abortFloor, so that the steps that do
+// not wait (the restore of the terminal modes, none of whose requests
+// waits) still run when the steps before them used up the time. With
+// every step at its limit the program ends abortTotal plus a few times
+// abortFloor after the abort path began.
+const (
+	abortTotal = 1500 * time.Millisecond
+	abortFloor = 20 * time.Millisecond
+)
+
+// abortDrain is how long the abort path waits for t.out once the output
+// runs again (abort, step 2) before it takes the output as full and
+// discards what was written and not yet sent: a write that does not
+// finish that soon on a terminal that runs is held up by a full output
+// buffer (or by a terminal slower than a share line in that time, whose
+// output is better dropped as well).
+const abortDrain = 100 * time.Millisecond
+
+// outputGrace bounds, before the commit, every write of the command to
+// the screen (a share line, a clear) and every prompt while a share is
+// on the screen (task 15n finding 2): one that does not return within it
+// ends the ceremony through the abort path, so that no share stays on
+// the screen with the program stuck longer than outputGrace and the
+// abort path (abortTotal) together. 2 s: what the ceremony writes at a
+// time is a few hundred bytes at most (a share line of 30 words, a
+// prompt, a clear), which every terminal of a ceremony computer that
+// works takes in far less (a local console or terminal window in
+// microseconds, a serial line at 9600 baud in about 0.3 s, so that even
+// such a line has six times the time it needs); much longer would keep
+// a share on a screen that another program stops (TCOOFF, Scroll Lock)
+// or fills, much shorter would end a ceremony on a terminal that is
+// only slow for a moment.
+const outputGrace = 2 * time.Second
+
+// wakeEvery is how often the output of a terminal is restarted while a
+// write to it does not return (push, clearBounded; task 15n finding 2):
+// a program that stops the output again and again (TCOOFF in a loop)
+// races each restart, and a blocked write gets through only when it runs
+// between a restart and the next stop; a thousand chances a second give
+// it room. Each restart is two requests that wait for nothing.
+const wakeEvery = time.Millisecond
+
+// confirmWait is confirmDelay of the program (task 15n finding 3): an
+// Enter typed twice by a human comes within a few tenths of a second,
+// a holder who reads a prompt and then confirms takes longer than a
+// second. confirmDelay is a variable only so that tests can shorten it;
+// they never set it to 0.
+const confirmWait = time.Second
+
+var confirmDelay = confirmWait
+
+// abortClock is the deadline of one run of the abort path.
+type abortClock struct{ end time.Time }
+
+func newAbortClock() abortClock { return abortClock{end: time.Now().Add(abortTotal)} }
+
+// wait returns how long the next step may take.
+func (c abortClock) wait() time.Duration {
+	return max(abortFloor, min(abortWait, time.Until(c.end)))
+}
+
+// rest returns the time left to the abort path, at least abortFloor: the
+// clear of stdout may use all of it (task 15n finding 1), the steps
+// after it still run for abortFloor each.
+func (c abortClock) rest() time.Duration {
+	return max(abortFloor, time.Until(c.end))
+}
+
+// bounded runs f and waits for it at most c.wait(); it reports whether f
+// returned in time. A step that did not is left running and ends with
+// the program.
+func (c abortClock) bounded(f func()) bool {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		f()
 	}()
-	timer := time.NewTimer(abortWait)
+	timer := time.NewTimer(c.wait())
 	defer timer.Stop()
 	select {
 	case <-done:
+		return true
 	case <-timer.C:
+		return false
 	}
 }
 
-// abort ends the program after a signal. t.mu is held and is never
-// released. The term is marked dead before anything else, and t.out is
-// taken and never released: no share line can be written after the
-// clear (task 10c finding 4). The echo is restored first, then the
-// screen is cleared while the flow control is still off, then the flow
-// control is restored (stdout before stdin): the order in which a
-// command ends (finish, close; task 15b point 0c). A write that blocks
-// holds up neither the signal handling nor the end of the program
-// (task 15b point 0b): t.out is waited for at most abortWait, and so is
-// each write (bounded); the clear is written even when t.out could not
-// be taken, and the terminal orders it behind the write that blocks.
-// Before the echo comes back, the input not read yet is discarded
-// (flushInput): a share typed just before the signal would otherwise be
-// echoed once the echo is on, after the clear.
+// take takes the token ch (t.out), waiting at most c.wait(), and at most
+// limit when that is shorter and not 0; it reports whether it got it.
+func (c abortClock) take(ch chan struct{}, limit time.Duration) bool {
+	wait := c.wait()
+	if limit > 0 {
+		wait = min(wait, limit)
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case ch <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// abort ends the program after a signal, or after a lost prompt
+// (promptLost). t.mu is held and is never released. The term is marked
+// dead before anything else, and t.out is taken and never released: no
+// share line can be written after the clear (task 10c finding 4). Every
+// step is bounded (abortClock: abortWait each, abortTotal in all), and
+// none of the requests to the terminals waits (task 15m point 1): the
+// modes are set with TCSETS (TIOCSETA), the input is discarded with
+// TCFLSH (TIOCFLUSH), the output restarted with TCXONC (TIOCSTART);
+// TCSETSF, as before task 15m, waited for the write lock of the terminal
+// as long as a prompt was blocked in a write to it, and the program
+// hung with a share on the screen. The order:
+//
+//  1. The output of stdout, and of stderr when that is another
+//     terminal, runs again (wakeOutput, task 15m point 2): a terminal
+//     stopped by TCOOFF, by an XOFF or by Scroll Lock on the Linux
+//     console takes the clear again, and a write of the command blocked
+//     there returns.
+//  2. t.out is taken, while the output of both terminals is restarted
+//     every wakeEvery (task 15n finding 2: a program that stops it
+//     again and again). If it is not free within abortDrain, a write is
+//     held up by a full output buffer: what was written to stdout and
+//     stderr and not yet sent is discarded (TCOFLUSH, TIOCFLUSH), the
+//     output restarted again, and t.out waited for once more.
+//  3. stdout is cleared, the terminal that shows the shares, before
+//     every step on stdin (task 15m point 1, task 15l point 1), with
+//     the time left to the abort path (rest); then stderr when it is
+//     another terminal (wait). O_NONBLOCK is cleared before each write
+//     (task 15n finding 1). A clear that fails (any error: EAGAIN when
+//     O_NONBLOCK was set again, a part written included) or does not
+//     return within abortDrain counts as one that did not get through:
+//     the output not yet sent to that terminal is discarded (a terminal
+//     that filled up), the output restarted and the clear written
+//     again, until the time is up (clearBounded). If none gets through,
+//     the clear may never be shown: the last limit is a terminal that
+//     never takes output again (a pseudo terminal whose master side is
+//     never read again, one stopped again and again until the end); a
+//     share already shown there stays where it is shown, and after the
+//     exit nothing tries again.
+//  4. The input not read yet is discarded, the echo is restored and the
+//     input is discarded again (restoreInput): a share typed just before
+//     the signal is not echoed once the echo is on.
+//  5. The flow control is restored (stderr, stdout, stdin) after the
+//     clears, the order in which a command ends (finish, close; task
+//     15b point 0c).
+//  6. The last line goes to stderr, or to stdout after the clear when
+//     stderr takes nothing (task 15i; it holds no secret), with the
+//     reason first when a prompt was lost (promptLost) or a write to
+//     the screen did not get through (screenLost).
+//
+// The output not yet sent is discarded only when a write does not get
+// through (steps 2 and 3): unconditionally, it would also drop a share
+// line written just before the signal on a terminal that takes output,
+// which the clear removes anyway, and the holder would not see what
+// was shown when the ceremony ended.
 func (t *term) abort() {
 	t.dead.Store(true)
-	if t.ctl != nil {
-		t.ctl.flush()
+	c := newAbortClock()
+	t.unblock()
+	t.wake(c, false)
+	if !t.takeWaking(c, abortDrain) {
+		t.wake(c, true)
+		t.takeWaking(c, 0)
 	}
-	if t.restore != nil {
-		t.restore()
-		t.restore = nil
+	t.clearBounded(c.rest(), t.clearOut, t.outWake)
+	if t.errTerm {
+		t.clearBounded(c.wait(), t.clearErr, t.errWake)
 	}
-	timer := time.NewTimer(abortWait)
-	select {
-	case t.out <- struct{}{}:
-	case <-timer.C:
+	restore := t.restore
+	t.restore = nil
+	c.bounded(func() {
+		if t.ctl != nil {
+			t.ctl.flush()
+		}
+		if restore != nil {
+			restore()
+		}
+	})
+	for _, r := range t.flowRestores() {
+		c.bounded(func() { r() })
 	}
-	timer.Stop()
-	bounded(t.clear)
-	t.restoreFlow()
-	bounded(func() { fmt.Fprintln(t.e.stderr, "gomail-ceremony: abgebrochen") })
+	c.bounded(func() {
+		msg := "gomail-ceremony: abgebrochen\n"
+		switch {
+		case t.lost:
+			msg = "gomail-ceremony: " + errPromptLost.Error() + "\n" + msg
+		case t.blocked:
+			msg = "gomail-ceremony: " + errScreenLost.Error() + "\n" + msg
+		}
+		if _, err := io.WriteString(t.e.stderr, msg); err != nil {
+			io.WriteString(t.e.stdout, msg)
+		}
+	})
 	exit(exitAbort)
 }
 
-// restoreFlow restores the flow control of stdout and then of stdin,
-// the reverse order of openTerm (on one terminal reached through two
-// devices the attributes of before openTerm come back last). t.mu is
-// held.
-func (t *term) restoreFlow() {
-	if t.outFlowRestore != nil {
-		t.outFlowRestore()
-		t.outFlowRestore = nil
+// wake lets the output of stdout and of stderr (when that is a
+// terminal; on the terminal of stdout twice, which does no harm) run
+// again, the output not yet sent discarded first with discard; each
+// request bounded (abort, steps 1 and 2).
+func (t *term) wake(c abortClock, discard bool) {
+	for _, w := range []func(bool) error{t.outWake, t.errWake} {
+		if w != nil {
+			c.bounded(func() { w(discard) })
+		}
 	}
-	if t.flowRestore != nil {
-		t.flowRestore()
-		t.flowRestore = nil
+}
+
+// takeWaking takes t.out as c.take does, while the output of stdout and
+// stderr is restarted every wakeEvery (waking): the write that holds
+// t.out may be one that a program stops again and again (abort, step
+// 2; task 15n finding 2).
+func (t *term) takeWaking(c abortClock, limit time.Duration) bool {
+	stop := waking(t.outWake, t.errWake)
+	defer stop()
+	return c.take(t.out, limit)
+}
+
+// clearBounded writes a clear (clearOut, clearErr) within limit and
+// reports whether one was written completely (abort, step 3; task 15n
+// finding 1). Every attempt clears O_NONBLOCK (unblock) and restarts the
+// output of the terminal first (wake; nil for a stand-in and for a
+// stderr that is no terminal), and the output is restarted every
+// wakeEvery while the attempt does not return (waking). An attempt that
+// fails, whatever the error, or that does not return within abortDrain
+// counts as one that did not get through: the next attempt discards the
+// output not yet sent to that terminal first and writes the whole clear
+// again, until limit; an earlier attempt still blocked is left behind
+// (its rest, once the terminal takes it, comes before the newer clear,
+// as the terminal lets one write after the other). Without wake there
+// is nothing to discard: the attempt is waited for until limit, and
+// only one that failed is repeated. A step that is left running ends
+// with the program.
+func (t *term) clearBounded(limit time.Duration, write func() error, wake func(bool) error) bool {
+	end := time.Now().Add(limit)
+	stop := waking(wake)
+	defer stop()
+	discard := false
+	for {
+		t.unblock()
+		done := make(chan error, 1)
+		go func(discard bool) {
+			if wake != nil {
+				wake(discard)
+			}
+			done <- write()
+		}(discard)
+		wait := time.Until(end)
+		if wake != nil {
+			wait = min(wait, abortDrain)
+		}
+		timer := time.NewTimer(max(wait, 0))
+		select {
+		case err := <-done:
+			timer.Stop()
+			if err == nil {
+				return true
+			}
+			// Not at once again: a write that fails at once (EBADF, an
+			// O_NONBLOCK set again and again) is not repeated in a
+			// busy loop.
+			if left := time.Until(end); left > 0 {
+				time.Sleep(min(wakeEvery, left))
+			}
+		case <-timer.C:
+		}
+		if !time.Now().Before(end) {
+			return false
+		}
+		discard = true
+	}
+}
+
+// waking restarts the output of the terminals of wakes (nil entries are
+// skipped) every wakeEvery, in a goroutine of its own, until the
+// function it returns is called (task 15n finding 2). None of the
+// requests waits; should one wait all the same, it holds up nothing but
+// that goroutine.
+func waking(wakes ...func(bool) error) (stop func()) {
+	var ws []func(bool) error
+	for _, w := range wakes {
+		if w != nil {
+			ws = append(ws, w)
+		}
+	}
+	if len(ws) == 0 {
+		return func() {}
+	}
+	quit := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(wakeEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-tick.C:
+				for _, w := range ws {
+					w(false)
+				}
+			}
+		}
+	}()
+	return func() { close(quit) }
+}
+
+// unblock clears O_NONBLOCK on the open file descriptions of stdout and
+// stderr when it is set (blockingOutput; task 15n finding 1); it is
+// called before every clear and every share line, in the abort path
+// before every attempt of a clear. A stand-in of the tests has none.
+//
+// Clearing it changes the open file description, which the program
+// shares with whoever handed it the terminal (the shell, a job of that
+// shell in the background). That is done on purpose: the flag is no
+// state of the program's own, it comes only from another program, and
+// with it a clear fails at once (EAGAIN) on a terminal that takes
+// nothing for a moment, and a share stays on the screen; a ceremony
+// owns its terminal while it runs (it switches the echo and the flow
+// control of the same terminal for everybody as well). A program that
+// relies on O_NONBLOCK on a terminal sets it on each use (an interactive
+// shell clears it itself before it reads); it is not restored at the
+// end, which would hand the terminal back in the state another program
+// left to keep a clear off the screen.
+func (t *term) unblock() {
+	for _, w := range []io.Writer{t.e.stdout, t.e.stderr} {
+		if f, ok := w.(*os.File); ok {
+			blockingOutput(f.Fd())
+		}
+	}
+}
+
+// errOutputStuck reports a write that did not return within
+// outputGrace (push).
+var errOutputStuck = errors.New("Ausgabe hängt")
+
+// push runs write, with t.out held by the caller, and waits for it
+// until deadline (outputGrace after the write began, or after the share
+// line before it: stallEnd), while the output of the terminals of wakes
+// is restarted every wakeEvery (waking; task 15n finding 2). It returns
+// the error of write, or errOutputStuck when write did not return in
+// time. push releases t.out once write has returned: at once, or, when
+// it did not return in time, from the goroutine that runs it (never, if
+// it never returns; the abort path does not wait for it longer than
+// abortDrain and abortWait).
+func (t *term) push(deadline time.Time, write func() error, wakes ...func(bool) error) error {
+	done := make(chan error, 1)
+	go func() { done <- write() }()
+	stop := waking(wakes...)
+	defer stop()
+	grace := time.NewTimer(max(time.Until(deadline), 0))
+	defer grace.Stop()
+	select {
+	case err := <-done:
+		<-t.out
+		return err
+	case <-grace.C:
+		go func() {
+			<-done
+			<-t.out
+		}()
+		return errOutputStuck
+	}
+}
+
+// errPromptLost names why the abort path ran after promptLost.
+var errPromptLost = errors.New("die Standardfehlerausgabe nimmt nichts mehr an (Schreibfehler, etwa Pipe ohne Leser): Eingabeaufforderungen wären nicht zu sehen")
+
+// errScreenLost names why the abort path ran after screenLost.
+var errScreenLost = errors.New("der Bildschirm nimmt nichts mehr an (Schreibfehler oder angehaltene Ausgabe): kein Anteil darf stehen bleiben")
+
+// prompt writes a prompt or a message of the term to stderr (task 15i).
+// A write error before the commit takes the abort path at once
+// (promptLost), whatever the error (task 15m point 3: EPIPE of a pipe
+// without a reader, EFBIG of a file at RLIMIT_FSIZE, EIO, ENOSPC, EBADF,
+// ...): nobody sees this prompt, and maybe no later one; waiting for an
+// answer would leave a share on the screen with nobody asked to note it,
+// or call a holder nobody saw called. After the commit a write error is
+// ignored (promptLost). Every write of the term to stderr between
+// openTerm and finish goes through prompt. It holds t.out, as the writes
+// to the screen do, and writes nothing once the abort path runs: no
+// prompt appears behind the clear and the last line of the abort path
+// (a prompt written while the abort path waits for t.out comes before
+// the clear).
+//
+// While a share is on the screen (visible) a prompt follows the rule of
+// the clears (task 15n finding 2): the output of the terminal of stderr
+// is restarted, the prompt written, and the output restarted again every
+// wakeEvery while it does not return (push); one that does not get
+// through within outputGrace (counted, for the prompt right after a
+// share line, from the start of the share line: stallEnd) is lost as one
+// that fails: the abort path
+// clears stdout first and ends the program (promptLost), before an
+// answer is waited for that nobody was asked for. Without a share on
+// the screen a prompt that blocks keeps the ceremony waiting as before;
+// a signal ends it then.
+func (t *term) prompt(format string, args ...any) {
+	t.out <- struct{}{}
+	if t.dead.Load() {
+		<-t.out
+		return
+	}
+	msg := fmt.Sprintf(format, args...)
+	var err error
+	if t.visible.Load() {
+		deadline := time.Now().Add(outputGrace)
+		if !t.stallEnd.IsZero() {
+			if t.stallEnd.Before(deadline) {
+				deadline = t.stallEnd
+			}
+			t.stallEnd = time.Time{}
+		}
+		err = t.push(deadline, func() error {
+			if t.errWake != nil {
+				t.errWake(false)
+			}
+			_, err := io.WriteString(t.e.stderr, msg)
+			return err
+		}, t.errWake)
+	} else {
+		_, err = io.WriteString(t.e.stderr, msg)
+		<-t.out
+	}
+	if err != nil {
+		t.promptLost()
+	}
+}
+
+// promptLost ends the ceremony through the abort path after a prompt
+// failed: before the commit, the screen is cleared, the terminal
+// restored, nothing is written, exit code 130. It does not return then.
+// Once the files are written (deferred) or the ceremony is complete
+// (committed, closed) a lost prompt changes nothing: no share is shown
+// or asked any more, and the ceremony ends as documented.
+func (t *term) promptLost() {
+	t.mu.Lock()
+	if t.closed || t.deferred || t.committed {
+		t.mu.Unlock()
+		return
+	}
+	t.lost = true
+	t.abort()
+}
+
+// screenLost ends the ceremony through the abort path after a clear or a
+// share line failed or did not get through within outputGrace (task 15n
+// findings 1 and 2), as promptLost does: before the commit, the abort
+// path clears the screen with discarding, restores the terminal, writes
+// nothing and exits with code 130; it does not return then. A share line
+// written in part counts as shown. Once the files are written or the
+// command is closed it changes nothing: no share is on the screen then.
+func (t *term) screenLost() {
+	t.mu.Lock()
+	if t.closed || t.deferred || t.committed {
+		t.mu.Unlock()
+		return
+	}
+	t.blocked = true
+	t.abort()
+}
+
+// flowRestores returns the restores of the flow control that are still
+// due, of stderr, of stdout and then of stdin, the reverse order of
+// openTerm (on one terminal reached through two devices the attributes
+// of before openTerm come back last), and clears them. t.mu is held.
+func (t *term) flowRestores() []func() error {
+	var rs []func() error
+	for _, p := range []*func() error{&t.errFlowRestore, &t.outFlowRestore, &t.flowRestore} {
+		if *p != nil {
+			rs = append(rs, *p)
+			*p = nil
+		}
+	}
+	return rs
+}
+
+// restoreFlow restores the flow control of stderr, of stdout and then of
+// stdin (flowRestores). t.mu is held.
+func (t *term) restoreFlow() {
+	for _, r := range t.flowRestores() {
+		r()
 	}
 }
 
@@ -758,16 +1434,43 @@ var errDead = errors.New("Bildschirm nach dem Abbruch gesperrt")
 
 // display is the Display of the ceremony: every share line is written
 // while t.out is held, and none once the abort path runs (task 10c
-// finding 4, task 15b point 0b).
+// finding 4, task 15b point 0b). A share line is written as a clear is
+// (task 15n findings 1 and 2): O_NONBLOCK cleared, the output of stdout
+// restarted, the line written and the output restarted every wakeEvery
+// while it does not return (push). From the moment it is written it
+// counts as shown (visible), also when only a part gets through; one
+// that fails, whatever the error, or does not get through within
+// outputGrace ends the ceremony through the abort path (screenLost),
+// which clears it.
 type display struct{ t *term }
 
 func (d display) Write(p []byte) (int, error) {
-	d.t.out <- struct{}{}
-	defer func() { <-d.t.out }()
-	if d.t.dead.Load() {
+	t := d.t
+	t.out <- struct{}{}
+	if t.dead.Load() {
+		<-t.out
 		return 0, errDead
 	}
-	return d.t.e.stdout.Write(p)
+	t.unblock()
+	t.visible.Store(true)
+	t.stallEnd = time.Now().Add(outputGrace)
+	var n int
+	err := t.push(t.stallEnd, func() error {
+		if t.outWake != nil {
+			t.outWake(false)
+		}
+		var err error
+		n, err = t.e.stdout.Write(p)
+		return err
+	}, t.outWake)
+	if err != nil {
+		t.screenLost()
+		if errors.Is(err, errOutputStuck) {
+			return 0, err // n is still the write's own
+		}
+		return n, err
+	}
+	return n, nil
 }
 
 // BeginCommit implements ceremony.CommitGuard: from now on a signal
@@ -834,16 +1537,54 @@ func (t *term) lateSignal() bool {
 	return t.late
 }
 
-// clear writes clearScreen to stdout, and to stderr when that is
+// clear writes clearScreen to stdout, and then to stderr when that is
 // another terminal (errTerm): the prompts and messages are there, and,
 // when stdin is that terminal, the echo of anything typed while the echo
-// is on (task 15b point 6). stderr comes first, so that a stdout that
-// blocks does not keep it from being cleared. t.out is held.
-func (t *term) clear() {
-	if t.errTerm {
-		fmt.Fprint(t.e.stderr, clearScreen)
+// is on (task 15b point 6). stdout comes first (task 15l point 1): it is
+// the terminal that shows the shares, and a stderr that blocks must not
+// keep a share on the screen. t.out is held. It returns the first write
+// error, a part written included (task 15n finding 1); once the clear
+// of stdout is written completely no share is on the screen (visible
+// cleared). The command (wipe) runs it bounded and waits for both
+// writes, so that no share line overtakes a clear; the abort path writes
+// each one bounded (abort).
+//
+// Before the clears O_NONBLOCK is cleared on stdout and stderr (unblock,
+// task 15n finding 1), and before each one the output of that terminal
+// runs again (outWake, errWake without discarding; task 15m point 2): a
+// terminal stopped by TCOOFF, by an XOFF or by Scroll Lock on the Linux
+// console would keep the clear, and with it the command, waiting with a
+// share on the screen, also after the commit point, when a signal no
+// longer ends the program.
+func (t *term) clear() error {
+	t.unblock()
+	if t.outWake != nil {
+		t.outWake(false)
 	}
-	fmt.Fprint(t.e.stdout, clearScreen)
+	if err := t.clearOut(); err != nil {
+		return err
+	}
+	t.visible.Store(false)
+	if t.errTerm {
+		if t.errWake != nil {
+			t.errWake(false)
+		}
+		return t.clearErr()
+	}
+	return nil
+}
+
+// clearOut writes clearScreen to stdout; every write error is returned,
+// also after a part was written (task 15n finding 1).
+func (t *term) clearOut() error {
+	_, err := io.WriteString(t.e.stdout, clearScreen)
+	return err
+}
+
+// clearErr writes clearScreen to stderr, as clearOut does.
+func (t *term) clearErr() error {
+	_, err := io.WriteString(t.e.stderr, clearScreen)
+	return err
 }
 
 // otherTerminal reports whether errw (stderr) is a terminal and another
@@ -859,12 +1600,48 @@ func otherTerminal(out, errw any) bool {
 
 // wipe clears the screen, with t.out held; not once the abort path
 // runs, which clears the screen itself.
+//
+// Before the commit the clear is bounded (push, task 15n findings 1 and
+// 2): the output of stdout and stderr is restarted every wakeEvery while
+// it does not return, and a clear that fails (any write error, a part
+// written included) or does not get through within outputGrace ends the
+// ceremony through the abort path (screenLost), which discards the
+// output not yet sent and clears again: wipe returns only once the clear
+// of a share is written completely, and the next holder is never called
+// before. Once the files are written or the command closed, no share is
+// on the screen any more: the clear is waited for as before, and an
+// error changes nothing.
 func (t *term) wipe() {
+	// Only the command itself moves on to the commit or closes, the
+	// goroutine that calls wipe: normal is asked before t.out is taken,
+	// so that wipe never waits for t.mu while it holds t.out.
+	normal := t.normal()
 	t.out <- struct{}{}
-	defer func() { <-t.out }()
-	if !t.dead.Load() {
-		t.clear()
+	if t.dead.Load() {
+		<-t.out
+		return
 	}
+	if !normal {
+		t.clear()
+		<-t.out
+		return
+	}
+	var wakes []func(bool) error
+	if t.errTerm {
+		wakes = append(wakes, t.errWake)
+	}
+	t.stallEnd = time.Time{}
+	if err := t.push(time.Now().Add(outputGrace), t.clear, append(wakes, t.outWake)...); err != nil {
+		t.screenLost()
+	}
+}
+
+// normal reports whether the command runs before its commit and is not
+// closed: a write that fails or blocks then takes the abort path.
+func (t *term) normal() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.closed && !t.deferred && !t.committed
 }
 
 // echoOff switches the echo of the terminal off until echoOn. Without
@@ -896,7 +1673,8 @@ func (t *term) echoOn() {
 	}
 }
 
-// close restores the terminal (echo, then flow control) and ends the
+// close restores the terminal (echo, then flow control; none of the
+// requests waits, task 15m point 1) and ends the
 // handler of the signals, but not their notification: until the program
 // exits, every abortSignal is taken in and discarded (os/signal drops a
 // signal for a channel that is full), whatever the command reports
@@ -908,7 +1686,10 @@ func (t *term) echoOn() {
 // SIGQUIT print a stack trace. signal.Ignore is no way out either: the
 // runtime takes a signal off the notification before it marks it
 // ignored, and a signal taken in between gets its default action
-// (TestPTYSignalSalvo found it).
+// (TestPTYSignalSalvo found it). SIGPIPE stays taken in as well
+// (lostOutput, task 15i): a message on a stderr without a reader after close (the
+// results of a complete ceremony, a late signal, an error) is lost, but
+// does not end the program before its exit code.
 func (t *term) close() {
 	t.echoOn()
 	t.mu.Lock()
@@ -923,16 +1704,70 @@ func (t *term) close() {
 	}
 }
 
-// settle waits until the holder of a share on the screen confirms, and
-// clears the screen in any case.
+// settle waits until the holder of a share on the screen confirms
+// (confirm), and clears the screen in any case.
 func (t *term) settle() error {
 	var err error
 	if t.shown {
 		t.shown = false
-		fmt.Fprint(t.e.stderr, "Anteil notiert? Eingabetaste löscht den Bildschirm: ")
-		_, err = t.e.readLine()
+		err = t.confirm("Anteil notiert? Eingabetaste löscht den Bildschirm: ")
 	}
 	t.wipe()
+	return err
+}
+
+// earlyHint goes before a prompt asked again because input arrived
+// before confirmDelay had passed (confirm); it shows no share.
+const earlyHint = "Eingabe zu früh, bitte erneut bestätigen.\n"
+
+// confirm asks with the prompt format and args for a confirmation (an
+// Enter) and reads it (task 15n finding 3), for every prompt that calls
+// a holder before a share is shown (Handover) or that clears a share
+// once its holder noted it (settle). An input counts only when it
+// arrives at least confirmDelay after the prompt was written completely:
+// confirm waits confirmDelay after the prompt, then looks whether input
+// arrived meanwhile (on the terminal, pending, and in the read buffer),
+// then discards all of it, on the terminal (flushInput, which waits for
+// nothing, task 15m point 1) and in the read buffer (scrubInput), and
+// only then reads. When input had arrived, the prompt is asked once more
+// with earlyHint before it, and the wait begins again. So an Enter typed
+// twice, the second up to confirmDelay after the first, answers neither
+// this prompt nor the next: it is discarded, and the holder is asked
+// again (task 10e finding 4 discarded the input typed ahead only before
+// the prompt, and a second Enter more than a few tenths of a millisecond
+// after the first answered the prompt for the next holder).
+//
+// What arrives in the short time between the look and the discard is
+// discarded without the hint, and a line not yet complete is not seen
+// by the look (the terminal counts complete lines in canonical mode)
+// but discarded all the same: either way nothing is taken as a
+// confirmation that came too early, and the holder presses Enter again.
+func (t *term) confirm(format string, args ...any) error {
+	if t.ctl == nil {
+		return errNoTerminal
+	}
+	hint := ""
+	for {
+		t.prompt(hint+format, args...)
+		time.Sleep(confirmDelay)
+		early := t.e.stdin.Buffered() > 0
+		if t.ctl.pending != nil {
+			n, err := t.ctl.pending()
+			if err != nil {
+				return fmt.Errorf("Eingabe des Terminals lässt sich nicht prüfen: %w", err)
+			}
+			early = early || n > 0
+		}
+		if err := t.ctl.flush(); err != nil {
+			return fmt.Errorf("Eingabe des Terminals lässt sich nicht verwerfen: %w", err)
+		}
+		t.e.scrubInput()
+		if !early {
+			break
+		}
+		hint = earlyHint
+	}
+	_, err := t.e.readLine()
 	return err
 }
 
@@ -953,24 +1788,17 @@ func (t *term) finish(err error) error {
 	return err
 }
 
-// Handover calls the holder of share i. Input typed ahead and not read
-// yet is discarded first, on the terminal and in the read buffer (task
-// 10e finding 4): an Enter typed twice at "Anteil notiert?" does not
-// answer this prompt too, and share i is shown only once its holder
-// confirmed.
+// Handover calls the holder of share i. Only an Enter that arrives
+// confirmDelay after the prompt counts (confirm, task 15n finding 3);
+// what arrived before, typed ahead or a second Enter at "Anteil
+// notiert?", is discarded on the terminal and in the read buffer (task
+// 10e finding 4) and does not answer this prompt, and share i is shown
+// only once its holder confirmed.
 func (t *term) Handover(i, n int) error {
 	if err := t.settle(); err != nil {
 		return err
 	}
-	if t.ctl == nil {
-		return errNoTerminal
-	}
-	if err := t.ctl.flush(); err != nil {
-		return fmt.Errorf("Eingabe des Terminals lässt sich nicht verwerfen: %w", err)
-	}
-	t.e.scrubInput()
-	fmt.Fprintf(t.e.stderr, "Inhaber von Anteil %d von %d an den Bildschirm, dann Eingabetaste: ", i, n)
-	if _, err := t.e.readLine(); err != nil {
+	if err := t.confirm("Inhaber von Anteil %d von %d an den Bildschirm, dann Eingabetaste: ", i, n); err != nil {
 		return err
 	}
 	t.shown = true
@@ -987,7 +1815,7 @@ func (t *term) AskShare(want int) ([]string, error) {
 			return nil, err
 		}
 		if msg := checkShare(ws, want); msg != "" {
-			fmt.Fprintln(t.e.stderr, msg)
+			t.prompt("%s\n", msg)
 			continue
 		}
 		return ws, nil
@@ -1008,9 +1836,9 @@ func (t *term) readWords(want int) ([]string, error) {
 	}
 	defer t.echoOn()
 	if want > 0 {
-		fmt.Fprintf(t.e.stderr, "Anteil Nr. %d eingeben (30 Wörter, auch über mehrere Zeilen, ohne Anzeige; %s):\n", want, abortHint)
+		t.prompt("Anteil Nr. %d eingeben (30 Wörter, auch über mehrere Zeilen, ohne Anzeige; %s):\n", want, abortHint)
 	} else {
-		fmt.Fprintf(t.e.stderr, "Anteil eingeben (30 Wörter, auch über mehrere Zeilen, ohne Anzeige; %s):\n", abortHint)
+		t.prompt("Anteil eingeben (30 Wörter, auch über mehrere Zeilen, ohne Anzeige; %s):\n", abortHint)
 	}
 	var ws []string
 	for len(ws) < shamir.ShareWords {
@@ -1027,7 +1855,7 @@ func (t *term) readWords(want int) ([]string, error) {
 		}
 		ws = append(ws, lw...)
 		if len(ws) < shamir.ShareWords {
-			fmt.Fprintf(t.e.stderr, "(%d von %d Wörtern)\n", len(ws), shamir.ShareWords)
+			t.prompt("(%d von %d Wörtern)\n", len(ws), shamir.ShareWords)
 		}
 	}
 	return ws, nil
@@ -1105,14 +1933,14 @@ func (e *env) init(args []string) int {
 		return e.usage(err.Error())
 	}
 	if err := e.checkTerminal(); err != nil {
-		return e.fail(err)
+		return e.refuse(err)
 	}
 	t, err := e.openTerm()
 	if err != nil {
 		return e.fail(err)
 	}
-	fmt.Fprintf(e.stderr, "Zeremonie %s: Die Anteile erscheinen nacheinander nur auf diesem Bildschirm.\n", sh)
-	e.clockHint("Zertifikate")
+	t.prompt("Zeremonie %s: Die Anteile erscheinen nacheinander nur auf diesem Bildschirm.\n", sh)
+	t.clockHint("Zertifikate")
 	res, err := ceremony.Init(ceremony.InitOptions{
 		Out: *out, KeyDir: *keyDir, Shares: sh, Origin: *origin, Witnesses: ws, MinWitnesses: *minW,
 		Display: display{t}, Prompter: t, Now: now,
@@ -1133,8 +1961,8 @@ func (e *env) init(args []string) int {
 // prompt (RUNBOOK, task 15b point 6): it gives valid_from of what the
 // ceremony signs (what), and a wrong clock is set before the ceremony,
 // not after.
-func (e *env) clockHint(what string) {
-	fmt.Fprintf(e.stderr, "Uhr dieses Rechners: %s; sie bestimmt valid_from der %s. "+
+func (t *term) clockHint(what string) {
+	t.prompt("Uhr dieses Rechners: %s; sie bestimmt valid_from der %s. "+
 		"Geht sie falsch, jetzt mit Strg-C abbrechen, die Uhr stellen und neu beginnen.\n",
 		now().UTC().Format(time.RFC3339), what)
 }
@@ -1158,7 +1986,7 @@ func (e *env) rotate(args []string) int {
 		return e.usage("--valid-from: kein Zeitpunkt nach RFC 3339")
 	}
 	if err := e.checkTerminal(); err != nil {
-		return e.fail(err)
+		return e.refuse(err)
 	}
 	pin, err := readPin(*pinPath)
 	if err != nil {
@@ -1193,7 +2021,7 @@ func (e *env) reshare(args []string) int {
 		return e.usage(err.Error())
 	}
 	if err := e.checkTerminal(); err != nil {
-		return e.fail(err)
+		return e.refuse(err)
 	}
 	pin, err := readPin(*pinPath)
 	if err != nil {
@@ -1233,7 +2061,7 @@ func (e *env) succeed(args []string) int {
 		return e.usage("")
 	}
 	if err := e.checkTerminal(); err != nil {
-		return e.fail(err)
+		return e.refuse(err)
 	}
 	pin, err := readPin(*pinPath)
 	if err != nil {
@@ -1250,7 +2078,7 @@ func (e *env) succeed(args []string) int {
 	// a succession is signed (task 15f point 4): after a compromise
 	// (locked above, Q19) none would be.
 	if !*compromised {
-		e.clockHint("Nachfolge")
+		t.clockHint("Nachfolge")
 	}
 	res, err := ceremony.Succeed(ceremony.SucceedOptions{
 		UnlockOptions: e.unlockOptions(pin, t), Out: *out, Pin: pin,

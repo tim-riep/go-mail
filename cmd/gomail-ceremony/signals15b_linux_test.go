@@ -215,7 +215,10 @@ func TestPTYSignalSalvo(t *testing.T) {
 // side and its buffer is full), so the first write to stdout blocks. A
 // write that blocks holds up neither the signal handling nor the end of
 // the program: SIGINT ends it within 2 s with exit code 130, "abgebrochen"
-// on A, both terminals as before, nothing written, no share on B.
+// on A, both terminals as before, nothing written, no share on B. Since
+// task 15m (point 2) the abort path discards the output not yet sent to
+// B, and the blocked clear and that of the abort path reach B: besides
+// (what is left of) the filling, B shows clears only.
 func TestPTYTwoTerminals(t *testing.T) {
 	w1 := witnessArg(t, "w1")
 	t.Run("XOFF on stdout", func(t *testing.T) {
@@ -232,7 +235,7 @@ func TestPTYTwoTerminals(t *testing.T) {
 		b.noFlow()
 		b.send("\x13") // XOFF on the terminal of stdout
 		time.Sleep(100 * time.Millisecond)
-		p.send("\n")
+		p.confirm()
 		noted := p.next(regexp.MustCompile(`Anteil notiert\?`)) != nil
 		if !noted {
 			t.Error("share 1 not shown: the write to stdout stopped by XOFF")
@@ -347,7 +350,7 @@ func TestPTYTwoTerminals(t *testing.T) {
 				t.Fatalf("%s written", d)
 			}
 		}
-		// What reached B: the filling only.
+		// What reached B: the filling, and clears only.
 		mfd, err := syscall.Dup(int(bm.Fd()))
 		if err != nil {
 			t.Fatal(err)
@@ -363,8 +366,8 @@ func TestPTYTwoTerminals(t *testing.T) {
 			}
 			got = append(got, buf[:n]...)
 		}
-		if bytes.Contains(got, []byte("Anteil")) || len(bytes.Trim(got, ".")) != 0 {
-			t.Fatalf("on B besides the filling: %q", bytes.Trim(got, "."))
+		if rest := bytes.ReplaceAll(bytes.Trim(got, "."), []byte(clearScreen), nil); bytes.Contains(got, []byte("Anteil")) || len(rest) != 0 {
+			t.Fatalf("on B besides the filling and clears: %q", bytes.Trim(got, "."))
 		}
 		t.Logf("B filled with %d bytes; exit 130 %v after SIGINT", filled, took.Round(time.Millisecond))
 	})

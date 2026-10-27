@@ -45,6 +45,9 @@ const (
 func TestMain(m *testing.M) {
 	if os.Getenv(runMainEnv) == "1" {
 		childHooks(os.Getenv(hookEnv))
+		if os.Getenv(confirmEnv) == "real" {
+			confirmDelay = confirmWait
+		}
 		main()
 	}
 	os.Exit(m.Run())
@@ -60,9 +63,16 @@ func TestMain(m *testing.M) {
 //	probe-int         SIGINT to itself while openTerm has the echo off
 //	close-int         a signal handed to the signal handling while close
 //	                  holds t.mu (as TestCloseSignal)
+//	fsize0            RLIMIT_FSIZE 0 before the program runs: a write to
+//	                  a regular file fails with EFBIG and raises SIGXFSZ
+//	                  (task 15m point 3)
 func childHooks(name string) {
 	switch name {
 	case "":
+	case "fsize0":
+		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{}); err != nil {
+			os.Exit(3)
+		}
 	case "commit-sig", "commit-sig-spoil":
 		sig, err := strconv.Atoi(os.Getenv(sigEnv))
 		if err != nil {
@@ -114,6 +124,9 @@ type pty struct {
 	lflag0 uint32   // the local modes of the terminal before the program ran
 	iflag0 uint32   // the input modes of the terminal before the program ran
 	env    []string // added to the environment of the program
+	// stderr, when set, is the standard error of the program instead of
+	// the slave (task 15i: a pipe); the slave is then its descriptor 3.
+	stderr *os.File
 
 	mu  sync.Mutex
 	out []byte // everything the terminal showed
@@ -230,9 +243,15 @@ func (p *pty) startBin(bin string, stdin, stdout *os.File, args ...string) {
 	if stdout != nil {
 		cmd.Stdout = stdout
 	}
-	// The controlling terminal is taken from stderr, which is always
-	// the slave.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 2}
+	// The controlling terminal is taken from stderr, which is the slave
+	// unless p.stderr is set; then from descriptor 3, the slave.
+	ctty := 2
+	if p.stderr != nil {
+		cmd.Stderr = p.stderr
+		cmd.ExtraFiles = []*os.File{p.slave}
+		ctty = 3
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: ctty}
 	if err := cmd.Start(); err != nil {
 		p.t.Fatal(err)
 	}
@@ -255,6 +274,15 @@ func (p *pty) send(s string) {
 	if _, err := p.master.Write([]byte(s)); err != nil {
 		p.t.Fatal(err)
 	}
+}
+
+// confirm answers a confirmation with Enter as a holder does: not at
+// once, but answerPause after the prompt appeared, longer than the
+// confirmDelay of the program (task 15n finding 3).
+func (p *pty) confirm() {
+	p.t.Helper()
+	time.Sleep(answerPause)
+	p.send("\n")
 }
 
 // lflag returns the local modes of the terminal.
@@ -410,6 +438,10 @@ func (p *pty) wait() int {
 	return 0
 }
 
+// earlyPrompt2 is the prompt for holder 2 asked again after an input
+// that came too early (confirm, task 15n finding 3).
+var earlyPrompt2 = regexp.MustCompile(`Eingabe zu früh, bitte erneut bestätigen\.\r\nInhaber von Anteil 2 von 2 an den Bildschirm, dann Eingabetaste: `)
+
 var ptyPrompt = regexp.MustCompile(`Inhaber von Anteil \d+ von \d+|Anteil notiert\?|Anteil Nr\. (\d+) eingeben[^\n]*\n|Anteil eingeben[^\n]*\n|Anteil (\d+)/\d+: ([a-z ]+)\r\n`)
 
 // converse answers the prompts of the program until it exits: Enter for
@@ -427,7 +459,7 @@ func (p *pty) converse(queue []string) {
 		var share string
 		switch {
 		case strings.HasPrefix(m[0], "Inhaber"), strings.HasPrefix(m[0], "Anteil notiert"):
-			p.send("\n")
+			p.confirm()
 			continue
 		case m[3] != "":
 			var i int
@@ -627,7 +659,7 @@ func TestPTYInterrupt(t *testing.T) {
 		if m[1] != "" {
 			break
 		}
-		p.send("\n")
+		p.confirm()
 	}
 	p.quietInput()
 	ws := strings.Fields(p.shown[1])
@@ -845,7 +877,7 @@ func (p *pty) driveTo(stop string) int {
 		case stop == "display" && strings.HasPrefix(m[0], "Anteil notiert"):
 			return 0
 		}
-		p.send("\n")
+		p.confirm()
 	}
 }
 
@@ -1124,17 +1156,23 @@ func TestPTYFlowControl(t *testing.T) {
 
 // TestPTYDoubleEnter: Enter typed twice when the holder of share 1 is
 // asked whether it is noted does not call the holder of share 2 too:
-// the input typed ahead is discarded before the prompt, and share 2 is
-// shown only after its holder pressed Enter (task 10e finding 4).
+// the second Enter arrives before the prompt for holder 2 has been out
+// confirmDelay, it is discarded and that prompt asked again with the
+// hint (task 15n finding 3; task 10e finding 4 discarded it before the
+// prompt), and share 2 is shown only after its holder pressed Enter.
 func TestPTYDoubleEnter(t *testing.T) {
 	w1 := witnessArg(t, "w1")
 	base := t.TempDir()
 	p := openPTY(t)
 	out, _ := p.startInit(base, w1)
 	p.driveTo("display")
+	time.Sleep(answerPause)
 	p.send("\n\n")
 	if p.next(regexp.MustCompile(`Inhaber von Anteil 2 von 2 an den Bildschirm, dann Eingabetaste: `)) == nil {
 		t.Fatalf("holder 2 not called; output %q", p.output())
+	}
+	if p.next(earlyPrompt2) == nil {
+		t.Fatalf("prompt for holder 2 not asked again; output %q", p.output())
 	}
 	time.Sleep(300 * time.Millisecond)
 	if after := p.output()[p.pos:]; strings.Contains(after, "Anteil 2/2") {
@@ -1143,7 +1181,7 @@ func TestPTYDoubleEnter(t *testing.T) {
 	if n := p.pendingInput(); n != 0 {
 		t.Fatalf("%d bytes typed ahead left", n)
 	}
-	p.send("\n") // holder 2
+	p.confirm() // holder 2
 	p.converse(nil)
 	if code := p.wait(); code != 0 {
 		t.Fatalf("exit code %d\n%q", code, p.output())
