@@ -251,7 +251,14 @@ type Log interface {
 	// with ErrConsistency until a Refresh passes the Pending check again
 	// against a verified tree at least as large, with or without a new
 	// head: the caller removes that entry from Verifier.Pending and
-	// appends the record again (doc.go "Withheld entries", task 14). An
+	// appends the record again (doc.go "Withheld entries", task 14).
+	// Until then Refresh takes over no head at all, not even one that
+	// passed CheckHead and the Pending check but is smaller than the tree
+	// in which the entry was found replaced (task 11, addendum point 1,
+	// strictest reading): Last, LogKeys, Pending and the audit index stay
+	// at the old head, Refresh returns ErrConsistency with the old head,
+	// and the caller has nothing new to persist (unlike ErrWithheld and
+	// ErrStale, which come with the new head). An
 	// audit index that contradicts the log is discarded and rebuilt from
 	// entry 0 against the old head first (task 07b finding 5). Refresh
 	// returns the reference head for the caller to persist, the new one
@@ -279,6 +286,12 @@ type Log interface {
 	// Head returns the newest published head as stored in heads/,
 	// opened with Options.Known and, for a client, the verifiers of
 	// Verifier.LogKeys (as of the last Refresh), but not yet judged.
+	// An operator log opens it with Options.Known, Options.Witnesses
+	// and the log keys of the committed tree line by line, as
+	// PublishHead does (task 11b finding 5): a line that does not verify
+	// is dropped instead of failing the head, the head needs a valid log
+	// line (ErrHead otherwise), and Head.Note holds the text and the
+	// verified lines only.
 	Head() (*Head, error)
 	// Entry returns entry index, decoded with DecodeEntry; for a client
 	// only below the reference size (ErrPending beyond). An index

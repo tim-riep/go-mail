@@ -241,6 +241,7 @@ type tenv struct {
 	op     Operator
 	now    time.Time
 	signer note.Signer // log signer (current ingest generation)
+	vf     int64       // last valid_from offset of addresses (operator_test.go)
 }
 
 // newEnv creates a platform with n witnesses (quorum min), certificates

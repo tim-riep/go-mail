@@ -1,17 +1,38 @@
-// Command gomail-server is the SMTP server of go-mail (9.2):
+// Command gomail-server is the SMTP server of go-mail (9.2) and the
+// operator of the transparency log (2.7, task 11):
 //
+//	gomail-server serve --data <dir> --listen 127.0.0.1:2525 --ingest-key <file>
+//	                    --pin <file> --log-listen 127.0.0.1:<port> [--head-interval 1h]
 //	gomail-server serve --data <dir> --listen 127.0.0.1:2525 --ingest-key <file> --insecure-no-log
 //	gomail-server invite create --data <dir>
-//	gomail-server address add <address> --mailbox <id> --data <dir> --admin-key <file> --insecure-no-log
+//	gomail-server address add <address> --mailbox <id> --data <dir> --admin-key <file> --pin <file>
+//	gomail-server log repair --data <dir> --pin <file>
 //
-// The server listens only on a loopback address unless
-// --isolated-test-network is given (5.1). Without --insecure-no-log it
-// refuses to start, because the transparency log does not exist yet
-// (phase 3). Logs contain IDs, sizes and status codes only.
+// With --pin (identity-<gen>.pin, outside the data directory) serve opens
+// the operator log of the data directory against the pin's identity list
+// and origin (translog.Options), reads platform/witnesses.rec as the
+// working copy of the witnesses (a warning when it differs from the pin),
+// signs heads with the ingest key (Q4) on the cadence of package loghttp
+// and serves the witness protocol on --log-listen; ingest checks against
+// the same operator log. "address add" logs the signed assignment with
+// Append(KindAddress) before it changes addresses.json, and only when the
+// address is free or already assigned to that mailbox (exit status 2
+// otherwise; no message names the address). "log repair"
+// rebuilds tree.rec, the tiles and keys/ from the entries and the signed
+// heads (translog.RepairTree) while no server runs.
+//
+// --insecure-no-log (until task 15) keeps the accepting placeholder
+// translogtest.Unverified and serves no log; it cannot be combined with
+// --pin or --log-listen. Both listeners accept only a loopback address
+// unless --isolated-test-network is given (5.1). Pin and ingest key must
+// lie outside the data directory, compared with symbolic links resolved
+// (a pin inside it: exit status 2). Logs contain IDs, sizes, hash
+// prefixes and status codes only.
 package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,15 +41,22 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"syscall"
 	"time"
+
+	"golang.org/x/mod/sumdb/note"
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/ingest"
 	"github.com/tim-riep/go-mail/internal/keys"
+	"github.com/tim-riep/go-mail/internal/loghttp"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 	"github.com/tim-riep/go-mail/internal/translog/translogtest"
+	"github.com/tim-riep/go-mail/internal/witness"
 )
 
 func main() {
@@ -38,10 +66,15 @@ func main() {
 }
 
 const usage = `Aufruf:
+  gomail-server serve --data <dir> [--listen 127.0.0.1:2525] --ingest-key <datei>
+                      --pin <datei> --log-listen <adresse> [--head-interval 1h]
+                      [--hostname <name>] [--isolated-test-network]
   gomail-server serve --data <dir> [--listen 127.0.0.1:2525] --ingest-key <datei> --insecure-no-log
                       [--hostname <name>] [--isolated-test-network]
   gomail-server invite create --data <dir>
+  gomail-server address add <adresse> --mailbox <postfach-id> --data <dir> --admin-key <datei> --pin <datei>
   gomail-server address add <adresse> --mailbox <postfach-id> --data <dir> --admin-key <datei> --insecure-no-log
+  gomail-server log repair --data <dir> --pin <datei>
 `
 
 // parse parses flags that may appear before, between or after the
@@ -60,8 +93,9 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// ready receives the listening address (tests).
-type ready func(addr string)
+// ready receives the listening addresses of SMTP and of the log ("" with
+// --insecure-no-log) (tests).
+type ready func(smtp, log string)
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, onReady ready) int {
 	if len(args) == 0 {
@@ -75,6 +109,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, onReady r
 		return invite(args[1:], stdout, stderr)
 	case "address":
 		return address(args[1:], stdout, stderr)
+	case "log":
+		return logCmd(args[1:], stdout, stderr)
 	}
 	fmt.Fprint(stderr, usage)
 	return 2
@@ -82,7 +118,44 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, onReady r
 
 func fail(stderr io.Writer, err error) int {
 	fmt.Fprintln(stderr, "gomail-server:", err)
+	if errors.As(err, new(usageError)) {
+		return 2
+	}
 	return 1
+}
+
+// usageError is a wrong invocation that is only found after the flags
+// are parsed (a pin inside the data directory, an address already
+// assigned): exit status 2, as for a usage error.
+type usageError struct{ msg string }
+
+func (e usageError) Error() string { return e.msg }
+
+// resolve returns the absolute path p with every symbolic link resolved;
+// p must exist.
+func resolve(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+// outsideData resolves file and the data directory root with their
+// symbolic links (as translog resolves Options.IndexFile, task 07c
+// finding 4) and returns the resolved file; inside reports a file inside
+// root, also one reached through a link or in a data directory reached
+// through one (task 11b finding 6).
+func outsideData(file, root, what string) (resolved string, inside bool, err error) {
+	rf, err := resolve(file)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: %w", what, err)
+	}
+	rr, err := resolve(root)
+	if err != nil {
+		return "", false, fmt.Errorf("Datenverzeichnis: %w", err)
+	}
+	return rf, isInside(rf, rr), nil
 }
 
 // checkListen enforces 5.1: loopback only, unless the operator states
@@ -99,7 +172,53 @@ func checkListen(addr string, isolated bool) error {
 	if host == "localhost" || ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return errors.New("--listen muss eine Loopback-Adresse sein (etwa 127.0.0.1:2525); ein anderes Netz nur mit --isolated-test-network (5.1)")
+	return errors.New("--listen und --log-listen müssen Loopback-Adressen sein (etwa 127.0.0.1:2525); ein anderes Netz nur mit --isolated-test-network (5.1)")
+}
+
+// readPin reads the server's pin (identity-<gen>.pin), which must lie
+// outside the data directory (translog Options.Identities: never from
+// files in the data directory). Pin and data directory are compared with
+// their symbolic links resolved; a pin inside it is a usageError, and
+// the pin is read through its resolved path.
+func readPin(path, root string) (*store.PlatformPin, []translog.Identity, error) {
+	rp, inside, err := outsideData(path, root, "Pin")
+	if err != nil {
+		return nil, nil, err
+	}
+	if inside {
+		return nil, nil, usageError{"der Pin darf nicht im Datenverzeichnis liegen"}
+	}
+	pin, err := store.ReadPlatformPin(rp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Pin: %w", err)
+	}
+	ids := make([]translog.Identity, 0, len(pin.Identities))
+	for _, id := range pin.Identities {
+		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: id.Pub})
+	}
+	return pin, ids, nil
+}
+
+// readWitnesses reads platform/witnesses.rec, the server's working copy
+// of the witnesses, and reports whether it differs from the pin.
+func readWitnesses(st *store.Store, pin *store.PlatformPin) (*witness.Witnesses, bool, error) {
+	data, err := st.ReadPlatformFile("witnesses.rec")
+	if err != nil {
+		return nil, false, fmt.Errorf("platform/witnesses.rec: %w", err)
+	}
+	w, err := witness.DecodeWitnesses(data)
+	if err != nil {
+		return nil, false, err
+	}
+	same := w.Min == pin.MinWitnesses && len(w.List) == len(pin.Witnesses)
+	for _, k := range w.List {
+		found := false
+		for _, p := range pin.Witnesses {
+			found = found || (p.Name == k.Name && p.Pub.Equal(k.Pub))
+		}
+		same = same && found
+	}
+	return w, !same, nil
 }
 
 func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) int {
@@ -111,49 +230,105 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	hostname := fs.String("hostname", "localhost", "Name im SMTP-Gruß")
 	isolated := fs.Bool("isolated-test-network", false, "erlaubt eine Adresse außerhalb von Loopback in einem isolierten Testnetz")
 	noLog := fs.Bool("insecure-no-log", false, "ohne Transparenzlog (nur Entwicklung)")
+	pinFile := fs.String("pin", "", "Pin der Plattform (identity-<gen>.pin, nicht im Datenverzeichnis)")
+	logListen := fs.String("log-listen", "", "Adresse für das Zeugenprotokoll (HTTP)")
+	headInterval := fs.Duration("head-interval", translog.HeadInterval, "längster Abstand zweier signierter Köpfe")
 	if pos, err := parse(fs, args); err != nil || len(pos) != 0 || *data == "" || *keyFile == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	tlog, err := translogtest.NewUnverified(*noLog)
-	if err != nil {
-		return fail(stderr, err)
+	switch {
+	case *noLog && (*pinFile != "" || *logListen != ""):
+		fmt.Fprintln(stderr, "gomail-server: --insecure-no-log schließt --pin und --log-listen aus")
+		fmt.Fprint(stderr, usage)
+		return 2
+	case !*noLog && *pinFile == "" && *logListen == "":
+		return fail(stderr, translog.ErrNoLog)
+	case !*noLog && (*pinFile == "" || *logListen == ""):
+		fmt.Fprintln(stderr, "gomail-server: --pin und --log-listen gehören zusammen")
+		fmt.Fprint(stderr, usage)
+		return 2
 	}
 	if err := checkListen(*listen, *isolated); err != nil {
 		return fail(stderr, err)
+	}
+	if !*noLog {
+		if err := checkListen(*logListen, *isolated); err != nil {
+			return fail(stderr, err)
+		}
 	}
 	st, err := store.Open(*data)
 	if err != nil {
 		return fail(stderr, err)
 	}
-	if abs, err := absPath(*keyFile); err == nil && isInside(abs, st.Root) {
+	kf, inside, err := outsideData(*keyFile, st.Root, "Ingest-Schlüssel")
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if inside {
 		return fail(stderr, errors.New("der Ingest-Schlüssel darf nicht im Datenverzeichnis liegen (Abschnitt 4)"))
 	}
-	key, gen, err := ceremony.ReadKey(*keyFile, store.KeyRoleIngest)
+	key, gen, err := ceremony.ReadKey(kf, store.KeyRoleIngest)
 	if err != nil {
 		return fail(stderr, err)
 	}
 	defer keys.Wipe(key)
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
-	logger.Warn("running without transparency log (--insecure-no-log)")
+	var tl translog.Log
+	var side *loghttp.Server
+	if *noLog {
+		if tl, err = translogtest.NewUnverified(true); err != nil {
+			return fail(stderr, err)
+		}
+		logger.Warn("running without transparency log (--insecure-no-log)")
+	} else {
+		op, ls, err := openLogSide(st, *pinFile, key, *headInterval, logger)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		tl, side = op, ls
+	}
 	// TODO(task-15): HoldRoleLock(RoleClient)/CheckPeerLock in gomailctl and PeerCheck here (9.1).
-	in, err := ingest.New(ingest.Config{Store: st, Log: tlog, IngestKey: key, IngestGen: gen, Logger: logger})
+	in, err := ingest.New(ingest.Config{Store: st, Log: tl, IngestKey: key, IngestGen: gen, Logger: logger})
 	if err != nil {
 		return fail(stderr, err)
 	}
+	defer in.Close()
 	if err := in.Recover(); err != nil {
 		return fail(stderr, err)
 	}
 	in.Start()
-	defer in.Close()
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return fail(stderr, err)
 	}
 	srv := smtpd.NewServer(smtpd.Config{Hostname: *hostname, Logger: logger}, in)
 	logger.Info("smtp listening", "addr", ln.Addr().String())
+	logAddr := ""
+	served := make(chan error, 1)
+	if side != nil {
+		lln, err := net.Listen("tcp", *logListen)
+		if err != nil {
+			ln.Close()
+			return fail(stderr, err)
+		}
+		logAddr = lln.Addr().String()
+		logger.Info("log listening", "addr", logAddr)
+		hs := loghttp.NewHTTPServer(side)
+		go func() { served <- hs.Serve(lln) }()
+		logCtx, stopLog := context.WithCancel(ctx)
+		ran := make(chan struct{})
+		go func() { side.Run(logCtx); close(ran) }()
+		// The signer refers to key: the log side stops before the
+		// deferred Wipe of key runs.
+		defer func() {
+			stopLog()
+			hs.Close()
+			<-ran
+		}()
+	}
 	if onReady != nil {
-		onReady(ln.Addr().String())
+		onReady(ln.Addr().String(), logAddr)
 	}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ln) }()
@@ -165,7 +340,53 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 		return 0
 	case err := <-done:
 		return fail(stderr, err)
+	case err := <-served:
+		srv.Close()
+		<-done
+		return fail(stderr, err)
 	}
+}
+
+// openLogSide opens the operator log of the pin and the log side of the
+// server (task 11).
+func openLogSide(st *store.Store, pinFile string, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, error) {
+	pin, ids, err := readPin(pinFile, st.Root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if pin.Dev {
+		logger.Warn("development pin (gomail-ceremony init --dev)")
+	}
+	ws, differs, err := readWitnesses(st, pin)
+	if err != nil {
+		return nil, nil, err
+	}
+	if differs {
+		logger.Warn("platform/witnesses.rec differs from the pin; heads need the quorum of witnesses.rec, clients that of the pin")
+	}
+	wvs, err := ws.Verifiers()
+	if err != nil {
+		return nil, nil, err
+	}
+	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin, Known: note.VerifierList(wvs...),
+		Witnesses: wvs, MinWitnesses: ws.Min})
+	if err != nil {
+		return nil, nil, err
+	}
+	op := l.(translog.Operator)
+	signer, err := translog.NewLogSigner(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	lk, err := translog.NewLogVerifier(key.Public().(ed25519.PublicKey))
+	if err != nil {
+		return nil, nil, err
+	}
+	side, err := loghttp.New(loghttp.Config{Log: op, Signer: signer, LogKey: lk, Witnesses: wvs, HeadInterval: interval, Logger: logger})
+	if err != nil {
+		return nil, nil, err
+	}
+	return op, side, nil
 }
 
 func invite(args []string, stdout, stderr io.Writer) int {
@@ -196,18 +417,32 @@ func address(args []string, stdout, stderr io.Writer) int {
 	mailbox := fs.String("mailbox", "", "Postfach-ID")
 	keyFile := fs.String("admin-key", "", "privater Admin-Schlüssel")
 	noLog := fs.Bool("insecure-no-log", false, "ohne Transparenzlog (nur Entwicklung)")
+	pinFile := fs.String("pin", "", "Pin der Plattform (identity-<gen>.pin, nicht im Datenverzeichnis)")
 	pos, err := parse(fs, args)
-	if err != nil || len(pos) != 2 || pos[0] != "add" || *data == "" || *mailbox == "" || *keyFile == "" {
+	if err != nil || len(pos) != 2 || pos[0] != "add" || *data == "" || *mailbox == "" || *keyFile == "" || (*noLog && *pinFile != "") {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	tlog, err := translogtest.NewUnverified(*noLog)
-	if err != nil {
-		return fail(stderr, err)
+	if !*noLog && *pinFile == "" {
+		return fail(stderr, translog.ErrNoLog)
 	}
 	st, err := store.Open(*data)
 	if err != nil {
 		return fail(stderr, err)
+	}
+	var tl translog.Log
+	if *noLog {
+		if tl, err = translogtest.NewUnverified(true); err != nil {
+			return fail(stderr, err)
+		}
+	} else {
+		pin, ids, err := readPin(*pinFile, st.Root)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		if tl, err = translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin}); err != nil {
+			return fail(stderr, err)
+		}
 	}
 	mbx, err := store.ParseID(*mailbox)
 	if err != nil {
@@ -218,11 +453,11 @@ func address(args []string, stdout, stderr io.Writer) int {
 	}
 	addr, err := store.NormalizeAddress(pos[1])
 	if err != nil {
-		return fail(stderr, err)
+		return failAddr(stderr, err, pos[1], "")
 	}
 	admin, gen, err := ceremony.ReadKey(*keyFile, store.KeyRoleAdmin)
 	if err != nil {
-		return fail(stderr, err)
+		return failAddr(stderr, err, pos[1], addr)
 	}
 	defer keys.Wipe(admin)
 	cert, err := st.ReadPlatformCert(keys.RoleAdmin, gen)
@@ -232,19 +467,122 @@ func address(args []string, stdout, stderr io.Writer) int {
 	// Signed assignment for the log (2.3); addresses.json is the working copy.
 	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: time.Now().UnixMilli(), AdminGen: gen}
 	if err := a.Sign(admin); err != nil {
-		return fail(stderr, err)
+		return failAddr(stderr, err, pos[1], addr)
 	}
 	enc, err := a.Encode()
 	if err != nil {
-		return fail(stderr, err)
+		return failAddr(stderr, err, pos[1], addr)
 	}
-	// TODO(phase3-translog): signed address assignment into the log (2.3).
-	if err := tlog.AppendAddress(enc); err != nil {
-		return fail(stderr, err)
+	// The signed assignment goes into the log before the working copy
+	// addresses.json changes (2.3, translog doc.go "Who writes"). Under
+	// addresses.lock (lock order addresses.lock, log/lock: Append takes
+	// log/lock inside) the address must be free or already assigned to
+	// this mailbox, in addresses.json and in the log, before anything is
+	// logged (task 11b finding 2): otherwise the log would name this
+	// mailbox from valid_from on while addresses.json, which AddAddress
+	// never changes for an assigned address, keeps the other one.
+	// TODO(ask): no reassignment of an address to another mailbox in
+	// the PoC (strictest reading; proposal for SPEC-ISSUES in the report
+	// of task 11b: how a reassignment is logged and applied).
+	// TODO(task-15): the check and the write of addresses.json belong
+	// under one hold of addresses.lock (a store function that takes a
+	// log callback); AddAddress takes the lock itself, so it is released
+	// before AddAddress, and a concurrent "address add" for another
+	// mailbox then finds the log entry and refuses.
+	unlock, err := store.LockPath(st.Path("addresses.lock"))
+	if err != nil {
+		return failAddr(stderr, err, pos[1], addr)
+	}
+	if err := checkAddressFree(st, tl, addr, mbx); err != nil {
+		unlock()
+		return failAddr(stderr, err, pos[1], addr)
+	}
+	_, err = tl.Append(translog.KindAddress, enc)
+	unlock()
+	if err != nil {
+		return failAddr(stderr, err, pos[1], addr)
 	}
 	if _, err := st.AddAddress(addr, mbx); err != nil {
-		return fail(stderr, err)
+		if errors.Is(err, store.ErrExists) {
+			err = fmt.Errorf("Postfach %s: Adresse inzwischen anders zugeordnet; der Logeintrag ist geschrieben, addresses.json unverändert", mbx)
+		}
+		return failAddr(stderr, err, pos[1], addr)
 	}
 	fmt.Fprintf(stdout, "%s -> %s\n", addr, mbx)
+	return 0
+}
+
+// checkAddressFree reports a usageError unless addr is unassigned or
+// assigned to mbx in addresses.json and in every valid entry of the log
+// for it. The message names the mailbox only, never the address.
+func checkAddressFree(st *store.Store, tl translog.Log, addr string, mbx store.ID) error {
+	assigned := usageError{fmt.Sprintf("Postfach %s: Adresse bereits zugeordnet", mbx)}
+	cur, err := st.LoadAddresses()
+	if err != nil {
+		return err
+	}
+	if old, ok := cur[addr]; ok && old != mbx {
+		return assigned
+	}
+	es, err := tl.Lookup(translog.KindAddress, []byte(addr))
+	if err != nil {
+		return err
+	}
+	for _, e := range es {
+		a, err := store.DecodeAddressAssignment(e.Content)
+		if err != nil {
+			return fmt.Errorf("Logeintrag %d: %w", e.Index, err)
+		}
+		if a.MailboxID != mbx {
+			return assigned
+		}
+	}
+	return nil
+}
+
+// failAddr is fail for "address add": the address, as given (raw) or
+// normalized, never appears in the message (task 11b finding 2).
+func failAddr(stderr io.Writer, err error, raw, addr string) int {
+	msg := err.Error()
+	for _, a := range []string{raw, addr} {
+		if a != "" {
+			msg = regexp.MustCompile("(?i)"+regexp.QuoteMeta(a)).ReplaceAllString(msg, "<Adresse>")
+		}
+	}
+	fmt.Fprintln(stderr, "gomail-server:", msg)
+	if errors.As(err, new(usageError)) {
+		return 2
+	}
+	return 1
+}
+
+func logCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("log", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	data := fs.String("data", "", "Datenverzeichnis")
+	pinFile := fs.String("pin", "", "Pin der Plattform (identity-<gen>.pin, nicht im Datenverzeichnis)")
+	pos, err := parse(fs, args)
+	if err != nil || len(pos) != 1 || pos[0] != "repair" || *data == "" || *pinFile == "" {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	st, err := store.Open(*data)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	pin, ids, err := readPin(*pinFile, st.Root)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	// No server may run meanwhile (9.1: the server lock).
+	release, err := st.HoldRoleLock(store.RoleServer)
+	if err != nil {
+		return fail(stderr, fmt.Errorf("Server-Sperre: %w", err))
+	}
+	defer release()
+	if err := translog.RepairTree(translog.Options{Store: st, Identities: ids, Origin: pin.Origin}); err != nil {
+		return fail(stderr, err)
+	}
+	fmt.Fprintln(stdout, "log/tree.rec, Kacheln und keys/ aus den Einträgen und Köpfen neu gebaut")
 	return 0
 }

@@ -93,7 +93,7 @@ type Config struct {
 	Dir string
 	// Pin is the trusted platform identity (2.3).
 	Pin *store.PlatformPin
-	// Log is the transparency log (phase 1: translog.Unverified).
+	// Log is the transparency log (phase 1: translogtest.Unverified).
 	Log translog.Log
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time

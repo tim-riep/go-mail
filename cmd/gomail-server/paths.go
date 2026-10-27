@@ -2,8 +2,8 @@ package main
 
 import "path/filepath"
 
-func absPath(p string) (string, error) { return filepath.Abs(p) }
-
+// isInside reports whether p lies in root or below it; both must be
+// absolute and resolved (resolve).
 func isInside(p, root string) bool {
 	rel, err := filepath.Rel(root, p)
 	return err == nil && filepath.IsLocal(rel)

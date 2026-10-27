@@ -65,17 +65,14 @@ type fileLog struct {
 	// failed does not set it (task 07c finding 3): the next call tries
 	// again, for instance once the index file is writable again (ErrIO).
 	rebuilt *state
+	// signed is the last head SignHead returned (operator log, task 11),
+	// without signatures; in memory only.
+	signed *Head
 }
 
-// operatorLog is the log of the server and the ceremony. SignHead and
-// PublishHead belong to task 11.
+// operatorLog is the log of the server and the ceremony; SignHead and
+// PublishHead are in operator.go (task 11).
 type operatorLog struct{ *fileLog }
-
-// SignHead is built by task 11 (server side).
-func (*operatorLog) SignHead(note.Signer, time.Time) (*Head, error) { return nil, ErrNotImplemented }
-
-// PublishHead is built by task 11 (server side).
-func (*operatorLog) PublishHead(*Head) error { return ErrNotImplemented }
 
 // Open opens (and on first use creates) the log in st (task 07). With
 // Options.Verifier nil it returns an Operator.
@@ -104,6 +101,16 @@ func Open(opts Options) (Log, error) {
 			return nil, err
 		}
 		l.ids = opts.Identities
+		if opts.Origin != "" {
+			if err := checkOrigin(opts.Origin); err != nil {
+				return nil, err
+			}
+		}
+		if len(opts.Witnesses) > 0 || opts.MinWitnesses != 0 {
+			if err := checkWitnessSet(opts.Witnesses, opts.MinWitnesses); err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		v := l.v
 		if l.now == nil {
@@ -278,15 +285,31 @@ func (l *fileLog) sync(s *state, tree treeState) error {
 }
 
 // getCur returns the state of the committed tree.
+//
+// A cached state that the committed tree no longer extends (tree.rec
+// rolled back by one and another entry appended at the same index, doc.go
+// "What write access to log/ gives an attacker") is discarded silently
+// and rebuilt once from its base, the verified reference index of a
+// client (entry 0 for an operator), instead of failing the call once
+// with ErrConsistency (task 11, addendum point 2). Only a state built in
+// this very call that does not match the tree is ErrConsistency.
 func (l *fileLog) getCur(tree treeState) (*state, error) {
-	if l.cur == nil || (l.ref != nil && l.cur.Size < l.ref.Size) {
+	base := func() *state {
 		if l.ref != nil {
-			l.cur = l.ref.clone()
-		} else {
-			l.cur = newState(l.f, l.ids)
+			return l.ref.clone()
 		}
+		return newState(l.f, l.ids)
 	}
-	if err := l.sync(l.cur, tree); err != nil {
+	fresh := false
+	if l.cur == nil || (l.ref != nil && l.cur.Size < l.ref.Size) {
+		l.cur, fresh = base(), true
+	}
+	err := l.sync(l.cur, tree)
+	if err != nil && !fresh {
+		l.cur = base()
+		err = l.sync(l.cur, tree)
+	}
+	if err != nil {
 		l.cur = nil
 		return nil, err
 	}
@@ -470,17 +493,51 @@ func (l *fileLog) write(tree treeState, k Key, enc []byte) (tlog.Hash, error) {
 	old := l.f.reader(tree)
 	hashes, err := tlog.StoredHashes(n, enc, old)
 	if err != nil {
-		return tlog.Hash{}, fmt.Errorf("%w: %v", ErrConsistency, err)
+		return tlog.Hash{}, wrapConsistency(err)
 	}
-	base := tlog.StoredHashCount(n)
-	comb := tlog.HashReaderFunc(func(idx []int64) ([]tlog.Hash, error) {
+	comb := combReader(old, tlog.StoredHashCount(n), &hashes)
+	for _, t := range tlog.NewTiles(TileHeight, n, n+1) {
+		data, err := tlog.ReadTileData(t, comb)
+		if err != nil {
+			return tlog.Hash{}, wrapConsistency(err)
+		}
+		if err := l.f.createOrSame(TilePath(t), data, maxTileFile); err != nil {
+			return tlog.Hash{}, err
+		}
+	}
+	if err := hook("tiles"); err != nil {
+		return tlog.Hash{}, err
+	}
+	if err := l.f.writeKeyFile(k, n); err != nil {
+		return tlog.Hash{}, err
+	}
+	if err := hook("key"); err != nil {
+		return tlog.Hash{}, err
+	}
+	root, err := tlog.TreeHash(n+1, comb)
+	if err != nil {
+		return tlog.Hash{}, wrapConsistency(err)
+	}
+	if err := l.f.writeTree(treeState{Size: n + 1, Hash: root}); err != nil {
+		return tlog.Hash{}, err
+	}
+	if err := hook("tree"); err != nil {
+		return tlog.Hash{}, err
+	}
+	return root, nil
+}
+
+// combReader reads the stored hashes below base from old and those from
+// base on from *hashes (computed in memory, in index order).
+func combReader(old tlog.HashReader, base int64, hashes *[]tlog.Hash) tlog.HashReader {
+	return tlog.HashReaderFunc(func(idx []int64) ([]tlog.Hash, error) {
 		out := make([]tlog.Hash, len(idx))
 		var olds []int64
 		var pos []int
 		for i, x := range idx {
 			switch {
-			case x >= base && x-base < int64(len(hashes)):
-				out[i] = hashes[x-base]
+			case x >= base && x-base < int64(len(*hashes)):
+				out[i] = (*hashes)[x-base]
 			case x >= 0 && x < base:
 				olds = append(olds, x)
 				pos = append(pos, i)
@@ -499,35 +556,17 @@ func (l *fileLog) write(tree treeState, k Key, enc []byte) (tlog.Hash, error) {
 		}
 		return out, nil
 	})
-	for _, t := range tlog.NewTiles(TileHeight, n, n+1) {
-		data, err := tlog.ReadTileData(t, comb)
-		if err != nil {
-			return tlog.Hash{}, fmt.Errorf("%w: %v", ErrConsistency, err)
-		}
-		if err := l.f.createOrSame(TilePath(t), data, maxTileFile); err != nil {
-			return tlog.Hash{}, err
-		}
+}
+
+// wrapConsistency wraps a foreign error (of tlog) with ErrConsistency and
+// returns an error of this package unchanged, so that every error wraps
+// exactly one documented error and its text carries one prefix (task 11,
+// addendum point 3).
+func wrapConsistency(err error) error {
+	if err == nil || isPkgErr(err) {
+		return err
 	}
-	if err := hook("tiles"); err != nil {
-		return tlog.Hash{}, err
-	}
-	if err := l.f.writeKeyFile(k, n); err != nil {
-		return tlog.Hash{}, err
-	}
-	if err := hook("key"); err != nil {
-		return tlog.Hash{}, err
-	}
-	root, err := tlog.TreeHash(n+1, comb)
-	if err != nil {
-		return tlog.Hash{}, fmt.Errorf("%w: %v", ErrConsistency, err)
-	}
-	if err := l.f.writeTree(treeState{Size: n + 1, Hash: root}); err != nil {
-		return tlog.Hash{}, err
-	}
-	if err := hook("tree"); err != nil {
-		return tlog.Hash{}, err
-	}
-	return root, nil
+	return fmt.Errorf("%w: %v", ErrConsistency, err)
 }
 
 // addPending remembers an own append that the reference head does not
@@ -599,7 +638,7 @@ func (l *fileLog) included(r ref, k Key) (*Entry, any, error) {
 	}
 	proof, err := tlog.ProveRecord(t.Size, r.Index, l.f.reader(t))
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrConsistency, err)
+		return nil, nil, wrapConsistency(err)
 	}
 	if err := l.v.CheckInclusion(r.Index, data, proof); err != nil {
 		return nil, nil, err
@@ -912,7 +951,7 @@ func (l *fileLog) Entry(index int64) (*Entry, error) {
 		}
 		proof, err := tlog.ProveRecord(t.Size, index, l.f.reader(t))
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrConsistency, err)
+			return nil, wrapConsistency(err)
 		}
 		if err := l.v.CheckInclusion(index, data, proof); err != nil {
 			return nil, err
@@ -955,7 +994,7 @@ func (l *fileLog) InclusionProof(index, size int64) (tlog.RecordProof, error) {
 	}
 	p, err := tlog.ProveRecord(size, index, l.f.reader(tree))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrConsistency, err)
+		return nil, wrapConsistency(err)
 	}
 	return p, nil
 }
@@ -974,7 +1013,7 @@ func (l *fileLog) ConsistencyProof(from, to int64) (tlog.TreeProof, error) {
 	}
 	p, err := tlog.ProveTree(to, from, l.f.reader(tree))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrConsistency, err)
+		return nil, wrapConsistency(err)
 	}
 	return p, nil
 }
@@ -1000,7 +1039,9 @@ func (vs *verifierSet) Verifier(name string, hash uint32) (note.Verifier, error)
 }
 
 // known returns the verifiers that open heads/<n>.sig: Options.Known
-// (for a client without Known: the pinned witnesses) and the log keys.
+// (for a client without Known: the pinned witnesses; for an operator
+// also Options.Witnesses, so that the lines of witnesses.rec survive
+// operatorHead) and the log keys.
 func (l *fileLog) known(logKeys []LogKey) note.Verifiers {
 	vs := &verifierSet{next: l.opts.Known}
 	for _, k := range logKeys {
@@ -1008,6 +1049,9 @@ func (l *fileLog) known(logKeys []LogKey) note.Verifiers {
 	}
 	if l.v != nil && l.opts.Known == nil {
 		vs.list = append(vs.list, l.v.Witnesses...)
+	}
+	if l.v == nil {
+		vs.list = append(vs.list, l.opts.Witnesses...)
 	}
 	return vs
 }
@@ -1027,16 +1071,25 @@ func (l *fileLog) openHead(size int64, known note.Verifiers) (*Head, error) {
 	return h, nil
 }
 
-// Head (Log.Head).
+// Head (Log.Head). An operator log opens the head line by line and
+// returns a note of only the lines that verified (operatorHead).
 func (l *fileLog) Head() (*Head, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.newestHead(l.logKeys())
 }
 
+// logKeys returns the log keys that open heads: for a client
+// Verifier.LogKeys (as of the last Refresh), for an operator those of the
+// valid ingest certificates of the committed tree (task 11), so that the
+// server needs no log key in Options.Known.
 func (l *fileLog) logKeys() []LogKey {
 	if l.v == nil {
-		return nil
+		s, err := l.view()
+		if err != nil {
+			return nil
+		}
+		return logKeysOf(s, s.Size)
 	}
 	return l.v.LogKeys
 }
@@ -1048,6 +1101,10 @@ func (l *fileLog) newestHead(logKeys []LogKey) (*Head, error) {
 	}
 	if size == 0 {
 		return nil, fmt.Errorf("%w: no published head", ErrStale)
+	}
+	if l.v == nil {
+		// Operator: line by line (task 11b finding 5).
+		return l.operatorHead(size, l.known(logKeys))
 	}
 	return l.openHead(size, l.known(logKeys))
 }
@@ -1069,7 +1126,10 @@ func (l *fileLog) candidates(s *state) []candidate {
 	for _, id := range l.ids {
 		idk[id.Gen] = id.Pub
 	}
-	for g := uint32(len(l.ids)) + 1; g > 1; g++ {
+	// Generations above the pinned list: at most MaxIdentities of them
+	// (task 11, addendum point 4: an explicit bound instead of one that
+	// rests on the successions running out).
+	for n, g := 0, uint32(len(l.ids))+1; n < MaxIdentities && g > 1; n, g = n+1, g+1 {
 		if sc := s.Succs[g]; sc != nil {
 			idk[g] = sc.Pub
 			continue
@@ -1169,11 +1229,16 @@ func (l *fileLog) audit(s *state, h *Head) error {
 	for i := s.Size; i < h.Size; i++ {
 		data, err := l.f.readEntry(i)
 		if err != nil {
-			return fmt.Errorf("%w: entry %d of the head: %v", ErrConsistency, i, err)
+			if errors.Is(err, ErrNotInLog) {
+				return fmt.Errorf("%w: entry %d of the head is missing", ErrConsistency, i)
+			}
+			// readEntry wraps every other failure with ErrConsistency
+			// itself (task 11, addendum point 3: one prefix).
+			return err
 		}
 		proof, err := tlog.ProveRecord(h.Size, i, rd)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrConsistency, err)
+			return wrapConsistency(err)
 		}
 		if err := CheckRecordProof(proof, h.Size, h.Hash, i, LeafHash(data)); err != nil {
 			return err
@@ -1206,7 +1271,7 @@ func (l *fileLog) Refresh(now time.Time) (*Head, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.v == nil {
-		return l.newestHead(nil)
+		return l.newestHead(l.logKeys())
 	}
 	err := l.retry(func() error { return l.refresh(now) })
 	return l.v.Last, err
@@ -1233,6 +1298,11 @@ func (l *fileLog) refresh(now time.Time) error {
 		if err != nil {
 			return err
 		}
+		if l.ownErr != nil {
+			// Not resolved by the smaller reference tree: nothing changes
+			// (task 11, addendum point 1).
+			return l.ownErr
+		}
 		v.Pending = keep
 		return l.fresh(now)
 	}
@@ -1249,7 +1319,7 @@ func (l *fileLog) refresh(now time.Time) error {
 		}
 		if v.Last != nil {
 			if proof, err = tlog.ProveTree(h.Size, v.Last.Size, l.f.reader(treeState{Size: h.Size, Hash: h.Hash})); err != nil {
-				return fmt.Errorf("%w: %v", ErrConsistency, err)
+				return wrapConsistency(err)
 			}
 		}
 		cands = mergeCandidates(cands, l.candidates(ns))
@@ -1264,6 +1334,13 @@ func (l *fileLog) refresh(now time.Time) error {
 	keep, err := l.checkCovered(treeState{Size: h.Size, Hash: h.Hash})
 	if err != nil {
 		return err
+	}
+	if l.ownErr != nil {
+		// Task 11, addendum point 1 (strictest reading): while an own
+		// entry found replaced in a larger verified tree is unresolved, a
+		// head that passed CheckHead and the Pending check is not taken
+		// over either: Last, LogKeys, Pending and the audit index stay.
+		return l.ownErr
 	}
 	if ns != l.ref {
 		if err := l.saveIndex(ns); err != nil {

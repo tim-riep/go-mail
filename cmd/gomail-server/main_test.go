@@ -68,7 +68,7 @@ func TestCommands(t *testing.T) {
 	ctx2, cancel := context.WithCancel(ctx)
 	done := make(chan int)
 	go func() {
-		done <- run(ctx2, []string{"serve", "--data", data, "--listen", "127.0.0.1:0", "--ingest-key", ingestKey, "--insecure-no-log"}, &out, &errb, func(string) { cancel() })
+		done <- run(ctx2, []string{"serve", "--data", data, "--listen", "127.0.0.1:0", "--ingest-key", ingestKey, "--insecure-no-log"}, &out, &errb, func(string, string) { cancel() })
 	}()
 	if code := <-done; code != 0 {
 		t.Fatalf("serve: %d %s", code, errb.String())

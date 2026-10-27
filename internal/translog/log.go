@@ -53,6 +53,37 @@ type Operator interface {
 	// server signs with generation g+1 and never again with g, because
 	// clients judge the signing generation against the head's own time
 	// line (Verifier.LogKeys).
+	//
+	// Built by task 11, in this order under log/lock:
+	//
+	//  1. Options.Origin is set (ErrHead); the committed size n of
+	//     tree.rec is at least 1 (ErrNotInLog: a head of the empty log is
+	//     never signed); no entries/<n+1>.rec and no head in heads/ above
+	//     n (ErrConsistency: tree.rec rolled back, task 03d finding 3);
+	//  2. the base is the newest published head (heads/, its text taken
+	//     from the lines that verify with a logged ingest key; a file
+	//     without such a line is ErrConsistency) or, when larger, the
+	//     last head this process signed; the committed tree must extend
+	//     both (root hash of their size, ErrConsistency) and now must not
+	//     lie before their times (ErrHead: the server's clock went back);
+	//  3. the root hash of size n is recomputed from the entries after
+	//     the base (tlog.StoredHashes over entries/<i>.rec, the hashes
+	//     below the base read from tiles verified against the base's
+	//     hash) and must equal tree.rec (ErrConsistency);
+	//  4. the entries after the base, the tiles that changed, tree.rec
+	//     and their directories are synced (fsync, task 07 finding Q10
+	//     (2)): a head is signed only over a durable tree;
+	//  5. signer must be the ingest generation whose certificate is a
+	//     valid entry of the tree and Covers now (ErrHead otherwise; the
+	//     signature is checked with the certified key after signing).
+	//
+	// The validity rules run as for every Check method (the operator's
+	// state of the committed tree); the entries from the newest
+	// published head on that failed them are reported with an
+	// *InvalidEntriesError beside the head. The process remembers the
+	// returned head as the last signed one, in memory only: after a
+	// restart the base is the newest published head (doc.go "Tasks"
+	// point 11, Q10 (4)).
 	SignHead(signer note.Signer, now time.Time) (*Head, error)
 
 	// PublishHead writes h to heads/<size>.sig under log/lock. h must
@@ -73,7 +104,32 @@ type Operator interface {
 	// a line by an unknown key, is dropped and never stored (task 03b,
 	// finding A2-10: one invalid line by a known key makes the whole
 	// note unopenable, see OpenHead).
+	//
+	// Built by task 11, under log/lock: the text of h.Note must be the
+	// text of h (ErrHead) with Options.Origin (ErrHead); its size at most
+	// the committed size and its hash the root of that size of the
+	// committed tree (ErrConsistency: the server publishes only heads of
+	// its own tree); no larger head in heads/ (ErrConsistency) and a time
+	// not before the newest one (ErrHead). Every signature line is
+	// verified on its own (one note.Open per line), so that an invalid
+	// line is dropped instead of failing the note; the log line must
+	// verify with the ingest generation whose certificate is a valid
+	// entry of the tree of h and Covers its time (LogKey.Covers, the
+	// same rule as Verifier.CheckHead), the cosignatures with
+	// Options.Witnesses; the quorum counts distinct witnesses
+	// (Options.MinWitnesses). A stored head of the same size whose lines
+	// do not give a log signature over a head text is ErrConsistency.
 	PublishHead(h *Head) error
+
+	// LogKeys returns a LogKey for every valid ingest certificate of the
+	// committed tree (Logged set, Until from the valid_from of the next
+	// generation's certificate when that is a valid entry): the keys
+	// PublishHead chooses the covering generation from. The log side of
+	// the server opens POST /gomail/log/cosign bodies with them (task 11b
+	// finding 7: a published head signed by the generation before an
+	// ingest rotation). Whether a line is by the generation that covers
+	// the head time is decided by PublishHead, not by this list.
+	LogKeys() ([]LogKey, error)
 }
 
 // Options configures a log on the data directory.
@@ -98,9 +154,12 @@ type Options struct {
 	//     only in the tree of that very head. Whether the signing
 	//     generation was valid at the head's time is decided by
 	//     CheckHead (LogKey.Covers), not by Known.
-	//   - Operator: the log key of every ingest generation in platform/
-	//     and the witnesses of witnesses.rec, read at Open (the server
-	//     restarts with the new ingest key after a rotation anyway).
+	//   - Operator: the witnesses of witnesses.rec, read at Open (the
+	//     server restarts with the new ingest key after a rotation
+	//     anyway). Since task 11 the operator log adds the log key of
+	//     every valid ingest certificate of the committed tree itself
+	//     (Head, Refresh), so Known needs no log key; one given here
+	//     opens heads as well.
 	Known note.Verifiers
 	// Identities anchors the validation of platform entries of an
 	// operator log (doc.go "Validity rules"), in the form of pin field 8
@@ -141,6 +200,24 @@ type Options struct {
 	// another identity list (a new pin) or for another head than Last.
 	// Required for a client log, ignored for an operator log.
 	IndexFile string
+	// Origin is the log origin of the operator's pin (pin field 4, doc.go
+	// "Heads"): SignHead signs heads with it and PublishHead and
+	// RepairTree accept only heads with it (ErrHead). Task 11: required
+	// for SignHead and PublishHead (ErrHead without it), checked with
+	// CheckOrigin at Open when set; the ceremony, which signs no heads,
+	// leaves it empty. Ignored for a client log, whose origin is
+	// Verifier.Origin.
+	Origin string
+	// Witnesses and MinWitnesses are the server's working copy
+	// platform/witnesses.rec (package witness, task 11): the note
+	// verifiers of its witnesses, each built with NewWitnessVerifier
+	// (names unique and not LogSignerName, keys unique), and the number
+	// of distinct cosignatures PublishHead requires. Open of an operator
+	// log refuses a set that violates CheckQuorum (ErrWitness); without
+	// witnesses PublishHead returns ErrWitness. Ignored for a client log,
+	// whose witnesses come from its pin (Verifier.Witnesses).
+	Witnesses    []note.Verifier
+	MinWitnesses int
 	// Now is the injected clock. For a client log it takes precedence
 	// over Verifier.Now and Open copies it into the Verifier (task 07b
 	// finding 4), so that CheckHead, Fresh and the Pending times use one

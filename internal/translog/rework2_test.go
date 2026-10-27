@@ -135,13 +135,11 @@ func TestOwnErrCleared(t *testing.T) {
 		// gets the next index; the same head (no new one) is then taken
 		// over and the verdict is cleared.
 		v.Pending = nil
+		// The client's cached state of the committed tree still holds the
+		// own entry at i; the first Append after the rollback discards it
+		// silently and rebuilds it from the reference index (task 11,
+		// addendum point 2): no ErrConsistency, no second attempt.
 		j, err := c.Append(KindUser, u.rec(t, 1))
-		if errors.Is(err, ErrConsistency) {
-			// The client's cached state of the committed tree still holds
-			// the own entry at i; the first Append after the rollback
-			// discards it, the next one starts from the reference index.
-			j, err = c.Append(KindUser, u.rec(t, 1))
-		}
 		if err != nil || j != i+1 {
 			t.Fatalf("append again: %d %v", j, err)
 		}

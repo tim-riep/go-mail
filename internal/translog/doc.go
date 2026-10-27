@@ -468,9 +468,13 @@
 //     they become stale after 24 hours and stop (ErrStale).
 //   - write a signature line with the name and key hash of a pinned
 //     witness but an invalid signature into heads/<n>.sig: the head no
-//     longer opens (note.Open fails on it). Denial of service only, as
-//     deleting the file is; the server never stores such a line itself
-//     (finding A2-10).
+//     longer opens for clients (note.Open fails on it). Denial of
+//     service only, as deleting the file is; the server never stores
+//     such a line itself (finding A2-10). The operator log opens heads/
+//     line by line (Head, Refresh, task 11b finding 5) and hands on only
+//     the lines that verified, so the server keeps serving the head to
+//     its witnesses, and the next cosignature merged by PublishHead
+//     writes the file without the line.
 //   - write heads without the log key: no valid log signature (ErrHead).
 //     With the log key (a compromised server) it can sign any head, but
 //     clients accept only heads cosigned by MinWitnesses witnesses, and
@@ -534,7 +538,7 @@
 // refuses (no quorum: ErrWitness; another origin, a time in the future:
 // ErrHead) is never used for this check, so it cannot make the client
 // believe that its entry was replaced; Refresh returns the error of
-// CheckHead and nothing else changes.
+// audit or CheckHead and nothing else changes.
 //
 // Pending entry after a rollback by one (see "What write access to log/
 // gives an attacker"): tree.rec was set back before a head covered the
@@ -544,11 +548,18 @@
 // old reference head and the client log remembers the verdict:
 // CheckFresh and Refresh report it until a Refresh passes the Pending
 // check again against a verified tree at least as large, with or
-// without a new head. The caller (task 14) removes the entry from
-// Verifier.Pending, appends the record again (the key of the removed
-// entry is free again, so the record gets a new index and a new Pending
-// entry) and calls Refresh; ErrDuplicate on that Append means that the
-// other entry took the key, which the caller reports.
+// without a new head. Until then Refresh takes over no head, not even
+// one that passed CheckHead and the Pending check but is smaller than
+// the tree in which the entry was found replaced (task 11, strictest
+// reading): it returns ErrConsistency with the old reference head. The
+// caller (task 14) removes the entry from Verifier.Pending, appends the
+// record again (the key of the removed entry is free again, so the
+// record gets a new index and a new Pending entry) and calls Refresh;
+// ErrDuplicate on that Append means that the other entry took the key,
+// which the caller reports. The client log's cached state of the
+// committed tree still holds the removed entry; that Append discards it
+// silently and rebuilds it once from the audit index (task 11), so the
+// caller sees no ErrConsistency for it.
 //
 // A pending entry is withheld when a newer verified head appeared after
 // the append that does not cover it: the reference head has
@@ -850,7 +861,10 @@
 // --interval of "gomail-witness serve" (package witness; 9.2 names only
 // --log and --key), and the flag --pin <file> of gomail-server, the pin
 // whose identity list anchors the server's validation
-// (Options.Identities, finding 03d-2).
+// (Options.Identities, finding 03d-2). Task 11 adds the flags
+// --log-listen <addr> and --head-interval <duration> of "gomail-server
+// serve" and the command "gomail-server log repair --data <dir> --pin
+// <file>" (RepairTree).
 //
 // # Tasks
 //
@@ -868,13 +882,19 @@
 //     (task 07 finding Q10 (1), (3), (6)). Built in impl.go (Open, the
 //     client and the operator log), state.go (validity rules, audit
 //     index as JSON in Options.IndexFile) and files.go (log/); SignHead
-//     and PublishHead of the operator log return ErrNotImplemented until
-//     task 11. Superseded partial tiles are not deleted.
+//     and PublishHead of the operator log returned ErrNotImplemented
+//     until task 11. Superseded partial tiles are not deleted.
 //   - 08: witness (package witness).
 //   - 11: Operator.SignHead and PublishHead in the server, HTTP handlers
 //     of package witness, re-signing every HeadInterval, the repair of
-//     tree.rec from entries and heads (finding 03d-3). Duties from Q10
-//     (QUESTIONS.md), binding for task 11:
+//     tree.rec from entries and heads (finding 03d-3). Built by task 11:
+//     operator.go (SignHead, PublishHead, RepairTree,
+//     InvalidEntriesError; Options.Origin, Witnesses and MinWitnesses),
+//     the HTTP side in the new package loghttp instead of package
+//     witness (candidate in memory, signing cadence, handlers),
+//     "gomail-server serve --pin --log-listen --head-interval" and
+//     "gomail-server log repair". Duties from Q10 (QUESTIONS.md),
+//     binding for task 11:
 //     (2) SignHead signs a tree only after it has itself synced log/,
 //     log/entries/ and the tree files (fsync of the files and the
 //     directories): a tree.rec that is visible is not yet durable, and
@@ -888,12 +908,61 @@
 //     ceremony.Publish and before the server restarts, so that the
 //     server judges the new successions and certificates against the
 //     same identity list as the clients.
+//     Task 11b (findings of the verification of task 11): SignHead has
+//     the injection point "sync" between the sync of the tree and the
+//     signature, and the synced paths are pinned by a test; "gomail-server
+//     address add" checks under addresses.lock, before Append, that the
+//     address is free or assigned to the same mailbox in addresses.json
+//     and in the log (no reassignment in the PoC); Head and Refresh of
+//     the operator log open heads/ line by line; Operator.LogKeys gives
+//     the log side the logged ingest keys for /cosign bodies of a head
+//     signed before a rotation; pin and data directory are compared with
+//     symbolic links resolved. Recorded readings, unchanged by 11b:
+//     (a) RepairTree fails closed on every file in heads/ that it cannot
+//     read as a head of the log (no log signature by a valid ingest
+//     certificate, another size or origin, a root the entries do not
+//     give); the operator deletes such a file and repairs again;
+//     (b) PublishHead does not check the head time against the server's
+//     own clock: SignHead signs with the injected time, and a head time
+//     in the future is refused by the witness (its rule 2) and by the
+//     client (MaxClockSkew in CheckHead);
+//     (c) RepairTree checks the log signature of a head with every
+//     valid ingest certificate, not with the generation that covers the
+//     head time: the covering generation is a rule of PublishHead and of
+//     the client (CheckHead), and a head that violates it is refused
+//     there, not repaired;
+//     (d) POST /gomail/log/cosign (package loghttp) accepts several
+//     valid witness cosignatures in one body, a milder reading than the
+//     "exactly two lines" of the witness program; every line is verified
+//     on its own and only verified lines are kept;
+//     (e) package loghttp has timeouts and size limits but no limit on
+//     connections and no rate limit (10.2, before production).
 //   - 10: the ceremony (package ceremony, api.go).
 //   - 14: the client order for first entries (Register and
 //     CreateMailbox: client directory, Append, then data directory; "Who
 //     writes", findings 03c-1, 03d-4 and 03d-5), logging the signer's
 //     user.rec for an unlogged epoch.rec (finding 03c-2), rebuilding the
 //     audit index on a new pin (finding 03d-2), the client sites below.
+//     Fixed for task 14 by task 11 (addendum of task 11):
+//     (a) the function unloggable the client passes to
+//     store.ReplaceEpoch runs under the mailbox lock that ReplaceEpoch
+//     holds (lock order mailbox, log: Append takes log/lock inside) and
+//     reports errors.Is(err, ErrOrder) for err = Append(KindEpoch, old);
+//     before it decides, it runs steps 1 and 2 of "Unlogged epoch.rec":
+//     on ErrUnloggedSigner (checked first, it is an ErrPrerequisite) it
+//     appends users/<signer>/user.rec of the data directory and then old
+//     again, on any other ErrPrerequisite it appends the missing earlier
+//     epochs of the mailbox from store and then old again; a signer's
+//     user append that fails with ErrOrder or ErrPrerequisite, or that
+//     yields fewer than signer_gen generations, makes old unloggable
+//     (true), every other error false (fail closed: nothing replaced);
+//     (b) a Pending entry found replaced after a rollback by one
+//     (Refresh: ErrConsistency, "Withheld entries"): the caller removes
+//     it from Verifier.Pending, persists state.json, appends the record
+//     again (new index, new Pending entry) and calls Refresh; Refresh
+//     takes over no head until then;
+//     (c) after every Refresh the client calls CheckFresh, whatever
+//     Refresh returned, before it relies on the log (Log.Refresh).
 //   - 15: the server, ingest, ceremony and store sites below; the
 //     server's pin (--pin, Options.Identities, finding 03d-2).
 //
@@ -922,7 +991,13 @@
 // in task 03 and ORCHESTRATION.md counted mentions in the documents as
 // well (HANDOFF.md, PHASE2-KLAERUNGEN.md K2 rule 4, ORCHESTRATION.md).
 // Wave 1 tasks running in parallel (01, 02) may add sites; they are
-// resolved by the same task as their neighbours.
+// resolved by the same task as their neighbours. At the base of task 11
+// (commit ad67baf) the count is 31: client tasks merged after task 07
+// added internal/client/recovery.go 1, members.go 2 and one more in
+// mailbox.go (internal/client 14). Task 11 resolves the site in
+// cmd/gomail-server/main.go ("address add" appends with
+// Append(KindAddress) to the operator log of --pin before AddAddress;
+// only --insecure-no-log still uses Unverified until task 15): 30 sites.
 //
 //	file, function                         check today            replaced by (new interface)                          task
 //	client/client.go Open                  CheckFresh             Refresh(now), head into state.json, CheckFresh       14
@@ -940,7 +1015,7 @@
 //	ingest/delivery.go userKey             CheckUser              CheckUser (operator log)                             15
 //	ingest/delivery.go userKey             CheckGeneration        CheckGeneration (operator log)                       15
 //	ingest/delivery.go userKey             CheckRevokedSignature  CheckRevokedSignature (operator log)                 15
-//	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc)                             15
+//	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc) (done by task 11)            11
 //	ceremony/ceremony.go InitDev           AppendPlatform         Append(KindPlatform, data); real ceremony: Publish   15 (10)
 //	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15
 //

@@ -466,13 +466,28 @@ func (v *Verifier) CheckHead(h *Head, proof tlog.TreeProof) error {
 // log's name, keys unique; ErrWitness), the identity list (ErrPin) and
 // the origin (ErrHead).
 func (v *Verifier) checkConfig() error {
-	if err := CheckQuorum(v.MinWitnesses, len(v.Witnesses)); err != nil {
+	if err := checkWitnessSet(v.Witnesses, v.MinWitnesses); err != nil {
 		return err
 	}
-	if len(v.Witnesses) > MaxWitnesses {
+	if err := CheckIdentities(v.Identities, v.Identity); err != nil {
+		return err
+	}
+	return checkOrigin(v.Origin)
+}
+
+// checkWitnessSet checks a witness set with its quorum (ErrWitness):
+// CheckQuorum, at most MaxWitnesses, every verifier built with
+// NewWitnessVerifier, names unique and not LogSignerName, keys unique.
+// The client's pinned set (Verifier) and the operator's working copy
+// (Options.Witnesses, task 11) follow the same rules.
+func checkWitnessSet(ws []note.Verifier, min int) error {
+	if err := CheckQuorum(min, len(ws)); err != nil {
+		return err
+	}
+	if len(ws) > MaxWitnesses {
 		return fmt.Errorf("%w: too many witnesses", ErrWitness)
 	}
-	for i, w := range v.Witnesses {
+	for i, w := range ws {
 		if w == nil || w.Name() == LogSignerName {
 			return fmt.Errorf("%w: invalid witness", ErrWitness)
 		}
@@ -480,7 +495,7 @@ func (v *Verifier) checkConfig() error {
 		if !ok {
 			return fmt.Errorf("%w: witness verifier not built with NewWitnessVerifier", ErrWitness)
 		}
-		for _, o := range v.Witnesses[:i] {
+		for _, o := range ws[:i] {
 			if o.Name() == w.Name() {
 				return fmt.Errorf("%w: witness names must be unique", ErrWitness)
 			}
@@ -489,10 +504,7 @@ func (v *Verifier) checkConfig() error {
 			}
 		}
 	}
-	if err := CheckIdentities(v.Identities, v.Identity); err != nil {
-		return err
-	}
-	return checkOrigin(v.Origin)
+	return nil
 }
 
 // Fresh reports ErrStale unless Last is set and now - Last.Time <=
