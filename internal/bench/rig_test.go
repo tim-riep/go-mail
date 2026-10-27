@@ -94,6 +94,14 @@ func (r *rig) ingestConfig() ingest.Config {
 // Only one ingest per data directory and process (server lock, 9.1).
 func (r *rig) startIngest(tb testing.TB) {
 	tb.Helper()
+	r.startIngestWith(tb, true)
+}
+
+// startIngestWith is startIngest; without worker, ingest queues the
+// headers but turns none into a term list before Flush or Close, so
+// every mail keeps its marker in pending/ until then.
+func (r *rig) startIngestWith(tb testing.TB, worker bool) {
+	tb.Helper()
 	in, err := ingest.New(r.ingestConfig())
 	if err != nil {
 		tb.Fatal(err)
@@ -102,7 +110,9 @@ func (r *rig) startIngest(tb testing.TB) {
 		in.Close()
 		tb.Fatal(err)
 	}
-	in.Start()
+	if worker {
+		in.Start()
+	}
 	r.in = in
 	tb.Cleanup(func() { r.stopIngest(tb) })
 }

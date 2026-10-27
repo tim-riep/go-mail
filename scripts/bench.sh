@@ -10,7 +10,9 @@
 #   -short       quick run: 20 iterations, 500 mails for Sync, 100 for
 #                the memory load (the numbers only check the harness)
 #   -count N     run every benchmark N times; the table shows the mean
-#   -benchtime T benchtime of the throughput and Sync benchmarks (default 1s)
+#   -benchtime T benchtime of the throughput, Sync and Index benchmarks
+#                (default 1s); the memory and the segment size benchmarks
+#                always run once per -count (1x)
 #   -dir DIR     temporary directory of the benchmarks (TMPDIR); its file
 #                system is part of the result
 #   -o FILE      write the Markdown table to FILE as well
@@ -104,7 +106,10 @@ run() {
 run "$benchtime" '^BenchmarkReceive$'
 run "$benchtime" '^BenchmarkSync$'
 run "$memtime" '^BenchmarkServerMemory$'
-run "$benchtime" '^BenchmarkIndex'
+run "$benchtime" '^BenchmarkIndex$'
+# One operation of BenchmarkIndexSegments is the whole procedure (sizes,
+# not times), as one of BenchmarkServerMemory is the whole load.
+run "$memtime" '^BenchmarkIndexSegments$'
 
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "$(git status --porcelain -- . 2>/dev/null)" ]; then commit="$commit (mit lokalen Änderungen)"; fi
@@ -186,11 +191,15 @@ render() {
 		print "Punkte nach docs/tasks/12-benchmarks.md: 1 Empfang, 2 Indexierung, 3 Indexsegmente, 4 Sync, 5 Speicher des Servers (base vor, peak während, rest nach der Last)."
 		print ""
 		print "* Punkt 1 in drei Betriebsarten je Größe und Verbindungszahl: `enc` = Ingest vollständig; `proto` = gleiches Ablageprotokoll ohne Verschlüsselung, samt Platzprüfung (`Accepting()`, zwei statfs je Mail) und Worker (je 100 Mails eine Begriffsliste in der Größe, die Ingest für die Größenklasse schreibt, danach Löschen der 100 Marker); `plain` = Minimal-Senke (Protokollkosten = proto − plain)."
-		print "* Verschlüsselungskosten = enc − proto. Darin stecken außer der Verschlüsselung: Signaturen, Selbstprüfung, Auswertung der Kopfzeilen, Adressauflösung (`addresses.json`), Lesen von `mailbox.rec` und der Epochen samt Kettenprüfung, Termzerlegung im Worker. Die Begriffslisten sind in beiden Betriebsarten enthalten, soweit der Worker sie im Zeitfenster schreibt (bei b.N ≥ 100); die zuletzt offene Liste schreiben beide erst nach dem Zeitfenster."
+		print "* Verschlüsselungskosten = enc − proto. Darin stecken außer der Verschlüsselung: Signaturen, Selbstprüfung, Auswertung der Kopfzeilen, Adressauflösung (`addresses.json`), Lesen von `mailbox.rec`, Kettenprüfung über Cache (Hashvergleich von `epoch.rec` und `user.rec`, je Mail zweimal), Hash über den Mailstrom, Termzerlegung im Worker. Die Begriffslisten sind in beiden Betriebsarten enthalten, soweit der Worker sie im Zeitfenster schreibt (bei b.N ≥ 100); die zuletzt offene Liste schreiben beide erst nach dem Zeitfenster."
 		print "* Bei `enc` wächst das Postfachverzeichnis während des Laufs (und über die Läufe einer Größe hinweg), bei `proto` ebenfalls bis zum Ende des Laufs: `mail.gml`, `meta.gml` und die Begriffslisten löscht `proto` erst nach dem Zeitfenster."
 		print "* Lockerungen gegenüber 5.1: MaxConns 64 statt 20, MaxConnsPerIP 64 statt 5, kein Mail-Limit je IP und Stunde (Benchmark-Server); MinFree 1 % statt 10 % (Ingest und `proto`; die gemeinsam genutzte Maschine hat weniger freien Platz, die Grenze wird nicht gemessen, statfs läuft trotzdem); GOMAIL_BENCH_MEM_CONNS ist auf MaxConns (64) begrenzt."
+		print "* Punkte 1 und 5: Uhr eingefroren (kein Alters-Flush), Logausgabe verworfen (Server und Ingest); der Worker schreibt Begriffslisten nur nach je 100 Mails und beim Flush. Bei den Punkten 2 bis 4 stellt die Zustellung des Korpus (Vorbereitung, nicht gemessen) die Uhr tageweise vor, dort schreibt der Worker auch nach Alter."
 		print "* Der Lastgenerator (net/smtp) läuft im selben Prozess wie der Server; bei Punkt 5 zählen seine Verbindungspuffer mit."
-		print "* Punkt 5: jeder Lauf (jede Größe, jede Wiederholung bei -count) läuft in einem eigenen Kindprozess; Grund- und Ruhewert werden gleich vorbereitet (1 s Leerlauf, dann debug.FreeOSMemory(), dann Messung). Die Grundwerte getrennter Läufe streuen um höchstens 5 MiB (Rauschanteil, geprüft von TestServerMemoryRuns; Sys wächst in Schritten von 4 MiB)."
+		print "* Punkt 2: `client.Index` über 1000 Mails des Korpus (10 Absender, 3 Empfänger, 30 Tage, 20 % Anhänge, Threads), je Durchlauf; vor jedem Durchlauf werden außerhalb der Zeitmessung die Segmente gelöscht und pending/ so wiederhergestellt, wie Ingest es hinterließ. `terms` = Begriffslisten des Workers (je Liste bis 100 Mails, eine Datei); `unprocessed` = nur Marker (eine Datei je Mail; der Worker lief bei der Zustellung nicht, kein Flush), Index liest und prüft dann die Metadaten jeder Mail und löscht jede Markerdatei einzeln (RemoveDurable, ein fsync je Mail). allocs/op und B/op gelten je Durchlauf, allocs/mail und B/mail je Mail."
+		print "* Punkt 3: Korpus mit 1000 Mails im November 2026 (eine Epoche), in 15 Teilen zugestellt, nach jedem Teil `client.Index` (ein Segment je Lauf); gezählt werden die Bytes aller `index/<n>/*.gml` über `store`. B-unmerged = 15 Segmente mit allen 1000 Mails, B/segment = deren Mittel; Lauf 16 indexiert die Begriffslisten von Teil 1 noch einmal (dieselben Mails), sein Segment ist das 16., und der Client fasst ab 16 Segmenten zusammen: B-merged und segments-merged danach (doppelte Mail-IDs entfallen). Die Größen hängen nicht von der Maschine ab."
+		print "* Punkt 4: `Sync` hält den Epochenvorrat und ruft `client.Index` auf. index=off = pending/ leer (alles schon indexiert); index=on = pending/ wie nach der Zustellung (Begriffslisten aller Mails), vor jedem Sync außerhalb der Zeitmessung wiederhergestellt, Segmente gelöscht."
+		print "* Punkt 5: jeder Lauf (jede Größe, jede Wiederholung bei -count) läuft in einem eigenen Kindprozess; Grund- und Ruhewert werden gleich vorbereitet (1 s Leerlauf, dann debug.FreeOSMemory(), dann Messung). Die Grundwerte getrennter Läufe streuen um höchstens 5 MiB (Rauschanteil, geprüft von TestServerMemoryRuns; Sys wächst in Schritten von 4 MiB); der VmRSS-Grundwert von Lauf 2 liegt höchstens 1 MiB über dem von Lauf 1 (getrennte Prozesse streuen um weniger als 0,2 MiB)."
 		if (count > 1) print "* Jede Zahl ist der Mittelwert aus " count " Läufen."
 		print ""
 		print "| Punkt | Benchmark | Messwerte | Befehl zum Nachmessen |"
@@ -206,9 +215,6 @@ render() {
 			cmd = envfor(s) "go test -run '\''^$'\'' -bench '\''" regex(s) "'\'' -benchtime=" btof[s] " ./internal/bench"
 			printf "| %s | %s | %s | `%s` |\n", point(s), disp, vals, cmd
 		}
-		print "| 2 | Index/pending=terms, Index/pending=unprocessed | ausstehend (µs/Mail, allocs/op) | `client.Index` entsteht mit Auftrag 09; Nachtrag, sobald er gemergt ist |"
-		print "| 3 | IndexSegments/mails=1000 | ausstehend (Bytes je Segment und zusammengefasst) | wie Punkt 2 |"
-		print "| 4 | Sync/mails=…/index=on | ausstehend (s/sync) | wie Punkt 2 |"
 	}' "$rawfile"
 }
 

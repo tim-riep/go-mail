@@ -3,6 +3,7 @@ package bench
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/ingest"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 )
@@ -70,6 +72,17 @@ const rssCarryTolMiB = 1
 // of the run before within tol MiB: the sign of a run that started from
 // the state the run before left.
 func carriesPeak(base, peak, tol float64) bool { return math.Abs(base-peak) <= tol }
+
+// rssRiseTolMiB bounds the rise of the base VmRSS from run 1 to run 2 of
+// TestServerMemoryRuns: the bases of separate processes spread by less
+// than 0.2 MiB (11.55, 11.40 and 11.51 MiB were read), while a run that
+// shared the process of the run before started 1.5 MiB higher (11.88,
+// then 13.40 MiB).
+const rssRiseTolMiB = 1
+
+// risesAbove reports whether base2, the base value of a run, lies more
+// than tol MiB above base1, the base of the run before.
+func risesAbove(base1, base2, tol float64) bool { return base2-base1 > tol }
 
 // memResult holds the readings of one load run.
 type memResult struct {
@@ -259,10 +272,20 @@ func TestServerMemory(t *testing.T) {
 
 // TestServerMemoryRuns runs BenchmarkServerMemory as go test -count=3
 // -benchtime=1x with 20 mails of 1 MiB in a child process and checks
-// that no run carries the memory of the one before: the three base
-// values differ by at most memBaseNoiseMiB, and the base of run 2 is not
-// the peak of run 1 (HeapInuse and Sys exactly, VmRSS within
-// rssCarryTolMiB).
+// that no run carries the memory of the one before.
+//
+// What the checks catch: Sys never shrinks within a process, so a run
+// that shared the process of the run before has the Sys peak of that run
+// as its base, exactly (21.18 MiB both were read); carriesPeak with
+// tolerance 0 catches it. That is the check that detects carrying.
+// HeapInuse and VmRSS go down again after a run (debug.FreeOSMemory), so
+// a carried base lies only somewhat above a clean one, far below the peak
+// of the run before (VmRSS 13.40 MiB after a peak above 20 MiB): the peak
+// comparison does not see it, and the spread of the three bases
+// (memBaseNoiseMiB) only from 5 MiB on. For VmRSS the rise of the base
+// from run 1 to run 2 is bounded tighter, by rssRiseTolMiB (1 MiB):
+// separate processes spread by less than 0.2 MiB, a carried run rose by
+// 1.5 MiB. A carried HeapInuse below 5 MiB goes unnoticed.
 func TestServerMemoryRuns(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkServerMemory$/^size=1MiB$",
 		"-test.benchtime=1x", "-test.count=3")
@@ -298,6 +321,9 @@ func TestServerMemoryRuns(t *testing.T) {
 				runs[1][m+"-base-MiB"], runs[0][m+"-peak-MiB"], tol)
 		}
 	}
+	if b1, b2 := runs[0]["rss-base-MiB"], runs[1]["rss-base-MiB"]; risesAbove(b1, b2, rssRiseTolMiB) {
+		t.Errorf("rss-base-MiB rose from %.2f in run 1 to %.2f in run 2, more than %d MiB", b1, b2, rssRiseTolMiB)
+	}
 	// The load must show above the noise, or the checks above say
 	// nothing: a base that carried the peak of the run before would lie
 	// outside the noise.
@@ -306,26 +332,32 @@ func TestServerMemoryRuns(t *testing.T) {
 	}
 }
 
-// TestCarriesPeak checks the check of TestServerMemoryRuns: a carried
-// peak (VmRSS bases of 11.88, 13.40 and 13.33 MiB were read in runs
-// that shared a process) need not be the same number as the peak of the
-// run before, so VmRSS is compared within rssCarryTolMiB; readings of
-// separate processes pass. The peaks below are examples.
+// TestCarriesPeak checks the checks of TestServerMemoryRuns with readings
+// of this load (20 mails of 1 MiB over 20 connections; separate
+// processes: VmRSS bases 11.70, 11.79 and 11.73 MiB after a peak of 22.86
+// MiB, Sys bases 12.27 and 12.28 MiB after a peak of 21.18 MiB) and of
+// runs that shared a process (VmRSS bases 11.88, 13.40 and 13.33 MiB, Sys
+// bases 12.66, 21.18 and 25.18 MiB). A carried Sys is caught by the peak
+// comparison, a carried VmRSS only by the rise from run 1 to run 2.
 func TestCarriesPeak(t *testing.T) {
 	for _, c := range []struct {
-		base, peak, tol float64
-		want            bool
+		name               string
+		base1, base2, peak float64 // base of run 1 and 2, peak of run 1
+		tol                float64 // tolerance of the peak comparison
+		carried, rises     bool
 	}{
-		{13.40, 13.40, 0, true},
-		{13.40, 13.65, 0, false}, // the exact check misses it
-		{13.40, 13.65, rssCarryTolMiB, true},
-		{13.40, 12.41, rssCarryTolMiB, true},
-		{13.33, 14.39, rssCarryTolMiB, false},
-		{11.55, 18.70, rssCarryTolMiB, false}, // separate processes
-		{11.40, 24.59, rssCarryTolMiB, false},
+		{"sys, separate processes", 12.27, 12.28, 21.18, 0, false, false},
+		{"sys, one process", 12.66, 21.18, 21.18, 0, true, true},
+		{"rss, separate processes", 11.70, 11.79, 22.86, rssCarryTolMiB, false, false},
+		// The peak comparison misses a carried VmRSS; the rise catches it.
+		{"rss, one process", 11.88, 13.40, 22.86, rssCarryTolMiB, false, true},
+		{"rss, base read at the peak", 11.88, 22.40, 22.86, rssCarryTolMiB, true, true},
 	} {
-		if got := carriesPeak(c.base, c.peak, c.tol); got != c.want {
-			t.Errorf("carriesPeak(%.2f, %.2f, %g) = %v", c.base, c.peak, c.tol, got)
+		if got := carriesPeak(c.base2, c.peak, c.tol); got != c.carried {
+			t.Errorf("%s: carriesPeak(%.2f, %.2f, %g) = %v", c.name, c.base2, c.peak, c.tol, got)
+		}
+		if got := risesAbove(c.base1, c.base2, rssRiseTolMiB); got != c.rises {
+			t.Errorf("%s: risesAbove(%.2f, %.2f) = %v", c.name, c.base1, c.base2, got)
 		}
 	}
 }
@@ -397,29 +429,45 @@ func TestMemConns(t *testing.T) {
 }
 
 // TestBenchScriptLimits checks that the table of scripts/bench.sh names
-// the limits of this package: MaxConns of the benchmark server, MinFree
-// of ingest, the term lists of mode proto and the noise of the base
-// values.
+// the limits of this package: MaxConns of the benchmark server, its
+// missing hourly mail limit per IP, MinFree of ingest, the discarded
+// logs, the term lists of mode proto and the noise of the base values;
+// and that it has no row left that is still to come.
 func TestBenchScriptLimits(t *testing.T) {
 	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "bench.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := (&rig{}).ingestConfig().MinFree; got != benchMinFree {
-		t.Fatalf("ingestConfig has MinFree %g, the table names %g", got, benchMinFree)
+	ic := (&rig{}).ingestConfig()
+	if ic.MinFree != benchMinFree {
+		t.Fatalf("ingestConfig has MinFree %g, the table names %g", ic.MinFree, benchMinFree)
 	}
 	c := smtpConfig()
+	if c.MaxMailsPerIP != math.MaxInt32 {
+		t.Fatalf("smtpConfig has MaxMailsPerIP %d, the table names no hourly limit", c.MaxMailsPerIP)
+	}
+	if c.Logger.Handler() != slog.DiscardHandler || ic.Logger.Handler() != slog.DiscardHandler {
+		t.Fatal("the table says the logs are discarded")
+	}
 	for _, want := range []string{
 		fmt.Sprintf("MaxConns %d statt %d", c.MaxConns, smtpd.DefaultMaxConns),
 		fmt.Sprintf("MaxConnsPerIP %d statt %d", c.MaxConnsPerIP, smtpd.DefaultMaxConnsPerIP),
+		"kein Mail-Limit je IP und Stunde",
 		fmt.Sprintf("auf MaxConns (%d) begrenzt", benchMaxConns),
 		fmt.Sprintf("MinFree %g %% statt %g %%", benchMinFree*100, ingest.DefaultMinFree*100),
+		"Uhr eingefroren (kein Alters-Flush), Logausgabe verworfen",
 		fmt.Sprintf("je %d Mails eine Begriffsliste", ingest.DefaultBatchSize),
+		"Kettenprüfung über Cache (Hashvergleich von `epoch.rec` und `user.rec`, je Mail zweimal), Hash über den Mailstrom",
 		fmt.Sprintf("höchstens %d MiB (Rauschanteil", memBaseNoiseMiB),
+		fmt.Sprintf("höchstens %d MiB über dem von Lauf 1", rssRiseTolMiB),
 		fmt.Sprintf("%v Leerlauf, dann debug.FreeOSMemory()", strings.Replace(settleWait.String(), "s", " s", 1)),
+		fmt.Sprintf("ab %d Segmenten", client.MergeThreshold),
 	} {
 		if !strings.Contains(string(script), want) {
 			t.Errorf("scripts/bench.sh does not say %q", want)
 		}
+	}
+	if strings.Contains(string(script), "ausstehend") {
+		t.Error("scripts/bench.sh still has a row that is to come (ausstehend)")
 	}
 }
