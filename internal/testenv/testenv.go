@@ -8,11 +8,15 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/mod/sumdb/note"
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/client"
@@ -20,6 +24,8 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/translog/translogtest"
+	"github.com/tim-riep/go-mail/internal/witness"
 )
 
 // Clock is a settable clock.
@@ -61,6 +67,10 @@ type Env struct {
 	KeyDir    string
 	Clock     *Clock
 	Warnings  *Warnings
+	// Witness is the pinned witness (quorum 1 of 1) and WitnessSigner
+	// its note signer, for tests that cosign heads.
+	Witness       witness.Key
+	WitnessSigner note.Signer
 }
 
 // Warnings collects client warnings.
@@ -92,12 +102,27 @@ var Start = time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
 func New(t testing.TB) *Env {
 	t.Helper()
 	base := t.TempDir()
-	log, err := translog.NewUnverified(true)
+	log, err := translogtest.NewUnverified(true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One witness, quorum 1 of 1 (2.7: the PoC runs one witness).
+	// witness.Keygen is built by task 08; the key comes from note.
+	skey, vkey, err := note.GenerateKey(rand.Reader, WitnessName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsigner, err := note.NewSigner(skey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(vkeyData(vkey))
+	if err != nil || len(raw) != 1+ed25519.PublicKeySize {
+		t.Fatal("witness key", err)
+	}
+	wkey := witness.Key{Name: WitnessName, Pub: ed25519.PublicKey(raw[1:])}
 	clock := &Clock{t: Start}
-	res, err := ceremony.InitDev(filepath.Join(base, "data"), filepath.Join(base, "keys"), clock.Now().Add(-time.Hour), log)
+	res, err := ceremony.InitDev(filepath.Join(base, "data"), filepath.Join(base, "keys"), clock.Now().Add(-time.Hour), log, []witness.Key{wkey}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +138,12 @@ func New(t testing.TB) *Env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Env{T: t, Base: base, Store: st, Log: log, Pin: res.Pin, IngestKey: ingest, AdminKey: admin, KeyDir: res.KeyDir, Clock: clock, Warnings: &Warnings{}}
+	return &Env{T: t, Base: base, Store: st, Log: log, Pin: res.Pin, IngestKey: ingest, AdminKey: admin, KeyDir: res.KeyDir,
+		Clock: clock, Warnings: &Warnings{}, Witness: wkey, WitnessSigner: wsigner}
 }
+
+// WitnessName is the name of the witness of a test platform.
+const WitnessName = "testenv-witness"
 
 // ClientConfig returns the configuration of a client in dir.
 func (e *Env) ClientConfig(dir string) client.Config {
@@ -378,6 +407,16 @@ func (e *Env) ForgeEpoch(signer *User, mbx store.ID, begin time.Time, reason sto
 	next.Epoch = n
 	fail(e.Store.WriteMailbox(&next))
 	return ep
+}
+
+// vkeyData returns the key part of a note verifier key
+// <name>+<hash>+<base64>.
+func vkeyData(vkey string) string {
+	parts := strings.SplitN(vkey, "+", 3)
+	if len(parts) != 3 {
+		return ""
+	}
+	return parts[2]
 }
 
 // Share shares mailbox mbx of member u with other (2.5), fails the test

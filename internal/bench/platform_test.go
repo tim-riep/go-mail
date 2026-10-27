@@ -12,7 +12,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/testenv"
-	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 // platformEnv names the directory TestBuildPlatform writes into.
@@ -91,7 +91,7 @@ func newPlatformRig(tb testing.TB) *rig {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	log, err := translog.NewUnverified(true)
+	log, err := translogtest.NewUnverified(true)
 	if err != nil {
 		tb.Fatal(err)
 	}

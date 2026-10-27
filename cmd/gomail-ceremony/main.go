@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
-	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -52,12 +52,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	log, err := translog.NewUnverified(*noLog)
+	log, err := translogtest.NewUnverified(*noLog)
 	if err != nil {
 		fmt.Fprintln(stderr, "gomail-ceremony:", err)
 		return 1
 	}
-	res, err := ceremony.InitDev(*data, *keyDir, time.Now(), log)
+	res, err := ceremony.InitDev(*data, *keyDir, time.Now(), log, nil, 0)
 	if err != nil {
 		fmt.Fprintln(stderr, "gomail-ceremony:", err)
 		return 1

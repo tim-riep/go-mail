@@ -127,12 +127,24 @@ type Options struct {
 	//   - ceremony (Publish): the whole identity list of
 	//     PublishOptions.Pin.
 	Identities []Identity
-	// Now is the injected clock.
+	// IndexFile is the audit index of a client log (doc.go "Audit"): a
+	// file in the client directory, never in the data directory. Open
+	// resolves the symbolic links of its directory, which must exist,
+	// and of Store.Root, and refuses with ErrIO a path that lies inside
+	// the data directory, also when it leads there through a link, and
+	// an index file that is itself a link (task 07c finding 4). It is
+	// written atomically with mode 0600 after every Refresh that changed
+	// the reference head.
+	// It holds IDs, numbers, public keys and hashes (JSON), no record
+	// content and no address in clear. Open rebuilds it from entry 0
+	// against Verifier.Last when it is missing, damaged, built for
+	// another identity list (a new pin) or for another head than Last.
+	// Required for a client log, ignored for an operator log.
+	IndexFile string
+	// Now is the injected clock. For a client log it takes precedence
+	// over Verifier.Now and Open copies it into the Verifier (task 07b
+	// finding 4), so that CheckHead, Fresh and the Pending times use one
+	// clock; without it a client log uses Verifier.Now (one of the two is
+	// required).
 	Now func() time.Time
-}
-
-// Open opens (and on first use creates) the log in st (task 07). With
-// Options.Verifier nil it returns an Operator.
-func Open(opts Options) (Log, error) {
-	return nil, ErrNotImplemented
 }

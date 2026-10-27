@@ -9,11 +9,11 @@
 // (2.3). Every one of these checks goes through Log, so that nothing is
 // weakened silently.
 //
-// The log itself (golang.org/x/mod/sumdb/tlog, witnesses) is built in
-// phase 3. Phase 1 has exactly one implementation, Unverified, which
-// accepts everything. It can only be created with an explicit
-// insecureNoLog switch (command line flag --insecure-no-log), and clients
-// print Warning on every start.
+// The log on the data directory (golang.org/x/mod/sumdb/tlog, tiles,
+// witnesses) is Open (task 07, impl.go). The accepting placeholder of
+// phase 1, Unverified, lives in package translogtest for tests; until
+// task 15 the commands still use it behind the explicit switch
+// --insecure-no-log, and clients print Warning on every start.
 //
 // The interface for milestone M1 (task 03) is laid out in doc.go: the
 // file format of data/log/, the entries and their duplicate keys, the
@@ -171,9 +171,11 @@ type Log interface {
 	// CheckFresh verifies that the last verified tree head with witness
 	// signature is at most 24 hours old (2.3, 2.7).
 	//
-	// Proof: Verifier.Fresh(now) on the reference head. A server-side
-	// Log (no Verifier) returns nil: the server is the operator and has
-	// no reference head of its own to age.
+	// Proof: Verifier.Fresh(now) on the reference head. A client log
+	// also returns ErrConsistency while an own entry is found replaced
+	// (Refresh step 3). A server-side Log (no Verifier) returns nil: the
+	// server is the operator and has no reference head of its own to
+	// age.
 	CheckFresh(now time.Time) error
 
 	// Append logs a record of the given kind and returns its index. The
@@ -217,21 +219,62 @@ type Log interface {
 	// Verifier.LogKeys from every ingest certificate there that verifies
 	// against the pinned identity list, logged or not (task 03d finding
 	// 1); then it opens the newest published head (heads/) with those
-	// keys and the pinned witnesses, audits every entry between the old
-	// and the new head with proofs against the new head (doc.go
-	// "Audit"), sets LogKey.Logged and Until from that audit, and makes
-	// the head the reference head if the Verifier accepts it (CheckHead
-	// with ConsistencyProof(last, new)); on any failure the audit of the
-	// new entries is discarded. It checks every Pending entry the new
-	// head covers against its leaf (ErrConsistency) and drops it, and
-	// returns the new reference head for the caller to persist. It
+	// keys and the pinned witnesses. In this order (task 07b finding 2,
+	// steps 2 and 3 swapped by task 07c finding 2):
+	//
+	//  1. it audits every entry between the old and the new head with
+	//     proofs against the new head (doc.go "Audit") on a copy of the
+	//     audit index;
+	//  2. it sets LogKey.Logged and Until from the audit index extended
+	//     up to the new head (the valid entries of the tree of the new
+	//     head: a certificate logged under an earlier head stays logged,
+	//     one logged in this step counts as well; task 07 finding Q10
+	//     (6)) and judges the head with CheckHead (with
+	//     ConsistencyProof(last, new)) on a copy of the Verifier
+	//     (ErrWitness, ErrHead, ErrConsistency);
+	//  3. only for a head that passed step 2, it checks every Pending
+	//     entry the new head covers against its leaf in the tree of the
+	//     new head (record proof; ErrConsistency otherwise);
+	//  4. it writes the audit index (Options.IndexFile; ErrIO when that
+	//     fails);
+	//  5. only then it takes over the head as reference head
+	//     (Verifier.Last), the LogKeys, the extended audit index, and
+	//     drops the Pending entries of step 3.
+	//
+	// On any failure Verifier.Last, LogKeys, Pending, the audit index
+	// and its file stay at the old head, and the next Refresh audits the
+	// same entries again. A head refused in step 2 says nothing about
+	// the own entries: Refresh returns the error of CheckHead, and
+	// CheckFresh answers as before. An own entry found replaced in step
+	// 3, in a head that passed CheckHead (or, without a published head,
+	// in the reference head), makes CheckFresh (and every Refresh) fail
+	// with ErrConsistency until a Refresh passes the Pending check again
+	// against a verified tree at least as large, with or without a new
+	// head: the caller removes that entry from Verifier.Pending and
+	// appends the record again (doc.go "Withheld entries", task 14). An
+	// audit index that contradicts the log is discarded and rebuilt from
+	// entry 0 against the old head first (task 07b finding 5). Refresh
+	// returns the reference head for the caller to persist, the new one
+	// on success. After step 5 it
 	// returns ErrWithheld (an ErrStale) when the reference head is newer
 	// than a Pending entry by more than HeadInterval (Time > At +
 	// HeadInterval) and still does not cover it, and ErrStale when a
 	// Pending entry is uncovered and the reference head is older than
-	// MaxPendingHeadAge (doc.go "Withheld entries", Verifier.Fresh). A
-	// server-side Log returns the newest head it signed, without witness
-	// checks.
+	// MaxPendingHeadAge (doc.go "Withheld entries", Verifier.Fresh); the
+	// new head is the reference head then. Without a published head it
+	// checks the Pending entries the reference head covers and applies
+	// the same freshness rules.
+	//
+	// Refresh applies an age limit only while Pending entries are
+	// uncovered (MaxPendingHeadAge, via Verifier.Fresh). Without Pending
+	// entries it returns nil also when the reference head is older than
+	// MaxHeadAge, for instance when no newer head is published: the
+	// plain limit of 2.3 is not part of Refresh (task 07c finding 6).
+	// Only CheckFresh reports ErrStale for that head, so the caller
+	// always calls CheckFresh after Refresh, whatever Refresh returned,
+	// before it relies on the log.
+	// A server-side Log returns the newest head it signed, without
+	// witness checks.
 	Refresh(now time.Time) (*Head, error)
 	// Head returns the newest published head as stored in heads/,
 	// opened with Options.Known and, for a client, the verifiers of
@@ -240,7 +283,9 @@ type Log interface {
 	// Entry returns entry index, decoded with DecodeEntry; for a client
 	// only below the reference size (ErrPending beyond). An index
 	// outside 0 <= index < MaxTreeSize is ErrNotInLog without any file
-	// access.
+	// access. A file missing below the reference size (client) or the
+	// committed size (operator) is ErrConsistency: the tree holds the
+	// entry (task 07b finding 6).
 	Entry(index int64) (*Entry, error)
 	// InclusionProof returns the proof that entry index is in the tree
 	// of the given size (tlog.ProveRecord over the tiles). Arguments
@@ -258,76 +303,3 @@ type Log interface {
 	// returned. An empty result is not an error.
 	Lookup(kind Kind, subject []byte) ([]Entry, error)
 }
-
-// NoIndex is the index Unverified returns for an append.
-const NoIndex int64 = -1
-
-// Unverified accepts everything. It exists so that phase 1 can run
-// before the log is built; every method is a placeholder for phase 3.
-type Unverified struct{}
-
-// NewUnverified returns the accepting placeholder if insecureNoLog is
-// set, and ErrNoLog otherwise.
-func NewUnverified(insecureNoLog bool) (*Unverified, error) {
-	if !insecureNoLog {
-		return nil, ErrNoLog
-	}
-	return &Unverified{}, nil
-}
-
-// Verified is false.
-func (*Unverified) Verified() bool { return false }
-
-// TODO(phase3-translog): append user.rec to the log.
-func (*Unverified) AppendUser(store.ID, []byte) error { return nil }
-
-// TODO(phase3-translog): append epoch.rec to the log.
-func (*Unverified) AppendEpoch(store.ID, uint32, []byte) error { return nil }
-
-// TODO(phase3-translog): append the signed address assignment.
-func (*Unverified) AppendAddress([]byte) error { return nil }
-
-// TODO(phase3-translog): append certificates and successions.
-func (*Unverified) AppendPlatform(string, []byte) error { return nil }
-
-// TODO(phase3-translog): inclusion proof for user.rec.
-func (*Unverified) CheckUser(store.ID, []byte) error { return nil }
-
-// TODO(phase3-translog): a generation is valid only from its log entry on.
-func (*Unverified) CheckGeneration(store.ID, uint32) error { return nil }
-
-// TODO(phase3-translog): signature of a revoked generation logged before the revocation.
-func (*Unverified) CheckRevokedSignature(store.ID, uint32, []byte) error { return nil }
-
-// TODO(phase3-translog): inclusion proof for epoch.rec.
-func (*Unverified) CheckEpoch(store.ID, uint32, []byte) error { return nil }
-
-// TODO(phase3-translog): address assignment at the time of receipt.
-func (*Unverified) CheckAddress(string, store.ID, int64) error { return nil }
-
-// TODO(phase3-translog): certificate in the log, generation not compromised.
-func (*Unverified) CheckPlatform(string, []byte) error { return nil }
-
-// TODO(phase3-translog): tree head with witness signature at most 24 hours old.
-func (*Unverified) CheckFresh(time.Time) error { return nil }
-
-// Append accepts the record and logs nothing (NoIndex).
-func (*Unverified) Append(Kind, []byte) (int64, error) { return NoIndex, nil }
-
-// Refresh has no head to return.
-func (*Unverified) Refresh(time.Time) (*Head, error) { return nil, nil }
-
-// Head reports that there is no log.
-func (*Unverified) Head() (*Head, error) { return nil, ErrNoLog }
-
-// Entry reports that there is no log.
-func (*Unverified) Entry(int64) (*Entry, error) { return nil, ErrNoLog }
-
-// InclusionProof reports that there is no log.
-func (*Unverified) InclusionProof(int64, int64) (tlog.RecordProof, error) { return nil, ErrNoLog }
-
-// ConsistencyProof reports that there is no log.
-func (*Unverified) ConsistencyProof(int64, int64) (tlog.TreeProof, error) { return nil, ErrNoLog }
-
-// Lookup finds nothing.
-func (*Unverified) Lookup(Kind, []byte) ([]Entry, error) { return nil, nil }

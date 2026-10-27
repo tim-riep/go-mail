@@ -9,6 +9,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/tim-riep/go-mail/internal/rec"
+	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
 )
 
@@ -17,13 +18,11 @@ var ErrWitnesses = errors.New("witness: invalid witness list")
 
 // WitnessSchema is one witness: its note name and Ed25519 public key.
 // The verifier key line is derived (note.NewEd25519VerifierKey), so the
-// key hash is never stored and cannot disagree with the key. The same
-// element is proposed for the client pin (translog doc.go "Pin"); task 07
-// moves the schema to store when the pin uses it.
-var WitnessSchema = rec.MustSchema("gomail/v1/rec/witness",
-	rec.Field{Num: 1, Name: "name", Kind: rec.String, MaxLen: MaxName, Required: true},
-	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
-)
+// key hash is never stored and cannot disagree with the key. The element
+// is shared with the client pin (field 5, translog doc.go "Pin") and is
+// defined in store (store.WitnessSchema, task 07); MaxName equals
+// store.MaxWitnessName.
+var WitnessSchema = store.WitnessSchema
 
 // WitnessesSchema is platform/witnesses.rec (section 4): the witnesses
 // the server accepts cosignatures from and the number of cosignatures a

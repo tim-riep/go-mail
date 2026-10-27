@@ -43,8 +43,8 @@ func TestCheckpoint(t *testing.T) {
 	if !ed25519.Verify(pub, append([]byte("gomail/v1/sig/checkpoint\x00"), tbs...), c.Signature) {
 		t.Fatal("signature not under checkpoint over the record without sig")
 	}
-	// Bounds: size and time 0 and the longest origin are valid.
-	edge := &Checkpoint{UserID: ID{1}, DeviceID: ID{2}, Origin: strings.Repeat("o", MaxOrigin), UserGen: 1}
+	// Bounds: size 1, time 0 and the longest origin are valid.
+	edge := &Checkpoint{UserID: ID{1}, DeviceID: ID{2}, Origin: strings.Repeat("o", MaxOrigin), Size: 1, UserGen: 1}
 	if err := edge.Sign(tu.identity); err != nil {
 		t.Fatal(err)
 	}
@@ -86,12 +86,14 @@ func TestCheckpoint(t *testing.T) {
 	}
 	// Invalid values.
 	for name, f := range map[string]func(x *Checkpoint){
-		"zero user":     func(x *Checkpoint) { x.UserID = ID{} },
-		"zero device":   func(x *Checkpoint) { x.DeviceID = ID{} },
-		"empty origin":  func(x *Checkpoint) { x.Origin = "" },
-		"negative size": func(x *Checkpoint) { x.Size = -1 },
-		"negative time": func(x *Checkpoint) { x.HeadTime = -1 },
-		"gen 0":         func(x *Checkpoint) { x.UserGen = 0 },
+		"zero user":      func(x *Checkpoint) { x.UserID = ID{} },
+		"zero device":    func(x *Checkpoint) { x.DeviceID = ID{} },
+		"empty origin":   func(x *Checkpoint) { x.Origin = "" },
+		"negative size":  func(x *Checkpoint) { x.Size = -1 },
+		"size 0":         func(x *Checkpoint) { x.Size = 0 },
+		"size too large": func(x *Checkpoint) { x.Size = MaxCheckpointSize + 1 },
+		"negative time":  func(x *Checkpoint) { x.HeadTime = -1 },
+		"gen 0":          func(x *Checkpoint) { x.UserGen = 0 },
 	} {
 		x := *c
 		f(&x)

@@ -41,7 +41,7 @@ func (m *memTree) ReadHashes(idx []int64) ([]tlog.Hash, error) {
 	return out, nil
 }
 
-func (m *memTree) add(t *testing.T, data []byte) tlog.Hash {
+func (m *memTree) add(t testing.TB, data []byte) tlog.Hash {
 	t.Helper()
 	hs, err := tlog.StoredHashes(m.size(), data, m)
 	if err != nil {

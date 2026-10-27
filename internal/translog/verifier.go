@@ -9,6 +9,8 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
+
+	"github.com/tim-riep/go-mail/internal/store"
 )
 
 // Errors of the log. Every error returned by this package wraps exactly
@@ -87,6 +89,14 @@ var (
 	ErrPin = errors.New("translog: invalid pinned trust anchor")
 	// ErrNotImplemented: interface of task 03, built by task 07.
 	ErrNotImplemented = errors.New("translog: not implemented yet")
+	// ErrIO: a file outside the tree could not be read or written, in
+	// practice the audit index of a client log in the client directory
+	// (Options.IndexFile; task 07b finding 3). Errors of the file system
+	// under log/ are ErrConsistency instead: the files there do not hold
+	// the committed tree. ErrIO says nothing about the log; the operation
+	// changed nothing the caller relies on and may be repeated once the
+	// file system is repaired (Refresh keeps the old reference head).
+	ErrIO = errors.New("translog: input/output error outside the log")
 )
 
 // Revoked names a platform key generation that a client update declared
@@ -137,6 +147,16 @@ const MaxIdentities = 256
 // as proposed (TestPinSize: with MaxIdentities revoked entries the pin
 // takes about 39 KiB).
 const MaxPinFile = 64 << 10
+
+// MaxRevoked is the most elements pin field 7 may hold, should Q8 be
+// decided as proposed (doc.go "Pin", task 07 finding Q10 (1)); until
+// then pins have no field 7 and the constant only reserves room. With
+// MaxRevoked elements of the proposed four components (role, gen,
+// revoked_at_size and the proposed revoked_at_time) the largest pin
+// stays below MaxPinFile (TestPinSize: about 61 KiB). Reading: two
+// compromised generations for each identity generation the list can
+// hold, far more than a platform ever sees.
+const MaxRevoked = 2 * MaxIdentities
 
 // CheckIdentities checks the identity list of a pin (field 8, doc.go
 // "Pin", task 03c finding 3): 1 to MaxIdentities elements with the
@@ -271,9 +291,12 @@ type Verifier struct {
 	// newest head, audits the entries the new head covers and sets Logged
 	// and Until from them before it calls CheckHead.
 	LogKeys []LogKey
-	// Witnesses are the pinned witness keys (name and Ed25519 key, note
-	// verifiers built with note.NewEd25519VerifierKey). Names are unique
-	// and differ from LogSignerName.
+	// Witnesses are the pinned witness keys (name and Ed25519 key), each
+	// built with NewWitnessVerifier. Names are unique and differ from
+	// LogSignerName, and keys are unique (task 07b finding 8: one key
+	// under two names would count twice towards MinWitnesses). A note
+	// verifier built otherwise does not reveal its key and is refused
+	// with ErrWitness.
 	Witnesses []note.Verifier
 	// MinWitnesses is the number of distinct witnesses that must have
 	// cosigned a head (2.7: at least 1; 2 of 3 before real mail). It must
@@ -303,7 +326,10 @@ type Verifier struct {
 	// Last is the last verified head, nil on first contact (2.7 "Neue
 	// Geräte": trust on first use, protected by the witnesses only).
 	Last *Head
-	// Now is the injected clock.
+	// Now is the injected clock. Open of a client log sets it to
+	// Options.Now when that is set (Options.Now takes precedence and is
+	// copied here, task 07b finding 4), so that the log and its Verifier
+	// use one clock.
 	Now func() time.Time
 }
 
@@ -337,11 +363,148 @@ type Verifier struct {
 // On success Last = h. CheckHead does not check MaxHeadAge; a head may
 // be valid and still not fresh (Fresh).
 func (v *Verifier) CheckHead(h *Head, proof tlog.TreeProof) error {
-	return ErrNotImplemented
+	if err := v.checkConfig(); err != nil {
+		return err
+	}
+	if h == nil || h.Size < 1 || h.Size > MaxTreeSize {
+		return fmt.Errorf("%w: head size out of range", ErrHead)
+	}
+	if v.Last != nil && (v.Last.Size < 1 || v.Last.Size > MaxTreeSize) {
+		return fmt.Errorf("%w: last head size out of range", ErrHead)
+	}
+	// 1. origin
+	if h.Origin != v.Origin {
+		return fmt.Errorf("%w: head of another log", ErrHead)
+	}
+	// The signatures are verified here again from the note; Head.Sigs
+	// is never trusted.
+	text, err := h.Text()
+	if err != nil {
+		return err
+	}
+	known := &verifierSet{list: append([]note.Verifier(nil), v.Witnesses...)}
+	for _, k := range v.LogKeys {
+		known.list = append(known.list, k.Verifier)
+	}
+	if len(h.Note) > MaxHeadNote {
+		return fmt.Errorf("%w: signed head too long", ErrHead)
+	}
+	n, err := note.Open(h.Note, known)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrHead, err)
+	}
+	if n.Text != string(text) {
+		return fmt.Errorf("%w: note text differs from the head", ErrHead)
+	}
+	// 2. a log signature by a generation valid at the head's time line
+	logOK := false
+	for _, s := range n.Sigs {
+		if s.Name != LogSignerName {
+			continue
+		}
+		for _, k := range v.LogKeys {
+			if k.Verifier != nil && k.Verifier.Name() == LogSignerName && k.Verifier.KeyHash() == s.Hash &&
+				k.Covers(h.Time) && !v.IsRevoked(store.KeyRoleIngest, k.Gen) {
+				logOK = true
+			}
+		}
+	}
+	if !logOK {
+		return fmt.Errorf("%w: no log signature by a generation valid at the head's time", ErrHead)
+	}
+	// 3. witness quorum, distinct keys (checkConfig refused one key
+	// under two names; counting keys keeps it so)
+	seen := map[string]bool{}
+	for _, s := range n.Sigs {
+		for _, w := range v.Witnesses {
+			if w.Name() == s.Name && w.KeyHash() == s.Hash {
+				k, _ := witnessKey(w)
+				seen[string(k)] = true
+			}
+		}
+	}
+	if len(seen) < v.MinWitnesses {
+		return fmt.Errorf("%w: %d of %d required cosignatures", ErrWitness, len(seen), v.MinWitnesses)
+	}
+	// 4. not in the future
+	if v.Now == nil {
+		return fmt.Errorf("%w: no clock", ErrHead)
+	}
+	if h.Time > v.Now().UnixMilli()+MaxClockSkew.Milliseconds() {
+		return fmt.Errorf("%w: head time in the future", ErrHead)
+	}
+	// 5. continuation of the last head
+	if v.Last == nil {
+		if len(proof) != 0 {
+			return fmt.Errorf("%w: proof without a previous head", ErrConsistency)
+		}
+	} else {
+		switch {
+		case h.Size < v.Last.Size:
+			return fmt.Errorf("%w: head smaller than the last verified one", ErrConsistency)
+		case h.Time < v.Last.Time:
+			return fmt.Errorf("%w: head older than the last verified one", ErrHead)
+		case h.Size == v.Last.Size:
+			if h.Hash != v.Last.Hash {
+				return fmt.Errorf("%w: two heads of one size with different hashes (split view)", ErrConsistency)
+			}
+		default:
+			if err := CheckTreeProof(proof, h.Size, h.Hash, v.Last.Size, v.Last.Hash); err != nil {
+				return err
+			}
+		}
+	}
+	c := *h
+	c.Sigs = n.Sigs
+	c.Note = append([]byte(nil), h.Note...)
+	v.Last = &c
+	return nil
+}
+
+// checkConfig checks the pinned anchors: the quorum (ErrWitness), the
+// witnesses (built with NewWitnessVerifier, names unique and not the
+// log's name, keys unique; ErrWitness), the identity list (ErrPin) and
+// the origin (ErrHead).
+func (v *Verifier) checkConfig() error {
+	if err := CheckQuorum(v.MinWitnesses, len(v.Witnesses)); err != nil {
+		return err
+	}
+	if len(v.Witnesses) > MaxWitnesses {
+		return fmt.Errorf("%w: too many witnesses", ErrWitness)
+	}
+	for i, w := range v.Witnesses {
+		if w == nil || w.Name() == LogSignerName {
+			return fmt.Errorf("%w: invalid witness", ErrWitness)
+		}
+		k, ok := witnessKey(w)
+		if !ok {
+			return fmt.Errorf("%w: witness verifier not built with NewWitnessVerifier", ErrWitness)
+		}
+		for _, o := range v.Witnesses[:i] {
+			if o.Name() == w.Name() {
+				return fmt.Errorf("%w: witness names must be unique", ErrWitness)
+			}
+			if ok2, _ := witnessKey(o); bytes.Equal(ok2, k) {
+				return fmt.Errorf("%w: one witness key under two names", ErrWitness)
+			}
+		}
+	}
+	if err := CheckIdentities(v.Identities, v.Identity); err != nil {
+		return err
+	}
+	return checkOrigin(v.Origin)
 }
 
 // Fresh reports ErrStale unless Last is set and now - Last.Time <=
-// MaxHeadAge (2.3 "Aktualitätsgrenze"). Last.Time later than now +
+// MaxHeadAge (2.3 "Aktualitätsgrenze"). A Pending entry that Last
+// covers (Index < Last.Size) is ErrConsistency (task 07b finding 2):
+// Refresh makes a head the reference head only after it has checked
+// every Pending entry the head covers against its leaf and then drops
+// them, so after a successful Refresh there is none; one that is still
+// there means a Last and a Pending list that do not belong together (for
+// instance a state.json written with the new head but the old list), and
+// skipping it would let an own entry that the log replaced go unnoticed.
+// Refresh against the same head checks it and drops it. Last.Time later than now +
 // MaxClockSkew is ErrHead (CheckHead already refused such a head; a
 // Last read back from state.json is checked again). It reports
 // ErrWithheld when a Pending entry has Last.Time > At + HeadInterval
@@ -357,7 +520,30 @@ func (v *Verifier) CheckHead(h *Head, proof tlog.TreeProof) error {
 // entry is either covered or the client stops within 24 hours of the
 // append (2.7 "Zurückhalten eines Widerrufs über 24 Stunden").
 func (v *Verifier) Fresh(now time.Time) error {
-	return ErrNotImplemented
+	if v.Last == nil {
+		return fmt.Errorf("%w: no verified head", ErrStale)
+	}
+	if v.Last.Size < 1 || v.Last.Size > MaxTreeSize {
+		return fmt.Errorf("%w: last head size out of range", ErrHead)
+	}
+	nowMs := now.UnixMilli()
+	if v.Last.Time > nowMs+MaxClockSkew.Milliseconds() {
+		return fmt.Errorf("%w: last head time in the future", ErrHead)
+	}
+	limit := MaxHeadAge
+	for _, p := range v.Pending {
+		if p.Index < v.Last.Size {
+			return fmt.Errorf("%w: own entry %d is covered by the reference head but was never checked", ErrConsistency, p.Index)
+		}
+		if v.Last.Time > p.At+HeadInterval.Milliseconds() {
+			return fmt.Errorf("%w: entry %d", ErrWithheld, p.Index)
+		}
+		limit = MaxPendingHeadAge
+	}
+	if nowMs-v.Last.Time > limit.Milliseconds() {
+		return fmt.Errorf("%w: last verified head is older than %v", ErrStale, limit)
+	}
+	return nil
 }
 
 // CheckInclusion checks that the encoded entry is record index of the
@@ -366,28 +552,82 @@ func (v *Verifier) Fresh(now time.Time) error {
 // LeafHash(encoded)) (ErrConsistency otherwise). Every Check* of the
 // client-side Log runs it for each entry it relies on.
 func (v *Verifier) CheckInclusion(index int64, encoded []byte, proof tlog.RecordProof) error {
-	return ErrNotImplemented
+	if index < 0 {
+		return fmt.Errorf("%w: negative index", ErrNotInLog)
+	}
+	if v.Last == nil || index >= v.Last.Size {
+		return fmt.Errorf("%w: entry %d", ErrPending, index)
+	}
+	return CheckRecordProof(proof, v.Last.Size, v.Last.Hash, index, LeafHash(encoded))
 }
 
 // CheckCheckpoint checks a note of another client or device
 // (checkpoints/<user-id>-<device-id>.rec, 2.7 "Abgleich zwischen
 // Clients") against Last. The fields are those of
-// gomail/v1/rec/checkpoint (task 02): origin, size and root_hash are the
-// other client's last verified head, headTime its time line. The
-// signature of the checkpoint (domain "checkpoint", identity of user_gen)
-// is checked by the caller before.
+// gomail/v1/rec/checkpoint (store.Checkpoint): origin, size and
+// root_hash are the other client's reference head, headTime its time
+// line. In this order:
 //
 //   - origin != Origin: ErrHead
+//   - size < 1 or size > MaxTreeSize, or headTime < 0: ErrHead, before
+//     any proof
+//   - Last nil: ErrStale (nothing to compare with)
 //   - size > Last.Size: ErrPending (refresh first, then compare)
-//   - size == Last.Size: root must equal Last.Hash, else ErrConsistency
-//   - size < 1 or size > MaxTreeSize: ErrHead, before any proof
-//   - size < Last.Size: CheckTreeProof(proof, Last.Size, Last.Hash,
-//     size, root), else ErrConsistency
+//   - size == Last.Size: root must equal Last.Hash, else
+//     ErrConsistency; the times may differ either way (heads of one
+//     size are re-signed, doc.go "Heads")
+//   - size < Last.Size: headTime <= Last.Time, else ErrConsistency, and
+//     CheckTreeProof(proof, Last.Size, Last.Hash, size, root), else
+//     ErrConsistency
+//
+// Role of headTime (Reading, strictest; TODO(ask)): it does not enter
+// any proof, but it orders the two views. The server signs only its
+// committed size and never signs a smaller size after a larger one
+// (Operator.SignHead), and every head time is the server's clock, so a
+// head smaller than Last always has a time at most Last.Time. A smaller
+// head with a later time shows that the server kept re-signing an old
+// size for the other client after it had shown this one a newer tree:
+// it withholds the newer entries from the other client (the case of
+// doc.go "Withheld entries" seen from outside), which is a different
+// view of the log (2.7 "verschiedene Sichten").
+//
+// Rules for the caller (doc.go "Client checkpoints"), before
+// CheckCheckpoint: the record decodes strictly (store.DecodeCheckpoint,
+// size >= 1) and its file name names its user_id and device_id; user_id
+// is a user member of the mailbox in whose checkpoints/ the record lies
+// (member of the head epoch of the mailbox's verified chain); user_gen
+// is the current generation of user_id according to the log (the newest
+// valid user entry of user_id has exactly user_gen generations:
+// CheckGeneration(user_id, user_gen) succeeds and the user entry
+// (user_id, user_gen+1) does not exist, ErrSuperseded otherwise); the
+// signature (domain "checkpoint") verifies with the identity key of
+// user_gen from that logged user entry. A checkpoint that fails any of
+// these is ignored with a warning; it says nothing about the log.
 //
 // ErrConsistency here means the server showed the two clients different
 // logs; the client warns and stops processing (2.7).
 func (v *Verifier) CheckCheckpoint(origin string, size int64, root tlog.Hash, headTime int64, proof tlog.TreeProof) error {
-	return ErrNotImplemented
+	if origin != v.Origin {
+		return fmt.Errorf("%w: checkpoint of another log", ErrHead)
+	}
+	if size < 1 || size > MaxTreeSize || headTime < 0 {
+		return fmt.Errorf("%w: checkpoint size or time out of range", ErrHead)
+	}
+	if v.Last == nil {
+		return fmt.Errorf("%w: no verified head to compare with", ErrStale)
+	}
+	switch {
+	case size > v.Last.Size:
+		return fmt.Errorf("%w: checkpoint beyond the reference head", ErrPending)
+	case size == v.Last.Size:
+		if root != v.Last.Hash {
+			return fmt.Errorf("%w: checkpoint of the same size with another hash (split view)", ErrConsistency)
+		}
+		return nil
+	case headTime > v.Last.Time:
+		return fmt.Errorf("%w: a smaller head signed after the reference head (entries withheld from the other client)", ErrConsistency)
+	}
+	return CheckTreeProof(proof, v.Last.Size, v.Last.Hash, size, root)
 }
 
 // IsRevoked reports whether the pin declares the platform generation
@@ -458,7 +698,9 @@ func CheckRecordProof(proof tlog.RecordProof, t int64, th tlog.Hash, n int64, le
 }
 
 // NewWitnessVerifier returns the note verifier of a witness key (name
-// and Ed25519 public key as in witnesses.rec and the pin).
+// and Ed25519 public key as in witnesses.rec and the pin). The verifier
+// keeps the key, so that Verifier.checkConfig can refuse one key under
+// two names (task 07b finding 8).
 func NewWitnessVerifier(name string, pub ed25519.PublicKey) (note.Verifier, error) {
 	if name == LogSignerName {
 		return nil, fmt.Errorf("%w: a witness cannot use the log's name", ErrWitness)
@@ -471,5 +713,20 @@ func NewWitnessVerifier(name string, pub ed25519.PublicKey) (note.Verifier, erro
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrWitness, err)
 	}
-	return v, nil
+	return &witnessVerifier{Verifier: v, pub: append(ed25519.PublicKey(nil), pub...)}, nil
+}
+
+// witnessVerifier is a note verifier of a witness that knows its key.
+type witnessVerifier struct {
+	note.Verifier
+	pub ed25519.PublicKey
+}
+
+// witnessKey returns the key of a verifier built with NewWitnessVerifier.
+func witnessKey(v note.Verifier) (ed25519.PublicKey, bool) {
+	w, ok := v.(*witnessVerifier)
+	if !ok || w == nil || len(w.pub) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	return w.pub, true
 }

@@ -10,7 +10,7 @@ import (
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 func TestCheckListen(t *testing.T) {
@@ -32,8 +32,8 @@ func TestCheckListen(t *testing.T) {
 func TestCommands(t *testing.T) {
 	dir := t.TempDir()
 	data, keys := filepath.Join(dir, "data"), filepath.Join(dir, "keys")
-	log, _ := translog.NewUnverified(true)
-	if _, err := ceremony.InitDev(data, keys, time.Now(), log); err != nil {
+	log, _ := translogtest.NewUnverified(true)
+	if _, err := ceremony.InitDev(data, keys, time.Now(), log, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer

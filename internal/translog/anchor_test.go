@@ -1,6 +1,7 @@
 package translog
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/rec"
+	"github.com/tim-riep/go-mail/internal/store"
 )
 
 func testIdentities(t *testing.T, n int) []Identity {
@@ -145,9 +147,10 @@ func TestAnchorErrors(t *testing.T) {
 // (task 03d finding 9): fields 1 to 6 and 8 at their limits, with
 // MaxIdentities identity generations, MaxWitnesses witnesses with names
 // of 64 bytes and an origin of MaxOrigin bytes. Field 7 exists only if
-// Q8 is decided; it is measured with MaxIdentities elements to show the
-// margin. The schemas mirror the
-// proposal; task 07 moves them to store.
+// Q8 is decided; it is measured with MaxRevoked elements of the four
+// proposed components (revoked_at_time included) to show that the
+// largest pin stays below MaxPinFile (task 07 finding Q10 (1)). The
+// schemas of fields 5 and 8 must agree with those of store.
 func TestPinSize(t *testing.T) {
 	identity := rec.MustSchema("gomail/v1/rec/platform-identity",
 		rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
@@ -161,6 +164,7 @@ func TestPinSize(t *testing.T) {
 		rec.Field{Num: 1, Name: "role", Kind: rec.U8, Required: true},
 		rec.Field{Num: 2, Name: "gen", Kind: rec.U32, Required: true},
 		rec.Field{Num: 3, Name: "revoked_at_size", Kind: rec.I64, Required: true},
+		rec.Field{Num: 4, Name: "revoked_at_time", Kind: rec.I64, Required: true},
 	)
 	pin := rec.MustSchema("gomail/v1/rec/platform-pin",
 		rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
@@ -169,7 +173,7 @@ func TestPinSize(t *testing.T) {
 		rec.Field{Num: 4, Name: "origin", Kind: rec.String, MaxLen: MaxOrigin, Required: true},
 		rec.Field{Num: 5, Name: "witnesses", Kind: rec.List, Elem: witness, MaxCount: MaxWitnesses, Required: true},
 		rec.Field{Num: 6, Name: "min_witnesses", Kind: rec.U32, Required: true},
-		rec.Field{Num: 7, Name: "revoked", Kind: rec.List, Elem: revoked, MaxCount: 3 * MaxIdentities},
+		rec.Field{Num: 7, Name: "revoked", Kind: rec.List, Elem: revoked, MaxCount: MaxRevoked},
 		rec.Field{Num: 8, Name: "identities", Kind: rec.List, Elem: identity, MaxCount: MaxIdentities, Required: true},
 	)
 	list := testIdentities(t, MaxIdentities)
@@ -190,9 +194,9 @@ func TestPinSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rv := make([]*rec.Record, 0, MaxIdentities)
-	for i := 0; i < MaxIdentities; i++ {
-		rv = append(rv, rec.New(revoked).SetU8(1, uint8(i%3+1)).SetU32(2, uint32(i+1)).SetI64(3, MaxTreeSize))
+	rv := make([]*rec.Record, 0, MaxRevoked)
+	for i := 0; i < MaxRevoked; i++ {
+		rv = append(rv, rec.New(revoked).SetU8(1, uint8(i%3+1)).SetU32(2, uint32(1<<32-1-int64(i))).SetI64(3, MaxTreeSize).SetI64(4, 1<<62))
 	}
 	with, err := base().SetList(7, rv).Encode()
 	if err != nil {
@@ -211,5 +215,45 @@ func TestPinSize(t *testing.T) {
 	}
 	if len(with) > MaxPinFile {
 		t.Fatalf("pin of %d bytes exceeds MaxPinFile", len(with))
+	}
+	// store encodes the same pin byte for byte (fields 1 to 6 and 8).
+	sp := &store.PlatformPin{Gen: last.Gen, Pub: last.Pub, Origin: strings.Repeat("o", MaxOrigin), MinWitnesses: MaxWitnesses}
+	for i := 0; i < MaxWitnesses; i++ {
+		sp.Witnesses = append(sp.Witnesses, store.Witness{Name: strings.Repeat(string(rune('a'+i)), 64), Pub: list[i].Pub})
+	}
+	for _, id := range list {
+		sp.Identities = append(sp.Identities, store.PlatformIdentity{Gen: id.Gen, Pub: id.Pub})
+	}
+	enc, err := sp.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(enc, without) {
+		t.Fatal("store.PlatformPin differs from the proposal of doc.go \"Pin\"")
+	}
+}
+
+// TestStoreLimits: store cannot import translog and keeps constants of
+// the same value.
+func TestStoreLimits(t *testing.T) {
+	if store.MaxPinFile != MaxPinFile || store.MaxOrigin != MaxOrigin || store.MaxPinWitnesses != MaxWitnesses ||
+		store.MaxPinIdentities != MaxIdentities || store.MaxCheckpointSize != MaxTreeSize {
+		t.Fatal("limits of store and translog differ")
+	}
+	if err := store.CheckWitnessQuorum(1, 2); err == nil || CheckQuorum(1, 2) == nil {
+		t.Fatal("quorum rules differ")
+	}
+	for _, c := range [][2]int{{1, 1}, {2, 3}, {3, 3}, {3, 4}, {9, 16}} {
+		if (store.CheckWitnessQuorum(c[0], c[1]) == nil) != (CheckQuorum(c[0], c[1]) == nil) {
+			t.Fatalf("quorum rules differ for %v", c)
+		}
+	}
+	if err := store.CheckWitnessName(LogSignerName); err == nil {
+		t.Fatal("witness with the log's name")
+	}
+	for _, o := range []string{"gomail-dev", "a b", "a+b", "", strings.Repeat("o", MaxOrigin+1)} {
+		if (store.CheckPinOrigin(o) == nil) != (CheckOrigin(o) == nil) {
+			t.Fatalf("origin rules differ for %q", o)
+		}
 	}
 }

@@ -31,7 +31,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
@@ -179,7 +179,7 @@ func (e *env) config() (client.Config, error) {
 	if e.data == "" || e.platform == "" {
 		return client.Config{}, errors.New("--data und --platform sind erforderlich")
 	}
-	log, err := translog.NewUnverified(e.noLog)
+	log, err := translogtest.NewUnverified(e.noLog)
 	if err != nil {
 		return client.Config{}, err
 	}

@@ -521,42 +521,264 @@ func DecodePlatformKey(data []byte) (role uint8, gen uint32, priv ed25519.Privat
 	return r.U8(1), r.U32(2), ed25519.NewKeyFromSeed(seed), nil
 }
 
+// Limits of the pin and of the witness list (translog doc.go "Pin"). The
+// package translog keeps constants of the same value (MaxPinFile,
+// MaxOrigin, MaxWitnesses, MaxIdentities; store.MaxOrigin is in
+// checkpoint.go) and its tests check that they
+// agree; store cannot import translog.
+const (
+	// MaxPinFile is the read limit for identity-<gen>.pin
+	// (ReadPlatformPin): the largest pin of fields 1 to 6 and 8 takes about
+	// 23 KiB, and the limit leaves room for field 7 should Q8 be decided as
+	// proposed (translog.MaxRevoked).
+	MaxPinFile = 64 << 10
+	// MaxPinWitnesses is the most witnesses of a pin
+	// (translog.MaxWitnesses).
+	MaxPinWitnesses = 16
+	// MaxWitnessName is the longest witness name (witness.MaxName).
+	MaxWitnessName = 64
+	// MaxPinIdentities is the longest identity list of a pin
+	// (translog.MaxIdentities).
+	MaxPinIdentities = 256
+)
+
+// logSignerName is the note name of the log key (translog.LogSignerName);
+// no witness may use it.
+const logSignerName = "gomail-log"
+
+// WitnessSchema is one witness: its note name and Ed25519 public key
+// (translog doc.go "Pin", field 5; the element of platform/witnesses.rec,
+// package witness). The verifier key line is derived
+// (note.NewEd25519VerifierKey), so the key hash is never stored and cannot
+// disagree with the key.
+var WitnessSchema = rec.MustSchema("gomail/v1/rec/witness",
+	rec.Field{Num: 1, Name: "name", Kind: rec.String, MaxLen: MaxWitnessName, Required: true},
+	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
+)
+
+// PlatformIdentitySchema is one generation of the platform identity in
+// the identity list of a pin (field 8).
+var PlatformIdentitySchema = rec.MustSchema("gomail/v1/rec/platform-identity",
+	rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
+	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
+)
+
 // PlatformPinSchema is the platform identity a client trusts (2.3, "im
-// Client hinterlegt"): generation, public key and whether it comes from a
-// development ceremony. A client accepts a development identity only
-// together with --insecure-no-log.
+// Client hinterlegt") and the anchor of the transparency log (Q4,
+// translog doc.go "Pin"):
+//
+//	1 gen            the current identity generation
+//	2 pub            its key
+//	3 dev            1 for a development ceremony, else 0
+//	4 origin         the log origin (CheckPinOrigin)
+//	5 witnesses      the pinned witnesses (WitnessSchema), unique names and keys
+//	6 min_witnesses  quorum: 1 <= min <= len(witnesses), 2*min > len(witnesses)
+//	8 identities     every identity generation from 1 to gen (PlatformIdentitySchema)
+//
+// Field 7 (revoked) is not part of the schema: TODO(ask), Q8 is open. If
+// Q8 is decided as proposed, field 7 is an optional list of
+// gomail/v1/rec/platform-revoked (1 role u8, 2 gen u32, 3 revoked_at_size
+// i64, proposed 4 revoked_at_time i64) with at most translog.MaxRevoked
+// elements, so that the largest pin stays below MaxPinFile. Until then a
+// pin with field 7 is rejected like any unknown field.
 var PlatformPinSchema = rec.MustSchema("gomail/v1/rec/platform-pin",
 	rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
 	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
 	rec.Field{Num: 3, Name: "dev", Kind: rec.U8, Required: true},
+	rec.Field{Num: 4, Name: "origin", Kind: rec.String, MaxLen: MaxOrigin, Required: true},
+	rec.Field{Num: 5, Name: "witnesses", Kind: rec.List, Elem: WitnessSchema, MaxCount: MaxPinWitnesses, Required: true},
+	rec.Field{Num: 6, Name: "min_witnesses", Kind: rec.U32, Required: true},
+	rec.Field{Num: 8, Name: "identities", Kind: rec.List, Elem: PlatformIdentitySchema, MaxCount: MaxPinIdentities, Required: true},
 )
 
-// PlatformPin is a trusted platform identity.
-type PlatformPin struct {
-	Gen uint32
-	Pub ed25519.PublicKey
-	Dev bool
+// Witness is a pinned witness.
+type Witness struct {
+	Name string
+	Pub  ed25519.PublicKey
 }
 
-// Encode returns the canonical encoding.
+// PlatformIdentity is one generation of the platform identity.
+type PlatformIdentity struct {
+	Gen uint32
+	Pub ed25519.PublicKey
+}
+
+// PlatformPin is a trusted platform identity together with the anchor of
+// the transparency log.
+type PlatformPin struct {
+	Gen          uint32
+	Pub          ed25519.PublicKey
+	Dev          bool
+	Origin       string
+	Witnesses    []Witness
+	MinWitnesses int
+	// Identities lists every identity generation from 1 to Gen in
+	// ascending order; the last element is (Gen, Pub).
+	Identities []PlatformIdentity
+}
+
+// CheckPinOrigin reports whether o is a valid log origin: 1 to
+// MaxOrigin bytes of printable ASCII (0x21 to 0x7e) without "+"
+// (translog.CheckOrigin).
+func CheckPinOrigin(o string) error {
+	if o == "" || len(o) > MaxOrigin {
+		return fmt.Errorf("%w: origin length", ErrRecord)
+	}
+	if !printableNoPlus(o) {
+		return fmt.Errorf("%w: origin must be printable ASCII without spaces and '+'", ErrRecord)
+	}
+	return nil
+}
+
+// CheckWitnessName reports whether name is a valid witness name: 1 to
+// MaxWitnessName bytes of printable ASCII without "+" (note forbids "+"
+// and spaces in names), and not the name of the log signer
+// (witness.CheckName).
+func CheckWitnessName(name string) error {
+	if name == "" || len(name) > MaxWitnessName {
+		return fmt.Errorf("%w: witness name length", ErrRecord)
+	}
+	if !printableNoPlus(name) {
+		return fmt.Errorf("%w: witness name must be printable ASCII without spaces and '+'", ErrRecord)
+	}
+	if name == logSignerName {
+		return fmt.Errorf("%w: witness name of the log signer", ErrRecord)
+	}
+	return nil
+}
+
+func printableNoPlus(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x21 || c > 0x7e || c == '+' {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckWitnessQuorum reports whether min of n witnesses is an admissible
+// quorum: 1 <= min <= n and 2*min > n (translog.CheckQuorum, which gives
+// the reasons).
+func CheckWitnessQuorum(min, n int) error {
+	if n < 1 || min < 1 || min > n || 2*min <= n {
+		return fmt.Errorf("%w: quorum %d of %d admits a split view (2*min must exceed the number of witnesses)", ErrRecord, min, n)
+	}
+	return nil
+}
+
+// CheckWitnesses checks a witness list with its quorum: at most
+// MaxPinWitnesses witnesses, valid and unique names, keys of
+// ed25519.PublicKeySize bytes and unique, and CheckWitnessQuorum.
+func CheckWitnesses(list []Witness, min int) error {
+	if len(list) > MaxPinWitnesses {
+		return fmt.Errorf("%w: %d witnesses", ErrRecord, len(list))
+	}
+	if err := CheckWitnessQuorum(min, len(list)); err != nil {
+		return err
+	}
+	for i, w := range list {
+		if err := CheckWitnessName(w.Name); err != nil {
+			return err
+		}
+		if len(w.Pub) != ed25519.PublicKeySize {
+			return fmt.Errorf("%w: witness key length", ErrRecord)
+		}
+		for _, o := range list[:i] {
+			if o.Name == w.Name || o.Pub.Equal(w.Pub) {
+				return fmt.Errorf("%w: duplicate witness", ErrRecord)
+			}
+		}
+	}
+	return nil
+}
+
+// CheckPinIdentities checks the identity list of a pin (field 8,
+// translog.CheckIdentities): 1 to MaxPinIdentities elements with the
+// generations 1, 2, ... in this order, every key of
+// ed25519.PublicKeySize bytes and distinct from the others, and the last
+// element equal to (gen, pub).
+func CheckPinIdentities(list []PlatformIdentity, gen uint32, pub ed25519.PublicKey) error {
+	if len(list) == 0 || len(list) > MaxPinIdentities {
+		return fmt.Errorf("%w: identity list has %d generations", ErrRecord, len(list))
+	}
+	for i, id := range list {
+		if id.Gen != uint32(i+1) {
+			return fmt.Errorf("%w: identity generations must run from 1 without gaps", ErrRecord)
+		}
+		if len(id.Pub) != ed25519.PublicKeySize {
+			return fmt.Errorf("%w: identity key length", ErrRecord)
+		}
+		for _, o := range list[:i] {
+			if o.Pub.Equal(id.Pub) {
+				return fmt.Errorf("%w: identity key repeated", ErrRecord)
+			}
+		}
+	}
+	last := list[len(list)-1]
+	if last.Gen != gen || !last.Pub.Equal(pub) {
+		return fmt.Errorf("%w: identity list does not end with the current generation", ErrRecord)
+	}
+	return nil
+}
+
+func (p *PlatformPin) check() error {
+	if p.Gen == 0 || len(p.Pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("%w: invalid platform pin", ErrRecord)
+	}
+	if err := CheckPinOrigin(p.Origin); err != nil {
+		return err
+	}
+	if err := CheckWitnesses(p.Witnesses, p.MinWitnesses); err != nil {
+		return err
+	}
+	return CheckPinIdentities(p.Identities, p.Gen, p.Pub)
+}
+
+// Encode returns the canonical encoding after checking every rule that
+// DecodePlatformPin checks.
 func (p *PlatformPin) Encode() ([]byte, error) {
+	if err := p.check(); err != nil {
+		return nil, err
+	}
 	dev := uint8(0)
 	if p.Dev {
 		dev = 1
 	}
-	return rec.New(PlatformPinSchema).SetU32(1, p.Gen).SetBytes(2, p.Pub).SetU8(3, dev).Encode()
+	ws := make([]*rec.Record, 0, len(p.Witnesses))
+	for _, w := range p.Witnesses {
+		ws = append(ws, rec.New(WitnessSchema).SetString(1, w.Name).SetBytes(2, w.Pub))
+	}
+	ids := make([]*rec.Record, 0, len(p.Identities))
+	for _, id := range p.Identities {
+		ids = append(ids, rec.New(PlatformIdentitySchema).SetU32(1, id.Gen).SetBytes(2, id.Pub))
+	}
+	return rec.New(PlatformPinSchema).SetU32(1, p.Gen).SetBytes(2, p.Pub).SetU8(3, dev).
+		SetString(4, p.Origin).SetList(5, ws).SetU32(6, uint32(p.MinWitnesses)).SetList(8, ids).Encode()
 }
 
-// DecodePlatformPin decodes a pin.
+// DecodePlatformPin decodes a pin strictly: the dev flag 0 or 1, a valid
+// origin, a witness list with unique names and keys and an admissible
+// quorum (CheckWitnesses, translog doc.go "Witness quorum"), and an
+// identity list that passes CheckPinIdentities.
 func DecodePlatformPin(data []byte) (*PlatformPin, error) {
 	r, err := rec.Decode(PlatformPinSchema, data)
 	if err != nil {
 		return nil, err
 	}
-	if r.U32(1) == 0 || r.U8(3) > 1 {
+	if r.U8(3) > 1 || r.U32(6) > MaxPinWitnesses {
 		return nil, fmt.Errorf("%w: invalid platform pin", ErrRecord)
 	}
-	return &PlatformPin{Gen: r.U32(1), Pub: ed25519.PublicKey(r.Bytes(2)), Dev: r.U8(3) == 1}, nil
+	p := &PlatformPin{Gen: r.U32(1), Pub: ed25519.PublicKey(r.Bytes(2)), Dev: r.U8(3) == 1, Origin: r.String(4), MinWitnesses: int(r.U32(6))}
+	for _, e := range r.List(5) {
+		p.Witnesses = append(p.Witnesses, Witness{Name: e.String(1), Pub: ed25519.PublicKey(e.Bytes(2))})
+	}
+	for _, e := range r.List(8) {
+		p.Identities = append(p.Identities, PlatformIdentity{Gen: e.U32(1), Pub: ed25519.PublicKey(e.Bytes(2))})
+	}
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // ------------------------------------------------------------------- text

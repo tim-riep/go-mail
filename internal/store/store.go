@@ -155,6 +155,39 @@ func (s *Store) CreateUser(u *User) error {
 	return CreateFileAtomic(s.UserFile(u.ID), data)
 }
 
+// EnsureUser is CreateUser for resuming an interrupted write (translog
+// doc.go "Who writes", task 07 finding Q10 (3)): a user.rec that exists
+// with exactly the bytes of u counts as written; ErrExists only when it
+// holds other content.
+func (s *Store) EnsureUser(u *User) error {
+	data, err := u.Encode()
+	if err != nil {
+		return err
+	}
+	if err := MkdirAll(filepath.Dir(s.UserFile(u.ID))); err != nil {
+		return err
+	}
+	return createOrSame(s.UserFile(u.ID), data, MaxUserFile)
+}
+
+// createOrSame creates path with data like CreateFileAtomic; a file that
+// exists already is accepted when it holds exactly data (read with the
+// limit max) and is ErrExists otherwise.
+func createOrSame(path string, data []byte, max int64) error {
+	err := CreateFileAtomic(path, data)
+	if !errors.Is(err, ErrExists) {
+		return err
+	}
+	old, rerr := ReadFileLimited(path, max)
+	if rerr != nil {
+		return err
+	}
+	if !bytes.Equal(old, data) {
+		return err
+	}
+	return nil
+}
+
 // ReadUser reads and verifies user.rec of id: structure, generation chain
 // and that the ID in the record is the ID of its directory.
 func (s *Store) ReadUser(id ID) (*User, []byte, error) {
@@ -450,6 +483,31 @@ func (s *Store) WriteEpoch(e *Epoch) ([]byte, error) {
 	return data, nil
 }
 
+// EnsureEpoch is WriteEpoch for resuming an interrupted write (translog
+// doc.go "Who writes", task 07 finding Q10 (3)): an epoch.rec that exists
+// with exactly the encoding of e counts as written (its public key files
+// are written again, they are copies); ErrExists only when it holds other
+// content.
+func (s *Store) EnsureEpoch(e *Epoch) ([]byte, error) {
+	data, err := e.Encode()
+	if err != nil {
+		return nil, err
+	}
+	old, err := ReadFileLimited(s.EpochFile(e.MailboxID, e.Number), MaxRecordFile)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return s.WriteEpoch(e)
+	case err != nil:
+		return nil, err
+	case !bytes.Equal(old, data):
+		return nil, fmt.Errorf("%w: epoch %d", ErrExists, e.Number)
+	}
+	if err := s.writeEpochKeys(e); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 // writeEpochKeys writes content.pub and meta.pub of e. The public key
 // files are copies for readers of section 4; the signed epoch.rec is
 // authoritative. They are written before epoch.rec so that a visible
@@ -463,6 +521,57 @@ func (s *Store) writeEpochKeys(e *Epoch) error {
 		return err
 	}
 	return WriteFileAtomic(filepath.Join(dir, "meta.pub"), e.MetaPub.Bytes())
+}
+
+// ReplaceEpoch replaces epochs/<number>/epoch.rec of mailbox by next
+// (translog doc.go "Who writes", step 3 of "Unlogged epoch.rec"). It
+// takes the mailbox lock itself (the caller must not hold it) and
+// replaces only when the stored file is byte for byte old and
+// unloggable(old) reports true; unloggable runs under the mailbox lock
+// (lock order mailbox, log) and reports whether appending old to the log
+// fails with translog.ErrOrder, so that only a record that can never be
+// logged is ever replaced. next must be a valid epoch.rec of the same
+// mailbox and number (ErrRecord or ErrChain otherwise). Every other
+// replacement is refused as by WriteEpoch (ErrExists); a missing file is
+// ErrNotFound.
+func (s *Store) ReplaceEpoch(mailbox ID, number uint32, old, next []byte, unloggable func([]byte) bool) error {
+	e, err := DecodeEpoch(next)
+	if err != nil {
+		return err
+	}
+	if e.MailboxID != mailbox || e.Number != number {
+		return fmt.Errorf("%w: the new epoch.rec names mailbox or epoch differently", ErrChain)
+	}
+	if unloggable == nil {
+		return fmt.Errorf("%w: epoch %d", ErrExists, number)
+	}
+	unlock, err := s.LockMailbox(mailbox)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	cur, err := ReadFileLimited(s.EpochFile(mailbox, number), MaxRecordFile)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(cur, old) || bytes.Equal(old, next) || !unloggable(append([]byte(nil), old...)) {
+		return fmt.Errorf("%w: epoch %d", ErrExists, number)
+	}
+	if err := s.writeEpochKeys(e); err != nil {
+		return err
+	}
+	return WriteFileAtomic(s.EpochFile(mailbox, number), next)
+}
+
+// ReadPlatformPin reads identity-<gen>.pin from path (outside the data
+// directory: the client gets it with a client update, the server from
+// its configuration) with the limit MaxPinFile and decodes it strictly.
+func ReadPlatformPin(path string) (*PlatformPin, error) {
+	data, err := ReadFileLimited(path, MaxPinFile)
+	if err != nil {
+		return nil, err
+	}
+	return DecodePlatformPin(data)
 }
 
 // Replacing an epoch.rec that can never become valid (task 06c).

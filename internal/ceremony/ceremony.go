@@ -5,11 +5,15 @@
 // private keys into a separate key directory, which must not be inside
 // the data directory. The root is written as a file that is clearly
 // marked insecure. The pin it writes for clients carries the development
-// flag; clients accept it only with --insecure-no-log.
+// flag, the origin DevOrigin, the witnesses and the identity list (pin
+// fields 4 to 6 and 8, translog doc.go "Pin"); clients accept it only
+// with --insecure-no-log.
 package ceremony
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,9 +22,12 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/sumdb/note"
+
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/witness"
 )
 
 // File names in the key directory.
@@ -29,6 +36,18 @@ const (
 	AdminKeyFile  = "admin-1.key"
 	IngestKeyFile = "ingest-1.key"
 	PinFile       = "identity-1.pin"
+	// WitnessKeyFile is the note signer key of the development witness
+	// that InitDev creates when no witness is given.
+	WitnessKeyFile = "witness-dev.key"
+)
+
+// Pin fields of the development ceremony (translog doc.go "Pin").
+const (
+	// DevOrigin is the log origin of a development platform.
+	DevOrigin = "gomail-dev"
+	// DevWitnessName is the name of the development witness that InitDev
+	// creates when no witness is given.
+	DevWitnessName = "gomail-dev-witness"
 )
 
 // ErrKeyDir reports a key directory inside the data directory or one
@@ -48,8 +67,28 @@ func inside(dir, root string) bool {
 }
 
 // InitDev runs the development ceremony. log receives the certificates
-// (phase 1: translog.Unverified, which ignores them).
-func InitDev(dataDir, keyDir string, now time.Time, log translog.Log) (*Result, error) {
+// (until task 15: translogtest.Unverified, which ignores them).
+//
+// The pin carries the origin DevOrigin, the witnesses and their quorum
+// (CheckWitnesses: 1 <= minWitnesses <= len(witnesses) and
+// 2*minWitnesses > len(witnesses), refused before anything is written)
+// and the identity list with generation 1. With no witnesses and
+// minWitnesses 0, InitDev creates one development witness key
+// (DevWitnessName, note signer key in keyDir/WitnessKeyFile, 0600) and
+// pins it with quorum 1 of 1. TODO(ask): 9.2 names no witness option
+// for "gomail-ceremony init --dev"; until the real ceremony (task 10)
+// the command uses that development witness.
+func InitDev(dataDir, keyDir string, now time.Time, log translog.Log, witnesses []witness.Key, minWitnesses int) (*Result, error) {
+	devWitness := len(witnesses) == 0 && minWitnesses == 0
+	pinned := make([]store.Witness, 0, len(witnesses))
+	for _, w := range witnesses {
+		pinned = append(pinned, store.Witness{Name: w.Name, Pub: w.Pub})
+	}
+	if !devWitness {
+		if err := store.CheckWitnesses(pinned, minWitnesses); err != nil {
+			return nil, err
+		}
+	}
 	st, err := store.Init(dataDir)
 	if err != nil {
 		return nil, err
@@ -117,8 +156,16 @@ func InitDev(dataDir, keyDir string, now time.Time, log translog.Log) (*Result, 
 			return nil, err
 		}
 	}
+	if devWitness {
+		w, err := devWitnessKey(keyDir)
+		if err != nil {
+			return nil, err
+		}
+		pinned, minWitnesses = []store.Witness{w}, 1
+	}
 	idPub := identity.Public().(ed25519.PublicKey)
-	pin := &store.PlatformPin{Gen: 1, Pub: idPub, Dev: true}
+	pin := &store.PlatformPin{Gen: 1, Pub: idPub, Dev: true, Origin: DevOrigin, Witnesses: pinned, MinWitnesses: minWitnesses,
+		Identities: []store.PlatformIdentity{{Gen: 1, Pub: idPub}}}
 	pinData, err := pin.Encode()
 	if err != nil {
 		return nil, err
@@ -177,11 +224,34 @@ func ReadKey(path string, role uint8) (ed25519.PrivateKey, uint32, error) {
 	return priv, gen, nil
 }
 
-// ReadPin reads a platform pin.
-func ReadPin(path string) (*store.PlatformPin, error) {
-	data, err := store.ReadFileLimited(path, 4096)
+// ReadPin reads a platform pin (read limit store.MaxPinFile).
+func ReadPin(path string) (*store.PlatformPin, error) { return store.ReadPlatformPin(path) }
+
+// devWitnessKey creates the development witness: a note signer key in
+// keyDir/WitnessKeyFile and the pinned public key.
+func devWitnessKey(keyDir string) (store.Witness, error) {
+	skey, vkey, err := note.GenerateKey(rand.Reader, DevWitnessName)
 	if err != nil {
-		return nil, err
+		return store.Witness{}, err
 	}
-	return store.DecodePlatformPin(data)
+	// vkey is <name>+<hash>+base64(0x01 || Ed25519 public key); the
+	// name has no "+", the base64 part may.
+	raw, err := base64.StdEncoding.DecodeString(vkeyData(vkey))
+	if err != nil || len(raw) != 1+ed25519.PublicKeySize || raw[0] != 1 {
+		return store.Witness{}, fmt.Errorf("ceremony: unexpected witness key format")
+	}
+	if err := store.CreatePrivateFileAtomic(filepath.Join(keyDir, WitnessKeyFile), []byte(skey+"\n")); err != nil {
+		return store.Witness{}, err
+	}
+	return store.Witness{Name: DevWitnessName, Pub: ed25519.PublicKey(raw[1:])}, nil
+}
+
+// vkeyData returns the key part of a note verifier key
+// <name>+<hash>+<base64>.
+func vkeyData(vkey string) string {
+	parts := strings.SplitN(vkey, "+", 3)
+	if len(parts) != 3 {
+		return ""
+	}
+	return parts[2]
 }

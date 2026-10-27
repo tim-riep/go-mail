@@ -25,7 +25,7 @@ type records struct {
 	userID, mbx                             store.ID
 }
 
-func newID(t *testing.T) store.ID {
+func newID(t testing.TB) store.ID {
 	t.Helper()
 	id, err := store.NewID(nil)
 	if err != nil {
@@ -34,7 +34,7 @@ func newID(t *testing.T) store.ID {
 	return id
 }
 
-func makeRecords(t *testing.T) *records {
+func makeRecords(t testing.TB) *records {
 	t.Helper()
 	seed, err := keys.NewSeed(nil)
 	if err != nil {
@@ -438,40 +438,17 @@ func TestInterfaceStubs(t *testing.T) {
 	if !v.IsRevoked(store.KeyRoleIngest, 2) || v.IsRevoked(store.KeyRoleIngest, 1) || v.IsRevoked(store.KeyRoleAdmin, 2) {
 		t.Fatal("IsRevoked")
 	}
-	// Until task 07 every check fails closed.
+	// A Verifier without pinned anchors accepts nothing.
 	for _, err := range []error{
 		v.CheckHead(testHead(), nil), v.Fresh(time.Now()), v.CheckInclusion(0, nil, nil),
 		v.CheckCheckpoint("o", 1, tlog.Hash{}, 0, nil),
 	} {
-		if !errors.Is(err, ErrNotImplemented) {
-			t.Fatal(err)
+		if err == nil {
+			t.Fatal("empty verifier accepted")
 		}
 	}
-	if l, err := Open(Options{}); l != nil || !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("Open")
+	if l, err := Open(Options{}); l != nil || !errors.Is(err, ErrConsistency) {
+		t.Fatal("Open without a data directory")
 	}
-	u, _ := NewUnverified(true)
-	var log Log = u
-	if i, err := log.Append(KindUser, nil); i != NoIndex || err != nil {
-		t.Fatal("Append")
-	}
-	if h, err := log.Refresh(time.Now()); h != nil || err != nil {
-		t.Fatal("Refresh")
-	}
-	if _, err := log.Head(); !errors.Is(err, ErrNoLog) {
-		t.Fatal("Head")
-	}
-	if _, err := log.Entry(0); !errors.Is(err, ErrNoLog) {
-		t.Fatal("Entry")
-	}
-	if _, err := log.InclusionProof(0, 1); !errors.Is(err, ErrNoLog) {
-		t.Fatal("InclusionProof")
-	}
-	if _, err := log.ConsistencyProof(1, 2); !errors.Is(err, ErrNoLog) {
-		t.Fatal("ConsistencyProof")
-	}
-	if es, err := log.Lookup(KindEpoch, nil); es != nil || err != nil {
-		t.Fatal("Lookup")
-	}
-	var _ Operator = (Operator)(nil)
+	var _ Operator = (*operatorLog)(nil)
 }

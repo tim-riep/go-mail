@@ -12,3 +12,6 @@ func lockPath(path string, exclusive, wait bool) (func(), error) { return nil, e
 func lockFile(path string) (func(), error)    { return nil, errNoLocks }
 func tryLockFile(path string) (func(), error) { return nil, errNoLocks }
 func probeLock(path string) error             { return errNoLocks }
+
+// LockPath is not available on this platform; the PoC runs on Unix.
+func LockPath(path string) (func(), error) { return nil, errNoLocks }

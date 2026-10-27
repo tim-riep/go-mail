@@ -180,3 +180,10 @@ func probeLock(path string) error {
 	}
 	return fcntlLock(f, syscall.F_UNLCK, false)
 }
+
+// LockPath takes the exclusive record lock on path (created with mode
+// FilePerm if missing) and waits for it, like LockMailbox. It is the lock
+// of the transparency log (translog log/lock): every appender and the
+// server when it writes a head hold it. The returned function releases
+// the lock; calling it twice is harmless.
+func LockPath(path string) (func(), error) { return lockFile(path) }

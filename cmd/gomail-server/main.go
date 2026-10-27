@@ -28,7 +28,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 func main() {
@@ -115,7 +115,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	tlog, err := translog.NewUnverified(*noLog)
+	tlog, err := translogtest.NewUnverified(*noLog)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -201,7 +201,7 @@ func address(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	tlog, err := translog.NewUnverified(*noLog)
+	tlog, err := translogtest.NewUnverified(*noLog)
 	if err != nil {
 		return fail(stderr, err)
 	}

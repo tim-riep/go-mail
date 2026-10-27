@@ -536,7 +536,7 @@ func TestSmallRecords(t *testing.T) {
 	if _, _, _, err := DecodePlatformKey(bad); err == nil {
 		t.Fatal("role 9")
 	}
-	pin := &PlatformPin{Gen: 1, Pub: k.Public().(ed25519.PublicKey), Dev: true}
+	pin := testPin(k.Public().(ed25519.PublicKey))
 	pd, _ := pin.Encode()
 	if d, err := DecodePlatformPin(pd); err != nil || !d.Dev || d.Gen != 1 || !d.Pub.Equal(pin.Pub) {
 		t.Fatal("pin")

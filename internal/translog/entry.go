@@ -162,22 +162,42 @@ func (e *Entry) Encode() ([]byte, error) {
 // the cost); the client's audit index (doc.go "Audit") stores what it
 // derived from an entry and never decodes or checks an entry twice.
 func DecodeEntry(data []byte, index int64) (*Entry, error) {
+	e, _, err := decodeEntry(data, index)
+	return e, err
+}
+
+// decodeEntry is DecodeEntry that also returns the decoded content
+// (decodeContent).
+func decodeEntry(data []byte, index int64) (*Entry, any, error) {
 	if index < 0 || index >= MaxTreeSize {
-		return nil, fmt.Errorf("%w: index out of range", ErrEntry)
+		return nil, nil, fmt.Errorf("%w: index out of range", ErrEntry)
 	}
 	r, err := rec.Decode(EntrySchema, data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEntry, err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrEntry, err)
 	}
 	e := &Entry{Key: Key{Kind: Kind(r.U8(1)), Subject: r.Bytes(2), Seq: r.I64(3)}, Content: r.Bytes(4), Index: index}
-	k, err := KeyOf(e.Kind, e.Content)
+	k, obj, err := decodeContent(e.Kind, e.Content)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !k.Equal(e.Key) {
-		return nil, fmt.Errorf("%w: key does not match the content", ErrEntry)
+		return nil, nil, fmt.Errorf("%w: key does not match the content", ErrEntry)
 	}
-	return e, nil
+	return e, obj, nil
+}
+
+// keyID is the identifier of a key in the audit index and the relative
+// path below log/keys/: <kind>/<hex SHA-256(subject)>/<seq>. Subjects
+// (addresses, IDs) never appear in clear.
+func keyID(k Key) string {
+	return subjectID(k.Kind, k.Subject) + "/" + strconv.FormatInt(k.Seq, 10)
+}
+
+// subjectID is <kind>/<hex SHA-256(subject)>.
+func subjectID(kind Kind, subject []byte) string {
+	h := sha256.Sum256(subject)
+	return kind.String() + "/" + hex.EncodeToString(h[:])
 }
 
 // LeafHash is the hash of an encoded entry in the Merkle tree:
@@ -209,64 +229,82 @@ func hasType(b []byte, s *rec.Schema) bool { return bytes.HasPrefix(b, s.Prefix(
 // (Check* of Log, see doc.go), except that a user.rec is only decodable
 // with a valid chain of generation certificates.
 func KeyOf(kind Kind, content []byte) (Key, error) {
+	k, _, err := decodeContent(kind, content)
+	return k, err
+}
+
+// decodeContent is KeyOf that also returns the decoded record:
+// *store.User, *store.Epoch, *store.AddressAssignment,
+// *keys.PlatformCert or *keys.PlatformSuccession. The validity rules use
+// it so that an entry is decoded only once.
+func decodeContent(kind Kind, content []byte) (Key, any, error) {
 	if len(content) > MaxContent {
-		return Key{}, fmt.Errorf("%w: content too large", ErrEntry)
+		return Key{}, nil, fmt.Errorf("%w: content too large", ErrEntry)
 	}
 	switch kind {
 	case KindUser:
 		u, err := store.DecodeUser(content)
 		if err != nil {
-			return Key{}, fmt.Errorf("%w: %v", ErrEntry, err)
+			return Key{}, nil, fmt.Errorf("%w: %v", ErrEntry, err)
 		}
-		return Key{Kind: kind, Subject: clone(u.ID[:]), Seq: int64(len(u.Generations))}, nil
+		return Key{Kind: kind, Subject: clone(u.ID[:]), Seq: int64(len(u.Generations))}, u, nil
 	case KindEpoch:
 		e, err := store.DecodeEpoch(content)
 		if err != nil {
-			return Key{}, fmt.Errorf("%w: %v", ErrEntry, err)
+			return Key{}, nil, fmt.Errorf("%w: %v", ErrEntry, err)
 		}
-		return Key{Kind: kind, Subject: clone(e.MailboxID[:]), Seq: int64(e.Number)}, nil
+		return Key{Kind: kind, Subject: clone(e.MailboxID[:]), Seq: int64(e.Number)}, e, nil
 	case KindAddress:
 		a, err := store.DecodeAddressAssignment(content)
 		if err != nil {
-			return Key{}, fmt.Errorf("%w: %v", ErrEntry, err)
+			return Key{}, nil, fmt.Errorf("%w: %v", ErrEntry, err)
 		}
 		if a.ValidFrom < 0 {
-			return Key{}, fmt.Errorf("%w: negative valid_from", ErrEntry)
+			return Key{}, nil, fmt.Errorf("%w: negative valid_from", ErrEntry)
 		}
-		return Key{Kind: kind, Subject: []byte(a.Address), Seq: a.ValidFrom}, nil
+		return Key{Kind: kind, Subject: []byte(a.Address), Seq: a.ValidFrom}, a, nil
 	case KindPlatform:
-		name, err := platformName(content)
+		name, obj, err := platformName(content)
 		if err != nil {
-			return Key{}, err
+			return Key{}, nil, err
 		}
-		return Key{Kind: kind, Subject: []byte(name), Seq: 0}, nil
+		return Key{Kind: kind, Subject: []byte(name), Seq: 0}, obj, nil
 	}
-	return Key{}, fmt.Errorf("%w: unknown kind %d", ErrEntry, kind)
+	return Key{}, nil, fmt.Errorf("%w: unknown kind %d", ErrEntry, kind)
 }
 
 // platformName returns the file name of section 4 under which a
-// certificate or succession is stored in platform/.
-func platformName(content []byte) (string, error) {
+// certificate or succession is stored in platform/, and the decoded
+// record.
+func platformName(content []byte) (string, any, error) {
 	switch {
 	case hasType(content, keys.PlatformCertSchema):
 		c, err := keys.DecodePlatformCert(content)
 		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrEntry, err)
+			return "", nil, fmt.Errorf("%w: %v", ErrEntry, err)
 		}
-		role := "admin"
-		if c.Role == keys.RoleIngest {
-			role = "ingest"
-		}
-		return store.PlatformFileName(role, c.Gen, "cert"), nil
+		return certName(c.Role, c.Gen), c, nil
 	case hasType(content, keys.PlatformSuccessionSchema):
 		s, err := keys.DecodePlatformSuccession(content)
 		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrEntry, err)
+			return "", nil, fmt.Errorf("%w: %v", ErrEntry, err)
 		}
-		return store.PlatformFileName("identity", s.Gen, "succ"), nil
+		return succName(s.Gen), s, nil
 	}
-	return "", fmt.Errorf("%w: not a platform certificate or succession", ErrEntry)
+	return "", nil, fmt.Errorf("%w: not a platform certificate or succession", ErrEntry)
 }
+
+// certName returns admin-<gen>.cert or ingest-<gen>.cert.
+func certName(role keys.Role, gen uint32) string {
+	r := "admin"
+	if role == keys.RoleIngest {
+		r = "ingest"
+	}
+	return store.PlatformFileName(r, gen, "cert")
+}
+
+// succName returns identity-<gen>.succ.
+func succName(gen uint32) string { return store.PlatformFileName("identity", gen, "succ") }
 
 func clone(b []byte) []byte { return append([]byte(nil), b...) }
 
@@ -336,7 +374,4 @@ func TilePath(t tlog.Tile) string { return path.Join(TilesDir, t.Path()) }
 // KeyPath returns the duplicate index file of a key:
 // log/keys/<kind>/<hex SHA-256(subject)>/<seq>. Hashing the subject
 // keeps addresses and binary IDs out of file names.
-func KeyPath(k Key) string {
-	h := sha256.Sum256(k.Subject)
-	return path.Join(KeysDir, k.Kind.String(), hex.EncodeToString(h[:]), strconv.FormatInt(k.Seq, 10))
-}
+func KeyPath(k Key) string { return path.Join(KeysDir, keyID(k)) }

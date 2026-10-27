@@ -14,8 +14,13 @@ import (
 	"github.com/tim-riep/go-mail/internal/rec"
 )
 
-// MaxOrigin bounds the origin of a checkpoint (the name of the log).
+// MaxOrigin bounds the origin of a checkpoint and of a pin (the name of
+// the log, translog.MaxOrigin).
 const MaxOrigin = 128
+
+// MaxCheckpointSize bounds the tree size of a checkpoint
+// (translog.MaxTreeSize); the smallest is 1.
+const MaxCheckpointSize int64 = 1 << 40
 
 // CheckpointSchema is mailboxes/<id>/checkpoints/<user-id>-<device-id>.rec
 // (2.7 "Abgleich zwischen Clients", section 4): the tree head a device of
@@ -54,8 +59,9 @@ func (c *Checkpoint) check() error {
 		return fmt.Errorf("%w: incomplete checkpoint", ErrRecord)
 	case c.Origin == "":
 		return fmt.Errorf("%w: checkpoint without origin", ErrRecord)
-	case c.Size < 0 || c.HeadTime < 0:
-		return fmt.Errorf("%w: negative tree size or time", ErrRecord)
+	case c.Size < 1 || c.Size > MaxCheckpointSize || c.HeadTime < 0:
+		// A head of the empty log is never signed (translog.Head).
+		return fmt.Errorf("%w: tree size or time out of range", ErrRecord)
 	}
 	return nil
 }

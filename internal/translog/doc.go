@@ -41,7 +41,11 @@
 // exclusive, never replaced) or store.WriteFileAtomic (tree.rec, heads:
 // replaced atomically), with the rights of section 9.1, and read with
 // store.ReadFileLimited (entries MaxEntryFile, heads MaxHeadNote, tiles
-// 256*32 bytes, tree.rec and keys rec-sized).
+// 256*32 bytes, tree.rec and keys rec-sized). Two exceptions of task 07,
+// both for files that only a writer past Append can have put there: a
+// tile that exists with exactly the bytes to write is accepted (other
+// bytes: ErrConsistency), and a key file that names another index is
+// replaced, because keys/ is derived data that no reader trusts alone.
 //
 // Entry (EntrySchema): kind (1 user, 2 epoch, 3 address, 4 platform),
 // subject, seq, content. The content is the unchanged canonical encoding
@@ -209,8 +213,7 @@
 //     missing), with the same user ID and root key and byte-identical
 //     certificates 1..n-1 (binds ID and root, S16; ErrOrder).
 //   - epoch (m, n), checked against the valid epoch entries (m, 1) to
-//     (m, n-1) replayed through store.Chain (task 02 adds store.Chain;
-//     today store.CheckLink covers part of it), so that:
+//     (m, n-1) replayed through store.Chain, so that:
 //     n > 1: the entry (m, n-1) is valid and logged before
 //     (ErrPrerequisite); prev_hash equals SHA-256 of the content of
 //     (m, n-1); the signer is a user member of (m, n-1) and of (m, n)
@@ -386,13 +389,25 @@
 //     it by exactly the logged content (which some member logged
 //     without writing store, breaking this protocol).
 //
-// store cannot ask the log itself (translog imports store). Proposal for
-// task 07 (store) and 14 (client): store.ReplaceEpoch(mailbox, number,
-// old, new []byte, unloggable func(old []byte) bool) replaces under the
-// mailbox lock only when the stored bytes equal old and unloggable(old)
-// reports true; the client passes a function that runs steps 1 and 2
-// and reports whether the outcome is ErrOrder. store refuses every other
-// replacement as today.
+// store cannot ask the log itself (translog imports store). Built by
+// task 07, used by task 14: store.ReplaceEpoch(mailbox, number, old,
+// new []byte, unloggable func(old []byte) bool) takes the mailbox lock
+// itself (the caller must not hold it: the lock is not reentrant within
+// a process) and replaces only when the stored bytes equal old, new is
+// a valid epoch.rec of the same mailbox and number, and unloggable(old)
+// reports true; unloggable runs under the mailbox lock, so the client
+// passes a function that runs steps 1 and 2 (taking log/lock inside, lock
+// order mailbox, log) and reports whether the outcome is ErrOrder. The
+// client appends the new epoch.rec afterwards like any epoch n > 1.
+// store refuses every other replacement as today (ErrExists).
+//
+// Resuming (task 07 finding Q10 (3)): store.EnsureUser and
+// store.EnsureEpoch are CreateUser and WriteEpoch for step 3 of the
+// first entries and for a crash between record and log entry: a file
+// that exists with exactly the bytes to write counts as written, and
+// ErrExists is reported only for other content. CreateMailbox removes
+// its copy from the client directory right after mailbox.rec is
+// written (task 14).
 //
 // Only the server signs heads (it holds the log key, Q4) and only it
 // writes heads/. Witnesses never write to the data directory; they talk
@@ -514,7 +529,26 @@
 // keeps Pending{index, leaf hash, time At by its own clock} in
 // state.json (Verifier.Pending). Refresh drops a pending entry once a
 // verified head covers it and the record proof for its index verifies
-// with its leaf (ErrConsistency otherwise).
+// with its leaf (ErrConsistency otherwise). Verified means that the head
+// passed CheckHead first (task 07c finding 2): a head that CheckHead
+// refuses (no quorum: ErrWitness; another origin, a time in the future:
+// ErrHead) is never used for this check, so it cannot make the client
+// believe that its entry was replaced; Refresh returns the error of
+// CheckHead and nothing else changes.
+//
+// Pending entry after a rollback by one (see "What write access to log/
+// gives an attacker"): tree.rec was set back before a head covered the
+// own entry, the next Append of another writer removed it as a leftover
+// and took its index, and the first verified head covering the index
+// holds the other entry. Refresh then returns ErrConsistency, keeps the
+// old reference head and the client log remembers the verdict:
+// CheckFresh and Refresh report it until a Refresh passes the Pending
+// check again against a verified tree at least as large, with or
+// without a new head. The caller (task 14) removes the entry from
+// Verifier.Pending, appends the record again (the key of the removed
+// entry is free again, so the record gets a new index and a new Pending
+// entry) and calls Refresh; ErrDuplicate on that Append means that the
+// other entry took the key, which the caller reports.
 //
 // A pending entry is withheld when a newer verified head appeared after
 // the append that does not cover it: the reference head has
@@ -571,9 +605,27 @@
 // certificates), applies the validity rules and keeps an index
 // subject -> entries in the client directory (never in the data
 // directory; like state.json it is part of the client's security, D57).
-// Lookup and the Check methods answer from this index, so "no entry" is
-// complete with respect to the reference head. A new device builds the
-// index from entry 0.
+// A new device builds the index from entry 0.
+//
+// Trust zone (task 07c finding 5). The index lies in the client
+// directory beside state.json and belongs to the same trust zone:
+// whoever can write it can as well write Verifier.Last into state.json.
+// Write access to the client directory is a compromise of the client
+// (D57), against which this design does not protect. The structural
+// checks of the index (checkStructure and checkKeys: field ranges, the
+// valid keys matching what was derived from them, every index below the
+// reference size; and the anchor, size and root of the reference head)
+// and the checks of an entry it names (included) protect against
+// damage, not against an attacker. When a Check method or Lookup uses
+// an entry the index names, it reads the entry from the data directory
+// and checks it again: its inclusion in the reference tree (proof
+// against Verifier.Last), its leaf and its key must be those the index
+// recorded (otherwise the index is discarded and rebuilt). The verdict
+// of the validity rules (valid or invalid, and what was derived from a
+// valid entry) is taken from the index and not recomputed. Lookup and
+// the Check methods answer from this index, so, under the assumption
+// that only the client itself writes its client directory, "no entry"
+// is complete with respect to the reference head.
 //
 // The index stores, per entry, its validity and what was derived from
 // it (key, signer, generation keys, valid_from); every entry is decoded
@@ -684,6 +736,38 @@
 // head, into every mailbox it is a member of, and checks the others'
 // with Verifier.CheckCheckpoint.
 //
+// store.Checkpoint (task 02) has exactly these fields; since task 07 it
+// requires 1 <= size <= MaxTreeSize (store.MaxCheckpointSize), like
+// Head: a head of the empty log is never signed, so a checkpoint of size
+// 0 names no head.
+//
+// Check rules for the caller of Verifier.CheckCheckpoint (task 14),
+// before the call; a checkpoint that fails one is ignored with a
+// warning, because it says nothing about the log:
+//
+//  1. the file decodes strictly (store.DecodeCheckpoint) and its name is
+//     <user_id>-<device_id>.rec of exactly these fields;
+//  2. user_id is a user member of the mailbox in whose checkpoints/ the
+//     file lies: a member of the head epoch of the mailbox's chain as
+//     the client verified it (CheckEpoch); a checkpoint of a non-member
+//     is ignored, whoever wrote it;
+//  3. user_gen is the current generation of user_id according to the
+//     log: the user entry (user_id, user_gen) is valid in the reference
+//     tree (CheckGeneration) and no entry (user_id, user_gen+1) is
+//     (ErrSuperseded): a revoked device cannot speak for the user;
+//  4. the signature (domain "checkpoint") verifies with the identity key
+//     of user_gen from that logged user entry.
+//
+// Role of head_time (Reading, strictest; TODO(ask)): it enters no
+// proof, but it orders the two views. All head times are the server's
+// clock, and the server never signs a smaller size after a larger one,
+// so a checkpoint smaller than the reference head must have head_time <=
+// Last.Time; a smaller checkpoint with a later time shows that the
+// server kept re-signing an old size for the other client after it
+// showed this one a newer tree (withholding, seen from outside):
+// ErrConsistency. For the same size the times may differ either way
+// (re-signatures, "Heads"); a larger checkpoint is ErrPending.
+//
 // # Pin (Q4; task 07 changes store)
 //
 // The client's trust anchor identity-<gen>.pin (gomail/v1/rec/platform-pin,
@@ -691,7 +775,7 @@
 //
 //	1 gen            u32     as today: the current identity generation
 //	2 pub            32 B    as today: its key
-//	3 dev            u8      as today; accepted only with client.Config.AllowDevIdentity (tests)
+//	3 dev            u8      as today; accepted only with client.Config.AllowDevIdentity (tests; task 14)
 //	4 origin         string  log origin, CheckOrigin rules
 //	5 witnesses      list of gomail/v1/rec/witness (1 name string, 2 pub 32 B)
 //	6 min_witnesses  u32     CheckQuorum: 1 <= min <= len(witnesses) and 2*min > len(witnesses)
@@ -706,14 +790,33 @@
 // S1), as is one whose field 8 fails CheckIdentities: generations 1 to
 // gen without gap, distinct keys, last element equal to fields 1 and 2.
 //
+// Built by task 07 (store.PlatformPin, store.DecodePlatformPin): fields
+// 4 to 6 and 8 are required, field 7 is not part of the schema (a pin
+// with it is refused like any unknown field). store.PlatformPin carries
+// the identity list (Identities, store.PlatformIdentity), so that
+// ceremony.PublishOptions.Pin (*store.PlatformPin) supplies the whole
+// list for Options.Identities, and the witnesses (store.Witness); the
+// witness element gomail/v1/rec/witness is store.WitnessSchema, and
+// witness.WitnessSchema refers to it. store keeps its own constants of
+// the same value (store.MaxPinFile, MaxPinWitnesses, MaxPinIdentities,
+// MaxOrigin) because it cannot import translog; TestStoreLimits checks
+// that they agree. Requirement on task 14: client.Config does not have
+// AllowDevIdentity yet (ceremony/api.go names it); task 14 adds it and
+// refuses a pin with dev = 1 unless it is set (only tests set it, no
+// command line flag), replacing today's coupling of the dev flag to
+// --insecure-no-log.
+//
 // Size (finding 03d-9, correcting "below 10 KiB" of task 03c): one
 // element of field 8 costs 82 bytes in the canonical encoding, so the
 // identity list with MaxIdentities = 256 generations takes about 21 KiB,
 // and the largest pin, with MaxWitnesses = 16 witnesses with names of 64
 // bytes and an origin of 128 bytes besides, about 23 KiB (TestPinSize
 // measures it: 23,343 bytes). Task 07 reads pins with the limit
-// MaxPinFile = 64 KiB, which also leaves room for field 7 should Q8 be
-// decided as proposed (about 39 KiB with 256 revoked entries).
+// MaxPinFile = 64 KiB (store.ReadPlatformPin), which also leaves room
+// for field 7 should Q8 be decided as proposed: at most MaxRevoked = 512
+// elements (task 07 finding Q10 (1)); with all of them, of the four
+// proposed components including revoked_at_time, the largest pin takes
+// 62,264 bytes (TestPinSize).
 //
 // Field 8 (finding 03c-3). Reading: a new device gets the pin of the
 // current generation, say identity-2.pin, and has to check admin-1.cert
@@ -736,8 +839,8 @@
 // Verifier.Revoked stays empty and no rule of this design depends on it;
 // its shape above is the one to build if Q8 is decided as proposed (see
 // "Platform generations"; a fourth component revoked_at_time is proposed
-// there). The witness element schema is defined in package witness
-// (witness.WitnessSchema) and moves to store when the pin uses it.
+// there). The witness element schema is store.WitnessSchema since task
+// 07 (see above).
 //
 // # Additions to 9.2
 //
@@ -760,11 +863,31 @@
 //     record lock for log/lock, store.ReplaceEpoch (see "Who writes");
 //     Append refuses instead of deleting beyond index n (finding
 //     03d-3); LogKeys from platform/ before opening a head (finding
-//     03d-1); MaxPendingHeadAge in Fresh (finding 03d-7).
+//     03d-1); MaxPendingHeadAge in Fresh (finding 03d-7); MaxRevoked,
+//     store.EnsureUser and store.EnsureEpoch, the wording of Refresh
+//     (task 07 finding Q10 (1), (3), (6)). Built in impl.go (Open, the
+//     client and the operator log), state.go (validity rules, audit
+//     index as JSON in Options.IndexFile) and files.go (log/); SignHead
+//     and PublishHead of the operator log return ErrNotImplemented until
+//     task 11. Superseded partial tiles are not deleted.
 //   - 08: witness (package witness).
 //   - 11: Operator.SignHead and PublishHead in the server, HTTP handlers
 //     of package witness, re-signing every HeadInterval, the repair of
-//     tree.rec from entries and heads (finding 03d-3).
+//     tree.rec from entries and heads (finding 03d-3). Duties from Q10
+//     (QUESTIONS.md), binding for task 11:
+//     (2) SignHead signs a tree only after it has itself synced log/,
+//     log/entries/ and the tree files (fsync of the files and the
+//     directories): a tree.rec that is visible is not yet durable, and
+//     a head over a tree lost in a crash could never be matched again;
+//     (4) a backup of log/ must cover every candidate the server ever
+//     handed to a witness (finding 03d-6, "What write access ...");
+//     after losing such a candidate the only way out is a new origin,
+//     that is a new log with new pins and witness configurations;
+//     (5) operating rule: after a succession of the platform identity
+//     the operator installs the new pin on the server (--pin) before
+//     ceremony.Publish and before the server restarts, so that the
+//     server judges the new successions and certificates against the
+//     same identity list as the clients.
 //   - 10: the ceremony (package ceremony, api.go).
 //   - 14: the client order for first entries (Register and
 //     CreateMailbox: client directory, Append, then data directory; "Who
@@ -783,15 +906,19 @@
 //
 //	grep -rnE --include='*.go' 'TODO\(phase3-translog\)' . | wc -l
 //
-// in the module root: 28, both at the base of task 03 (commit ba8b343)
-// and on this branch, one line per site. The pattern escapes the
-// parentheses, so this file, which contains it only in escaped form,
-// does not match it. By file: internal/client 10 (client.go 2,
-// mailbox.go 5, read.go 2, keygen.go 1), internal/ingest/delivery.go 4,
-// cmd/gomail-server/main.go 1, internal/ceremony/ceremony.go 1,
-// internal/store/records.go 1, internal/translog/translog.go 11
-// (Unverified). The table has one row per site; Unverified is one row
-// for its 11 methods, so it has 18 rows for the 28 sites. The figure 31
+// in the module root: 28 at the base of task 03 (commit ba8b343); 27
+// since task 02 (the site in internal/store/records.go, the binding of
+// user ID and root key, was resolved by the root's signature over
+// user.rec), and 27 after task 07, one line per site. The pattern
+// escapes the parentheses, so this file, which contains it only in
+// escaped form, does not match it. By file after task 07:
+// internal/client 10 (client.go 2, mailbox.go 5, read.go 2, keygen.go
+// 1), internal/ingest/delivery.go 4, cmd/gomail-server/main.go 1,
+// internal/ceremony/ceremony.go 1,
+// internal/translog/translogtest/unverified.go 11 (Unverified, moved
+// there from translog.go by task 07 with its marks). The table has one
+// row per site; Unverified is one row for its 11 methods, so it has 17
+// rows for the 27 sites. The figure 31
 // in task 03 and ORCHESTRATION.md counted mentions in the documents as
 // well (HANDOFF.md, PHASE2-KLAERUNGEN.md K2 rule 4, ORCHESTRATION.md).
 // Wave 1 tasks running in parallel (01, 02) may add sites; they are
@@ -815,8 +942,7 @@
 //	ingest/delivery.go userKey             CheckRevokedSignature  CheckRevokedSignature (operator log)                 15
 //	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc)                             15
 //	ceremony/ceremony.go InitDev           AppendPlatform         Append(KindPlatform, data); real ceremony: Publish   15 (10)
-//	store/records.go UserSchema (comment)  binding ID <-> root    user.rec signature (task 02) + CheckUser order rule  15
-//	translog/translog.go Unverified x11    accept everything      moved to translogtest, --insecure-no-log removed     07, 15
+//	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15
 //
 // Not a tagged site, but changed by this design:
 //

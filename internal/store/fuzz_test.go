@@ -91,7 +91,7 @@ func FuzzDecodeRecords(f *testing.F) {
 	add(6, must((&EpochNote{MailboxID: ID{1}, Epoch: 1, Count: 1}).Encode()))
 	add(7, must(EncodeJournal([]Move{{"spool/a", "mailboxes/b"}})))
 	add(8, must(EncodePlatformKey(KeyRoleAdmin, 1, k)))
-	add(9, must((&PlatformPin{Gen: 1, Pub: k.Public().(ed25519.PublicKey), Dev: true}).Encode()))
+	add(9, must(testPin(k.Public().(ed25519.PublicKey)).Encode()))
 	a := &AddressAssignment{Address: "a@b.c", MailboxID: ID{1}, ValidFrom: 1, AdminGen: 1}
 	a.Sign(k)
 	add(10, must(a.Encode()))
