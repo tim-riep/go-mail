@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/shamir"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 // Prompter shows the seed words and asks for three of them (2.2).
@@ -256,14 +258,38 @@ func choosePositions(n, k int) ([]int, error) {
 	return out, nil
 }
 
-// Register publishes the user created by Keygen (2.2): it takes the
-// invitation code out of use, writes users/<id>/user.rec and appends it
-// to the log. The invitation is consumed first, so a code can never
-// register two users.
+// Register publishes the user created by Keygen (2.2). The user entry
+// of generation 1 is the first entry of the user ID in the log, bound to
+// nothing but its own content, so the order is (translog doc.go "Who
+// writes", findings 03c-1 and 03d-5): the record is the user.rec that
+// Keygen keeps in the client directory (step 1); the invitation is
+// consumed (store.ConsumeInvite, a code never registers two users) and
+// right after it InviteUsed is set in state.json; the user.rec is
+// appended to the log (step 2, Append is idempotent) and its pending
+// entry kept in state.json; only then users/<id>/user.rec is written to
+// the data directory (step 3, store.EnsureUser) and Registered is set.
+// A Register run again after a crash skips ConsumeInvite once InviteUsed
+// is set and continues with step 2. ErrDuplicate means that somebody
+// else logged the user ID first: Register stops before step 3. The error
+// names the whole remedy (task 14b point 10): the client directory holds
+// a user that can never be registered and the invitation is used up, so
+// the user deletes the client directory, runs keygen again (a new ID
+// needs a user.rec signed by the root, which exists only during keygen;
+// Keygen refuses a directory with a key store, ErrRegistered, so that it
+// never overwrites the keys of a user that may be registered) and
+// registers with a new invitation code.
 func Register(cfg Config, code store.ID) (store.ID, error) {
 	if err := cfg.check(); err != nil {
 		return store.ID{}, err
 	}
+	if _, err := os.Stat(cfg.statePath()); err != nil {
+		return store.ID{}, ErrNotRegistered
+	}
+	unlock, err := store.LockFile(filepath.Join(cfg.Dir, "lock"))
+	if err != nil {
+		return store.ID{}, err
+	}
+	defer unlock()
 	st, err := loadState(cfg.statePath())
 	if err != nil {
 		return store.ID{}, err
@@ -282,17 +308,42 @@ func Register(cfg Config, code store.ID) (store.ID, error) {
 	if err != nil {
 		return store.ID{}, err
 	}
-	if err := cfg.Store.ConsumeInvite(code); err != nil {
+	if len(user.Generations) != 1 {
+		return store.ID{}, ErrNotRegistered
+	}
+	if _, err := os.Lstat(cfg.Store.UserFile(user.ID)); err == nil && !st.InviteUsed {
+		return store.ID{}, fmt.Errorf("client: user ID already taken: %w", store.ErrExists)
+	}
+	if !st.InviteUsed {
+		if err := cfg.Store.ConsumeInvite(code); err != nil {
+			return store.ID{}, err
+		}
+		st.InviteUsed = true
+		if err := saveState(cfg.statePath(), st); err != nil {
+			return store.ID{}, err
+		}
+	}
+	if crash("register-invite") {
+		return store.ID{}, errCrashed
+	}
+	lc, err := openLog(&cfg, st, false)
+	if err != nil {
 		return store.ID{}, err
 	}
-	if err := cfg.Store.CreateUser(user); err != nil {
-		if errors.Is(err, store.ErrExists) {
-			return store.ID{}, fmt.Errorf("client: user ID already taken: %w", err)
+	defer lc.close()
+	if _, err := lc.appendRecord(translog.KindUser, data); err != nil {
+		if errors.Is(err, translog.ErrDuplicate) {
+			return store.ID{}, fmt.Errorf("client: the user ID is already taken in the transparency log, so this client directory can never be registered and its invitation code is used up; delete the client directory %s, run keygen again and register with a new invitation code: %w", cfg.Dir, err)
 		}
 		return store.ID{}, err
 	}
-	// TODO(phase3-translog): user.rec into the log; the generation is valid only from then on (2.2 rule 3).
-	if err := cfg.Log.AppendUser(user.ID, data); err != nil {
+	if crash("register-logged") {
+		return store.ID{}, errCrashed
+	}
+	if err := cfg.Store.EnsureUser(user); err != nil {
+		if errors.Is(err, store.ErrExists) {
+			return store.ID{}, fmt.Errorf("client: user ID already taken: %w", err)
+		}
 		return store.ID{}, err
 	}
 	st.Registered = true

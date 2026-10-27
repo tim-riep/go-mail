@@ -9,6 +9,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -78,19 +79,20 @@ type Env struct {
 	// environment from NewLogged (Log is the same log), nil in one from
 	// New.
 	Operator translog.Operator
+	// AutoHeads lets the server of the platform sign a head of the
+	// committed tree, cosigned by the witness, and publish it before
+	// every Refresh of a client (Config.BeforeRefresh), as gomail-server
+	// and the witness do on their cadence. On by default; tests of the
+	// freshness rules (2.3) and of withheld entries switch it off and
+	// publish heads themselves (PublishHead).
+	AutoHeads bool
+
+	// logOp is the operator log of the data directory in every
+	// environment: the clients append to and check against this log
+	// (their own client logs, task 14), the platform signs its heads.
+	logOp   translog.Operator
+	headsMu sync.Mutex
 }
-
-// clientLog is the operator log as the in-process clients of a logged
-// environment see it: every append and check goes to the real log of
-// the data directory, but Verified reports false, because the client
-// refuses the development pin of InitDev with a verified log
-// (client.ErrDevIdentity) and prints translog.Warning instead.
-// TODO(task-14): the client log (Options.Verifier, Refresh, state.json)
-// and client.Config.AllowDevIdentity replace this view.
-type clientLog struct{ translog.Log }
-
-// Verified is false: see clientLog.
-func (clientLog) Verified() bool { return false }
 
 // Warnings collects client warnings.
 type Warnings struct {
@@ -121,22 +123,22 @@ var Start = time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
 // only in a build with the tag gomail_dev (ceremony.InitDev), and
 // without the tag New and NewLogged skip the test (task 15b point 4: the
 // tests on a test platform run with "go test -tags
-// gomail_dev,gomail_test"). Clients
-// and the server of the environment use the accepting placeholder
-// translogtest.Unverified as their log; the certificates are in the
-// operator log of the data directory all the same (InitDev).
+// gomail_dev,gomail_test"). The server of the environment (Log, for
+// ingest) uses the accepting placeholder translogtest.Unverified; the
+// clients always work with their client log on the transparency log of
+// the data directory (task 14), into which InitDev wrote the certificates
+// and the environment writes every address assignment, forged epoch and
+// rotation.
 func New(t testing.TB) *Env {
 	t.Helper()
 	return newEnv(t, false)
 }
 
-// NewLogged is New with the transparency log: Log and Operator are the
-// operator log of the data directory, opened against the identity list,
-// origin and witnesses of the pin as gomail-server opens it, so that
-// ingest checks every user, epoch, address and certificate against it.
-// The in-process clients append to and check against the same log
-// (clientLog), and Mailbox logs every address assignment, signed with
-// the admin key, before addresses.json changes.
+// NewLogged is New with the transparency log on the server side too: Log
+// and Operator are the operator log of the data directory, opened
+// against the identity list, origin and witnesses of the pin as
+// gomail-server opens it, so that ingest checks every user, epoch,
+// address and certificate against it.
 func NewLogged(t testing.TB) *Env {
 	t.Helper()
 	return newEnv(t, true)
@@ -190,9 +192,10 @@ func newEnv(t testing.TB, logged bool) *Env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	logOp := openOperator(t, st, res.Pin)
 	var op translog.Operator
 	if logged {
-		op = openOperator(t, st, res.Pin)
+		op = logOp
 		log = op
 	}
 	ingest, _, err := ceremony.ReadKey(filepath.Join(res.KeyDir, ceremony.IngestKeyFile), store.KeyRoleIngest)
@@ -204,7 +207,75 @@ func newEnv(t testing.TB, logged bool) *Env {
 		t.Fatal(err)
 	}
 	return &Env{T: t, Base: base, Store: st, Log: log, Pin: res.Pin, IngestKey: ingest, AdminKey: admin, KeyDir: res.KeyDir,
-		Clock: clock, Warnings: &Warnings{}, Witness: wkey, WitnessSigner: wsigner, WitnessKeyFile: wkeyFile, Operator: op}
+		Clock: clock, Warnings: &Warnings{}, Witness: wkey, WitnessSigner: wsigner, WitnessKeyFile: wkeyFile, Operator: op,
+		AutoHeads: true, logOp: logOp}
+}
+
+// recordLog is the log into which ForgeEpoch and Rotate append: Log in
+// an environment from NewLogged (a test may put a placeholder there to
+// leave a record unlogged), the operator log of the data directory in
+// one from New, whose Log is the server's placeholder.
+func (e *Env) recordLog() translog.Log {
+	if e.Operator != nil {
+		return e.Log
+	}
+	return e.logOp
+}
+
+// LogOperator returns the operator log of the data directory into which
+// the clients of the environment append (in an environment from
+// NewLogged the same as Operator).
+func (e *Env) LogOperator() translog.Operator { return e.logOp }
+
+// PublishHead lets the server sign a head of the committed tree at the
+// time of the clock (Operator.SignHead with the ingest key, Q4), the
+// witness cosign it and the server publish it (PublishHead), as the log
+// side of gomail-server and gomail-witness do. It returns the head.
+func (e *Env) PublishHead() (*translog.Head, error) {
+	e.headsMu.Lock()
+	defer e.headsMu.Unlock()
+	signer, err := translog.NewLogSigner(e.IngestKey)
+	if err != nil {
+		return nil, err
+	}
+	h, err := e.logOp.SignHead(signer, e.Clock.Now())
+	if err != nil {
+		return nil, err
+	}
+	text, err := h.Text()
+	if err != nil {
+		return nil, err
+	}
+	msg, err := note.Sign(&note.Note{Text: string(text)}, signer, e.WitnessSigner)
+	if err != nil {
+		return nil, err
+	}
+	c := *h
+	c.Note = msg
+	if err := e.logOp.PublishHead(&c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// MustPublishHead is PublishHead that fails the test on an error.
+func (e *Env) MustPublishHead() *translog.Head {
+	e.T.Helper()
+	h, err := e.PublishHead()
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	return h
+}
+
+// beforeRefresh publishes a head before a client refreshes, while
+// AutoHeads is on. A head that cannot be signed (the clock of a test was
+// set back) is skipped: the client then judges the heads there are.
+func (e *Env) beforeRefresh() {
+	if !e.AutoHeads {
+		return
+	}
+	e.PublishHead()
 }
 
 // openOperator opens the operator log of st as gomail-server does: the
@@ -246,24 +317,21 @@ func (e *Env) OpenOperator() translog.Operator {
 // WitnessName is the name of the witness of a test platform.
 const WitnessName = "testenv-witness"
 
-// ClientConfig returns the configuration of a client in dir.
+// ClientConfig returns the configuration of a client in dir: the pin of
+// the development ceremony (accepted with AllowDevIdentity, which only
+// tests set) and the head publication of the platform before every
+// Refresh (AutoHeads).
 func (e *Env) ClientConfig(dir string) client.Config {
-	var log translog.Log = e.Log
-	if e.Operator != nil {
-		log = clientLog{e.Log}
-	}
-	return client.Config{Store: e.Store, Dir: dir, Pin: e.Pin, Log: log, Now: e.Clock.Now, Warn: e.Warnings.Add}
+	return client.Config{Store: e.Store, Dir: dir, Pin: e.Pin, AllowDevIdentity: true, BeforeRefresh: e.beforeRefresh,
+		Now: e.Clock.Now, Warn: e.Warnings.Add}
 }
 
 // AssignAddress logs the assignment of addr to mailbox mbx, signed with
 // the admin key and valid from now (2.3), as "gomail-server address add"
-// does; in an environment from New there is no log to write to and it
-// does nothing. The caller changes addresses.json.
+// does, in every environment: the clients check every recipient against
+// the log. The caller changes addresses.json.
 func (e *Env) AssignAddress(addr string, mbx store.ID) {
 	e.T.Helper()
-	if e.Operator == nil {
-		return
-	}
 	a, err := store.NormalizeAddress(addr)
 	if err != nil {
 		e.T.Fatal(err)
@@ -276,7 +344,7 @@ func (e *Env) AssignAddress(addr string, mbx store.ID) {
 	if err != nil {
 		e.T.Fatal(err)
 	}
-	if _, err := e.Operator.Append(translog.KindAddress, enc); err != nil {
+	if _, err := e.logOp.Append(translog.KindAddress, enc); err != nil {
 		e.T.Fatal(err)
 	}
 }
@@ -373,7 +441,8 @@ func (e *Env) DeviceLost(u *User) uint32 {
 // of generation current+1, appends their certificate (which revokes the
 // current generation) to user.rec signed by the root, writes user.rec to
 // the data directory and the client directory, the key store with the
-// new generation, appends user.rec to the log and opens the client again.
+// new generation, appends user.rec to the operator log of the data
+// directory and opens the client again.
 // It returns the new generation.
 func (e *Env) Rotate(u *User) uint32 {
 	e.T.Helper()
@@ -411,7 +480,8 @@ func (e *Env) Rotate(u *User) uint32 {
 	ksData, err := ks.Seal(Passphrase, nil)
 	fail(err)
 	fail(keys.WriteKeystoreFile(filepath.Join(u.Dir, "keystore"), ksData))
-	fail(e.Log.AppendUser(u.ID, data))
+	_, err = e.recordLog().Append(translog.KindUser, data)
+	fail(err)
 	e.Reopen(u)
 	return gen
 }
@@ -492,7 +562,12 @@ func (e *Env) Keystore(u *User) *keys.Keystore {
 // fresh keys with a wrap for signer only, folders.gml with name and the
 // inbox, epoch.rec in the log and mailbox.rec pointing to it. It is the
 // tool for forged epochs: an epoch signed by a removed member, a delegate
-// or a recovery recipient listed as a user.
+// or a recovery recipient listed as a user. The epoch is appended to the
+// operator log of the data directory if the log accepts it; a forged
+// epoch that the validity rules refuse (ErrOrder, ErrPrerequisite) or
+// whose number the log holds already (ErrDuplicate) stays
+// a file in the data directory without a log entry, as an attacker with
+// write access to it would leave it.
 func (e *Env) ForgeEpoch(signer *User, mbx store.ID, begin time.Time, reason store.Reason, members []store.Member, name string) *store.Epoch {
 	e.T.Helper()
 	fail := func(err error) {
@@ -572,7 +647,9 @@ func (e *Env) ForgeEpoch(signer *User, mbx store.ID, begin time.Time, reason sto
 	fail(e.Store.WriteFolders(mbx, n, folders))
 	data, err := e.Store.WriteEpoch(ep)
 	fail(err)
-	fail(e.Log.AppendEpoch(mbx, n, data))
+	if _, err := e.recordLog().Append(translog.KindEpoch, data); err != nil && !errors.Is(err, translog.ErrOrder) && !errors.Is(err, translog.ErrPrerequisite) && !errors.Is(err, translog.ErrDuplicate) {
+		e.T.Fatal(err)
+	}
 	next := *m
 	next.Epoch = n
 	fail(e.Store.WriteMailbox(&next))

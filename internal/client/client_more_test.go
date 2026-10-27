@@ -14,6 +14,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/testenv"
+	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 func TestSyncAfterFallbackNote(t *testing.T) {
@@ -272,6 +273,9 @@ func TestRevokedGeneration(t *testing.T) {
 		store.WriteFileAtomic(filepath.Join(dir, "user.rec"), data)
 		store.MkdirAll(filepath.Dir(env.Store.UserFile(uid)))
 		store.WriteFileAtomic(env.Store.UserFile(uid), data)
+		if _, err := env.LogOperator().Append(translog.KindUser, data); err != nil {
+			t.Fatal(err)
+		}
 		ksd, _ := ks.Seal(testenv.Passphrase, nil)
 		keys.WriteKeystoreFile(filepath.Join(dir, "keystore"), ksd)
 	}

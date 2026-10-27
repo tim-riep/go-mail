@@ -381,13 +381,24 @@
 //     the signature or the chain is wrong, or step 2 failed): the record
 //     can never be logged. Only then may a member replace it in store,
 //     under the mailbox lock, by a new epoch.rec with the same number
-//     that it creates and appends as usual.
-//  4. Append returns ErrDuplicate: another epoch with this number is
-//     logged and is the valid one (K2 rule 4); the file in store
-//     contradicts the log (ErrMismatch for every reader). It is never
-//     replaced by a new epoch. TODO(ask): whether a member may replace
-//     it by exactly the logged content (which some member logged
-//     without writing store, breaking this protocol).
+//     that it creates and appends as usual. Task 14b point 3: this holds
+//     for the epoch.rec that mailbox.rec names as well (a thief who also
+//     set mailbox.rec to it): a user member replaces it by its own new
+//     epoch n (store.ReplaceEpoch), and mailbox.rec keeps naming n; it
+//     is never set back to n-1 (2.4: the head never sinks). Ingest
+//     refuses a chain whose head is not logged, so no mail is encrypted
+//     for the replaced epoch. Readers report the fixed cause with the
+//     remedy ("Epoche n ist nicht loggbar; ein Mitglied behebt das mit
+//     share/revoke/sync").
+//  4. Append returns ErrDuplicate (or CheckEpoch ErrMismatch): another
+//     epoch with this number is logged and is the valid one (K2 rule 4);
+//     the file in store contradicts the log (ErrMismatch for every
+//     reader). Reading (task 14b point 13, the open question of task 14): it is
+//     never replaced by a client, not even by exactly the logged content
+//     (which some member logged without writing store, breaking this
+//     protocol); the mailbox stays blocked for changes, and the client
+//     warns with the fixed cause and the remedy, which is the operator's:
+//     remove the file after checking the log entry.
 //
 // store cannot ask the log itself (translog imports store). Built by
 // task 07, used by task 14: store.ReplaceEpoch(mailbox, number, old,
@@ -464,8 +475,13 @@
 //     heads/ above n). refuse looks at entries/<n+1>.rec and heads/
 //     only, so a new process (a restart) does not detect it and accepts
 //     the smaller tree; the running process detects it through seen
-//     (operatorCur), a client through its reference head and its Pending
-//     leaf. The window is therefore the entries appended since the
+//     (operatorCur). Of the clients only the writers of the dropped
+//     entries notice it (task 14, low finding of the verification of task
+//     15d), through their Pending check: ErrConsistency once a verified
+//     head covers the index with another entry, ErrWithheld when newer
+//     heads leave it out; every other client never had a verified head
+//     that covered the dropped entries, so its reference head says
+//     nothing about them. The window is therefore the entries appended since the
 //     newest published head, normally the appends of one HeadInterval
 //     (removing heads/ as well is the point "delete or roll back heads/"
 //     below, which witnesses and clients detect). The next Append of
@@ -482,8 +498,19 @@
 //     smaller tree; TestRepairTreeOrphans (rework15d_test.go) the
 //     orphans.
 //   - delete or roll back heads/: clients keep their last verified head
-//     and accept only extensions (ErrConsistency); without a newer head
-//     they become stale after 24 hours and stop (ErrStale).
+//     and accept only extensions; without a newer head they become stale
+//     after 24 hours and stop (ErrStale). Task 14b point 2: when the
+//     newest head left in heads/ is smaller than the reference head, it
+//     is judged with Verifier.CheckOlderHead and never taken over. If it
+//     is an older view of the same log (signed, cosigned, a time not
+//     later than the reference head, and the reference tree extends it
+//     by a consistency proof), Refresh reports ErrOlderHead and the
+//     client only warns ("älterer Kopf veröffentlicht"): the reference
+//     head counts while it is fresh (CheckFresh). A smaller head that the
+//     reference tree does not extend (a split view) or that was signed
+//     after the reference head (an old size re-signed, entries withheld;
+//     the rule of a smaller checkpoint, "Client checkpoints") is
+//     ErrConsistency, and the client stops.
 //   - write a signature line with the name and key hash of a pinned
 //     witness but an invalid signature into heads/<n>.sig: the head no
 //     longer opens for clients (note.Open fails on it). Denial of
@@ -795,7 +822,24 @@
 // server kept re-signing an old size for the other client after it
 // showed this one a newer tree (withholding, seen from outside):
 // ErrConsistency. For the same size the times may differ either way
-// (re-signatures, "Heads"); a larger checkpoint is ErrPending.
+// (re-signatures, "Heads"). Task 14b point 1: a larger checkpoint with
+// head_time < Last.Time shows the same the other way round (this client
+// is kept on the old size): ErrConsistency; a larger checkpoint with a
+// time not before Last.Time is ErrPending. The caller refreshes once
+// per operation and compares again; a checkpoint that stays larger is
+// reported on every operation with a warning ("ein Mitglied hat einen
+// neueren Kopf gesehen, den der Server hier nicht zeigt"), not as an
+// error: the server may simply not have published the head yet.
+//
+// Rules of task 14b for the writer (point 4): a client remembers, per
+// mailbox, the reference head and the generation of the checkpoint it
+// last wrote (client state.json, not derived from the reference head),
+// so that it writes a checkpoint whenever none was written for the
+// reference head and its current generation, also after Restore and
+// device lost, which change no head. Point 6 (Q20, strictest reading,
+// TODO(Q20)): a restored client stays marked "no confirmed state" until
+// a valid checkpoint of another user member agreed with its reference
+// head (nil from CheckCheckpoint); a sole member stays marked.
 //
 // # Pin (Q4; task 07 changes store)
 //
@@ -983,6 +1027,52 @@
 //     takes over no head until then;
 //     (c) after every Refresh the client calls CheckFresh, whatever
 //     Refresh returned, before it relies on the log (Log.Refresh).
+//     Built by task 14 (package client, files log.go and logcheck.go):
+//     the client opens its client log itself from the pin (there is no
+//     client.Config.Log and no --insecure-no-log; a development pin only
+//     with Config.AllowDevIdentity, which only tests set), keeps the
+//     reference head and the pending entries with their records in
+//     state.json, refreshes at Open and whenever a check answers
+//     ErrPending, and stops on CheckFresh (ErrStale, ErrWithheld) at the
+//     start of every read and change. The first entries follow "Who
+//     writes" (Register with InviteUsed, CreateMailbox with the copy in
+//     <client>/new-mailboxes/<id>/; ErrDuplicate gives the mailbox a new
+//     ID, for Register it stops), every other append is file first,
+//     then entry. An epoch.rec found unlogged is appended by the member
+//     (with the earlier epochs and the signer's user.rec), one that
+//     cannot be logged (ErrOrder) is replaced with store.ReplaceEpoch,
+//     for which the change releases its mailbox lock (the files of the
+//     replacement are checked again under the lock afterwards); an
+//     undecodable one with store.ReplaceInvalidEpoch as before. Readers
+//     compare mailbox.rec with Lookup(KindEpoch): a lower head is
+//     ErrRollback and the logged epochs belong to the chain. The pending
+//     entry dropped by a rollback by one is removed and appended again
+//     (point (b)). Checkpoints are written after every Refresh that
+//     changed the reference head and checked when a chain is loaded.
+//     Reading of task 14, TODO(ask): the persisted reference head is the
+//     signed note, parsed again without verifying its signatures
+//     (state.json is in the trust zone of the client directory); the
+//     LogKeys are not persisted, because Refresh rebuilds them from
+//     platform/ and the audited tree before it opens any head.
+//     Task 14b (findings of the verification of task 14): a checkpoint
+//     larger than the reference head makes the client refresh once and
+//     compare again (warning while it stays larger, ErrConsistency when
+//     it was signed before the reference head, Verifier.CheckCheckpoint);
+//     a newest head in heads/ smaller than the reference head is judged
+//     with Verifier.CheckOlderHead and only warns when it is an older
+//     view of the same log (ErrOlderHead); an epoch.rec at the head of
+//     mailbox.rec that can never be logged is replaced by a user member
+//     with the same number ("Unlogged epoch.rec" step 3), one that
+//     contradicts the log never ("Unlogged epoch.rec" step 4); the
+//     checkpoints are written whenever none was written for the
+//     reference head and the generation ("Client checkpoints"); an own
+//     entry dropped by a rollback leaves Pending only after its record
+//     was appended again, and an own user.rec that the log does not hold
+//     at Open is checked again after a rebuild of the audit index and
+//     after appending it once more; an audit index whose tables do not
+//     cover the reference size is rebuilt (checkKeys); the mark
+//     Unconfirmed stays until a checkpoint of another user member agreed
+//     (Q20); Sync and device lost refresh the client log once.
 //   - 15: the server, ingest, ceremony and store sites below; the
 //     server's pin (--pin, Options.Identities, finding 03d-2).
 //     Built by task 15 (the ceremony part, point 3 of the task, was
@@ -1092,6 +1182,9 @@
 // gomail-ceremony lost it with task 15b, which takes the ceremony to the
 // log: Publish appends to the operator log of the data directory, and
 // init --dev (InitDev) exists only in a build with the tag gomail_dev.
+// Task 14 resolves the 14 sites of internal/client (the rows marked 14
+// below) and removes the switch of gomailctl: 11 sites remain, all in
+// translogtest (Unverified, used by tests only).
 //
 //	file, function                         check today            replaced by (new interface)                          task
 //	client/client.go Open                  CheckFresh             Refresh(now), head into state.json, CheckFresh       14

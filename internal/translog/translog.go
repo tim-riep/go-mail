@@ -272,6 +272,16 @@ type Log interface {
 	// checks the Pending entries the reference head covers and applies
 	// the same freshness rules.
 	//
+	// A newest published head smaller than the reference head (task 14b
+	// point 2) is never taken over: it is judged with
+	// Verifier.CheckOlderHead (the checks of CheckHead up to step 4, a
+	// time not later than the reference head, a consistency proof from
+	// it to the reference head; ErrConsistency for a contradiction), the
+	// Pending entries are checked against the reference head and the
+	// freshness rules applied as without a published head, and Refresh
+	// returns ErrOlderHead when all of that passes: the caller warns and
+	// goes on while CheckFresh passes.
+	//
 	// Refresh applies an age limit only while Pending entries are
 	// uncovered (MaxPendingHeadAge, via Verifier.Fresh). Without Pending
 	// entries it returns nil also when the reference head is older than

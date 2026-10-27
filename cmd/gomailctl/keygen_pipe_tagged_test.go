@@ -31,8 +31,8 @@ func TestKeygenPipeTestBuild(t *testing.T) {
 			return "", false
 		}
 		in := pipeKeys{kb}
-		e := &env{stdin: bufio.NewReader(in), in: in, stdout: out, stderr: kb.err, now: c.env.Clock.Now}
-		code := e.run(append(append([]string{"keygen"}, args...), "--data", data, "--dir", dir, "--platform", c.pin, "--insecure-no-log"))
+		e := &env{stdin: bufio.NewReader(in), in: in, stdout: out, stderr: kb.err, now: c.env.Clock.Now, beforeRefresh: c.beforeRefresh()}
+		code := e.run(append(append([]string{"keygen"}, args...), "--data", data, "--dir", dir, "--pin", c.pin))
 		return code, out.String(), kb.err.String()
 	}
 	t.Setenv(testEnvKeygenPipeName, "1")

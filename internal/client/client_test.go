@@ -15,7 +15,6 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/testenv"
-	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 type wrongPrompter struct{ testenv.Echo }
@@ -114,9 +113,10 @@ func TestKeygenAndRegister(t *testing.T) {
 	}
 	c.Close()
 	c.Close()
-	// Every start without a log warns.
-	if !warned(env, "Ohne Transparenzlog") {
-		t.Fatal("missing --insecure-no-log warning")
+	// There is no start without the log (task 14): no warning of the
+	// placeholder.
+	if warned(env, "Ohne Transparenzlog") {
+		t.Fatal("warning of a start without the log")
 	}
 	// No file in the client directory holds the seed words in clear.
 	for _, f := range []string{"keystore", "user.rec", "state.json"} {
@@ -157,9 +157,9 @@ func TestOpenChecks(t *testing.T) {
 		t.Fatal("no pin")
 	}
 	bad = cfg
-	bad.Log = verifiedLog{env.Log}
+	bad.AllowDevIdentity = false
 	if _, err := client.Open(bad, testenv.Passphrase); !errors.Is(err, client.ErrDevIdentity) {
-		t.Fatal("development identity with a verifying log")
+		t.Fatal("development identity without AllowDevIdentity")
 	}
 	// Damaged state file.
 	os.WriteFile(filepath.Join(u.Dir, "state.json"), []byte("{"), 0o600)
@@ -167,11 +167,6 @@ func TestOpenChecks(t *testing.T) {
 		t.Fatal("damaged state")
 	}
 }
-
-// verifiedLog pretends to be a verifying log.
-type verifiedLog struct{ translog.Log }
-
-func (verifiedLog) Verified() bool { return true }
 
 func TestMailboxFoldersInspect(t *testing.T) {
 	f := newFixture(t)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
+	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/store"
 )
 
@@ -25,13 +26,11 @@ func TestUsageAndConfig(t *testing.T) {
 			t.Fatalf("%v accepted", args)
 		}
 	}
-	common := []string{"--data", data, "--dir", filepath.Join(dir, "c"), "--platform", filepath.Join(keys, ceremony.PinFile)}
-	// Without --insecure-no-log nothing starts (TODO(task-14): the client
-	// log replaces it).
-	if run(append([]string{"sync"}, common...), strings.NewReader(""), &out, &errb) != 1 || !strings.Contains(errb.String(), "insecure-no-log") {
-		t.Fatal("client without --insecure-no-log")
+	common := []string{"--data", data, "--dir", filepath.Join(dir, "c"), "--pin", filepath.Join(keys, ceremony.PinFile)}
+	// --insecure-no-log is no switch any more (task 14): a usage error.
+	if run(append([]string{"sync", "--insecure-no-log"}, common...), strings.NewReader(""), &out, &errb) != 2 {
+		t.Fatal("client with --insecure-no-log")
 	}
-	common = append(common, "--insecure-no-log")
 	// The commands below work beside a running server: its lock on
 	// locks/server, held in this process (9.1).
 	st, err := store.Open(data)
@@ -44,7 +43,7 @@ func TestUsageAndConfig(t *testing.T) {
 	}
 	defer release()
 	if run([]string{"sync", "--data", data}, strings.NewReader(""), &out, &errb) != 1 {
-		t.Fatal("missing --platform")
+		t.Fatal("missing --pin")
 	}
 	// keygen on stand-in terminals asks the passphrase twice; a mismatch
 	// stops it before anything is shown.
@@ -68,7 +67,10 @@ func TestUsageAndConfig(t *testing.T) {
 			t.Fatalf("keygen with %v: exit %d, screen %q, %s", c.answers, code, screen, kb.err.String())
 		}
 	}
-	// Wrong words: nothing is created, the screen is cleared.
+	// Wrong words: nothing is created, the screen is cleared. The test
+	// build accepts the development pin with GOMAIL_TEST_DEV_IDENTITY=1
+	// (devpin_tagged.go, task 14).
+	t.Setenv("GOMAIL_TEST_DEV_IDENTITY", "1")
 	screen := &tty{}
 	kb := &keyboard{err: &syncBuf{}}
 	kb.answer = func(prompt string) (string, bool) {
@@ -122,7 +124,7 @@ func TestPeerLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GOMAILCTL_PASSPHRASE", "pw")
-	args := []string{"sync", "--data", data, "--dir", filepath.Join(dir, "c"), "--platform", filepath.Join(keys, ceremony.PinFile), "--insecure-no-log"}
+	args := []string{"sync", "--data", data, "--dir", filepath.Join(dir, "c"), "--platform", filepath.Join(keys, ceremony.PinFile)}
 	var out, errb bytes.Buffer
 	// No server: refused before the client touches anything.
 	if run(args, strings.NewReader(""), &out, &errb) != 1 || !strings.Contains(errb.String(), "Testsperre") {
@@ -155,5 +157,56 @@ func TestPeerLock(t *testing.T) {
 	}
 	if err := st.CheckPeerLock(store.RoleClient); !errors.Is(err, store.ErrPeerLock) {
 		t.Fatalf("client lock after the command: %v", err)
+	}
+}
+
+// TestDevPinRefused (task 14): the pin of a development ceremony is
+// refused without the test switch (and by a production build always,
+// TestDevIdentitySwitch): the client log is never opened with it.
+func TestDevPinRefused(t *testing.T) {
+	dir := t.TempDir()
+	data, keys := filepath.Join(dir, "data"), filepath.Join(dir, "keys")
+	if _, err := ceremony.InitDev(data, keys, time.Now(), nil, 0); errors.Is(err, ceremony.ErrDev) {
+		t.Skip("needs the development ceremony (ceremony.InitDev): go test -tags gomail_dev,gomail_test")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := st.HoldRoleLock(store.RoleServer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	t.Setenv("GOMAILCTL_PASSPHRASE", "pw")
+	t.Setenv("GOMAIL_TEST_DEV_IDENTITY", "")
+	os.Unsetenv("GOMAIL_TEST_DEV_IDENTITY")
+	// keygen on stand-in terminals (task 13b: the seed appears only on a
+	// terminal).
+	args := []string{"keygen", "--data", data, "--dir", filepath.Join(dir, "c"), "--pin", filepath.Join(keys, ceremony.PinFile)}
+	kb := &keyboard{err: &syncBuf{}, answer: lineSet(map[string]string{"Passphrase: ": "pw", "wiederholen: ": "pw"})}
+	if code := run(args, kb, &tty{}, kb.err); code != 1 || !strings.Contains(kb.err.String(), "development platform identity") {
+		t.Fatalf("development pin: exit %d %s", code, kb.err.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "c", "keystore")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("key store written with a development pin")
+	}
+}
+
+// TestDevIdentitySwitch: GOMAIL_TEST_DEV_IDENTITY=1 sets
+// client.Config.AllowDevIdentity only in a build with the tag gomail_test
+// (devpin_tagged.go); a production build ignores the variable.
+func TestDevIdentitySwitch(t *testing.T) {
+	t.Setenv("GOMAIL_TEST_DEV_IDENTITY", "1")
+	var c client.Config
+	if err := devIdentity(&c); err != nil || c.AllowDevIdentity != testTagged {
+		t.Fatalf("tagged %v: allow %v, %v", testTagged, c.AllowDevIdentity, err)
+	}
+	t.Setenv("GOMAIL_TEST_DEV_IDENTITY", "yes")
+	c = client.Config{}
+	if err := devIdentity(&c); (err != nil) != testTagged || c.AllowDevIdentity {
+		t.Fatalf("tagged %v: value yes: allow %v, %v", testTagged, c.AllowDevIdentity, err)
 	}
 }

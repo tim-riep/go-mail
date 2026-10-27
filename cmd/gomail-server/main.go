@@ -389,6 +389,16 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	if err := checkDataDir(st, logger); err != nil {
 		return fail(stderr, err)
 	}
+	// The server lock before the ingest key is read (task 14 addendum,
+	// finding of the verification of task 16): a second server on the
+	// data directory stops here without touching the key. ingest.New
+	// takes the lock itself below and refuses as well should another
+	// server start in between.
+	if err := st.CheckPeerLock(store.RoleServer); err == nil {
+		return fail(stderr, fmt.Errorf("ein anderer Server hält die Serversperre locks/server (9.1): %w", store.ErrLocked))
+	} else if !errors.Is(err, store.ErrPeerLock) {
+		return fail(stderr, fmt.Errorf("Serversperre locks/server (9.1): %w", err))
+	}
 	kf, inside, err := outsideData(*keyFile, st.Root, "Ingest-Schlüssel")
 	if err != nil {
 		return fail(stderr, err)
@@ -518,7 +528,8 @@ func openLogSide(st *store.Store, pin *store.PlatformPin, ids []translog.Identit
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	side, err := loghttp.New(loghttp.Config{Log: op, Signer: signer, LogKey: lk, Witnesses: wvs, HeadInterval: interval, Logger: logger})
+	side, err := loghttp.New(loghttp.Config{Log: op, Signer: signer, LogKey: lk, Witnesses: wvs, HeadInterval: interval, MinGap: testMinGap(),
+		Logger: logger})
 	if err != nil {
 		return nil, nil, nil, err
 	}

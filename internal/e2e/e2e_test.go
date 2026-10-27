@@ -147,8 +147,8 @@ func TestRegisterCreateSendListRead(t *testing.T) {
 	if got := stripReceived(t, content); !bytes.Equal(got, []byte(msg)) {
 		t.Fatalf("content differs:\n%q\n%q", got, msg)
 	}
-	if len(env.Warnings.Take()) != 1 { // only the --insecure-no-log warning at start
-		t.Fatal("unexpected warnings")
+	if w := env.Warnings.Take(); len(w) != 0 { // no warning at all: the client runs with its log (task 14)
+		t.Fatalf("unexpected warnings: %q", w)
 	}
 }
 

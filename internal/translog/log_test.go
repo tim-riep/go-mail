@@ -897,11 +897,39 @@ func TestHeadRules(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Task 14b point 2: an older view of the same log only warns
+	// (ErrOlderHead) and is never taken over; a smaller head that
+	// contradicts the reference head, or one signed after it, is
+	// ErrConsistency; one without the quorum keeps ErrWitness.
 	h1 := &Head{Origin: testOrigin, Size: 1, Time: e.now.UnixMilli()}
 	h1.Hash, _ = tlog.TreeHash(1, e.hashReader())
+	ref := *v.Last
 	e.publish(h1, e.all()...)
-	if _, err := c.Refresh(e.now); !errors.Is(err, ErrConsistency) {
+	if got, err := c.Refresh(e.now); !errors.Is(err, ErrOlderHead) || got.Size != ref.Size || v.Last.Size != ref.Size {
 		t.Fatalf("smaller head: %v", err)
+	}
+	if err := c.CheckFresh(e.now); err != nil {
+		t.Fatalf("CheckFresh with an older head published: %v", err)
+	}
+	later := *h1
+	later.Time = ref.Time + 1
+	e.publish(&later, e.all()...)
+	if _, err := c.Refresh(e.now); !errors.Is(err, ErrConsistency) {
+		t.Fatalf("smaller head signed later: %v", err)
+	}
+	other := *h1
+	other.Hash[0] ^= 1
+	e.publish(&other, e.all()...)
+	if _, err := c.Refresh(e.now); !errors.Is(err, ErrConsistency) {
+		t.Fatalf("smaller head of another tree: %v", err)
+	}
+	e.publish(h1, e.signer)
+	if _, err := c.Refresh(e.now); !errors.Is(err, ErrWitness) {
+		t.Fatalf("smaller head without the quorum: %v", err)
+	}
+	e.publish(h1, e.all()...)
+	if v.Last.Size != ref.Size || v.Last.Hash != ref.Hash {
+		t.Fatal("reference head changed")
 	}
 	// A head file with an invalid witness line does not open.
 	good := sign(t, e.headOf(e.now.UnixMilli()), e.all()...)

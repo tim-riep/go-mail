@@ -180,11 +180,14 @@ func TestFoldersCrash(t *testing.T) {
 	}
 }
 
-// The head of the chain is mailbox.rec for client and server. After a
-// crash between writing an epoch and mailbox.rec, readers use the chain
-// up to mailbox.rec and do not remember the epochs after it; Sync adopts
-// them under the lock and writes mailbox.rec. A real reset of mailbox.rec
-// below the remembered head stays a rollback.
+// The head of the chain is mailbox.rec for client and server, compared
+// with the newest epoch in the log (task 14, translog Log.CheckEpoch: a
+// lower head is a rollback). After a crash between the log entry of an
+// epoch and mailbox.rec, readers verify the chain up to the logged epoch
+// and report the lagging mailbox.rec (ErrRollback, as ingest does);
+// they do not raise the remembered head; Sync adopts the epochs under the
+// lock and writes mailbox.rec. A real reset of mailbox.rec below the
+// remembered head stays a rollback.
 func TestHeadIsMailboxRec(t *testing.T) {
 	f := newFixture(t)
 	f.env.Clock.Set(time.Date(2026, 12, 15, 0, 0, 0, 0, time.UTC))
@@ -201,7 +204,7 @@ func TestHeadIsMailboxRec(t *testing.T) {
 	}
 	c := f.env.Reopen(f.u)
 	for i := 0; i < 2; i++ {
-		if _, err := c.List(f.mbx, store.ID{}); err != nil {
+		if _, err := c.List(f.mbx, store.ID{}); !errors.Is(err, client.ErrRollback) {
 			t.Fatalf("List %d after the crash: %v", i+1, err)
 		}
 	}
@@ -212,8 +215,8 @@ func TestHeadIsMailboxRec(t *testing.T) {
 		} `json:"mailboxes"`
 	}
 	json.Unmarshal(mustRead(t, filepath.Join(f.u.Dir, "state.json")), &st)
-	if ms := st.Mailboxes[f.mbx.String()]; ms.Epoch != 4 || ms.Epochs["5"] != nil {
-		t.Fatalf("epoch after mailbox.rec remembered: %d", ms.Epoch)
+	if ms := st.Mailboxes[f.mbx.String()]; ms.Epoch != 4 {
+		t.Fatalf("head after mailbox.rec remembered: %d", ms.Epoch)
 	}
 	if err := c.Sync(); err != nil {
 		t.Fatalf("Sync repairs: %v", err)

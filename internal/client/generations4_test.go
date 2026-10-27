@@ -218,7 +218,7 @@ func TestMissingMailboxKeepsState(t *testing.T) {
 			}
 			f.env.Warnings.Take()
 			gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words)
-			if gen != 2 || err != nil {
+			if gen != 2 || (err != nil) != hide || (hide && !errors.Is(err, client.ErrPartial)) {
 				t.Fatalf("device lost: generation %d, %v", gen, err)
 			}
 			w := f.env.Warnings.Take()
@@ -229,7 +229,7 @@ func TestMissingMailboxKeepsState(t *testing.T) {
 				if err := os.Rename(mrec+".hidden", mrec); err != nil {
 					t.Fatal(err)
 				}
-				warningWith(t, w, f.mbx.String(), "fehlt im Datenverzeichnis", "nichts wird vorgemerkt", "bleibt erhalten")
+				warningWith(t, w, f.mbx.String(), "fehlt im Datenverzeichnis", "eine neue wird nicht gesetzt", "bleibt erhalten")
 				if after.Reissue != 0 || after.Epoch != before.Epoch || after.EpochHash != before.EpochHash || len(after.Checked) != len(before.Checked) {
 					t.Fatalf("memory after device lost: %+v, before %+v", after, before)
 				}
@@ -311,7 +311,7 @@ func TestRollbackMemoryKeptByDeviceLost(t *testing.T) {
 	if err := os.Remove(f.env.Store.MailboxFile(f.mbx)); err != nil {
 		t.Fatal(err)
 	}
-	if gen, err := client.DeviceLost(f.env.ClientConfig(f.u.Dir), testenv.Passphrase, f.u.Words); gen != 2 || err != nil {
+	if gen, err := client.DeviceLost(f.env.ClientConfig(f.u.Dir), testenv.Passphrase, f.u.Words); gen != 2 || !errors.Is(err, client.ErrPartial) {
 		t.Fatalf("device lost: generation %d, %v", gen, err)
 	}
 	back := *m
@@ -330,12 +330,12 @@ func TestRollbackMemoryKeptByDeviceLost(t *testing.T) {
 // check records are lost, so the second device lost seals her own wraps
 // for generation 3 (the seed proves them) but cannot take over folders.gml
 // signed by generation 1 nor create the epoch generation-revoked:
-// ErrPartial, marked. Sync cannot create it either (no folders.gml of the
-// newest epoch): it keeps the mark and reports ErrPartial with a fixed
-// cause instead of a hint. Once the check records are back, Sync (variant
-// sync) or device lost run again (variant device-lost, a continuation
-// without a new generation) takes over folders.gml, creates the epoch and
-// clears the mark.
+// ErrPartial, marked. Sync cannot create it either (no checked folder
+// list of the newest epoch): it keeps the mark and reports ErrPartial
+// with the fixed cause of Q18 (task 14, 06h point 3) instead of a hint.
+// Once the check records are back, Sync (variant sync) or device lost run
+// again (variant device-lost, generation 4 since task 14) takes over
+// folders.gml, creates the epoch and clears the mark.
 func TestSyncKeepsMarkUntilGenerationRevoked(t *testing.T) {
 	for _, v := range []string{"sync", "device-lost"} {
 		t.Run(v, func(t *testing.T) {
@@ -351,7 +351,7 @@ func TestSyncKeepsMarkUntilGenerationRevoked(t *testing.T) {
 			if err := os.Rename(mrec, mrec+".hidden"); err != nil {
 				t.Fatal(err)
 			}
-			if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || err != nil {
+			if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || !errors.Is(err, client.ErrPartial) {
 				t.Fatalf("device lost: generation %d, %v", gen, err)
 			}
 			if err := os.Rename(mrec+".hidden", mrec); err != nil {
@@ -373,11 +373,17 @@ func TestSyncKeepsMarkUntilGenerationRevoked(t *testing.T) {
 			before := chainOf(t, f.env, f.mbx)
 			f.env.Warnings.Take()
 			err = f.env.Reopen(f.u).Sync()
-			if !errors.Is(err, client.ErrPartial) || !strings.Contains(err.Error(), "run device lost again") {
+			if !errors.Is(err, client.ErrPartial) || !strings.Contains(err.Error(), "no checked folder list") || !strings.Contains(err.Error(), "Q18") ||
+				strings.Contains(err.Error(), "device lost again") {
 				t.Fatalf("Sync: %v", err)
 			}
 			w := f.env.Warnings.Take()
-			warningWith(t, w, f.mbx.String(), "einzige Mitglied", "Abhilfe: device lost erneut ausführen")
+			warningWith(t, w, f.mbx.String(), "einzige Mitglied", "keine geprüfte Ordnerliste der Epoche", "derzeit keine Abhilfe, siehe Q18")
+			for _, s := range w {
+				if strings.Contains(s, "device lost erneut") {
+					t.Fatalf("remedy that never helps: %s", s)
+				}
+			}
 			noSeed(t, w, f.u.Words)
 			if m := reissueMark(t, f.u.Dir, f.mbx); m != 3 {
 				t.Fatalf("mark %d after Sync", m)
@@ -392,14 +398,18 @@ func TestSyncKeepsMarkUntilGenerationRevoked(t *testing.T) {
 				if err := f.env.Reopen(f.u).Sync(); err != nil {
 					t.Fatalf("Sync with the check records: %v", err)
 				}
-			} else if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || err != nil {
+			} else if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 4 || err != nil {
 				t.Fatalf("device lost with the check records: generation %d, %v", gen, err)
 			}
 			checkImmediate(t, before, chainOf(t, f.env, f.mbx), now, store.ReasonGenerationRevoked)
-			if g := headGen(t, f, f.u); g != 3 {
+			want := uint32(3)
+			if v != "sync" {
+				want = 4
+			}
+			if g := headGen(t, f, f.u); g != want {
 				t.Fatalf("head names generation %d", g)
 			}
-			if n := generations(t, f, f.u); n != 3 {
+			if n := generations(t, f, f.u); n != int(want) {
 				t.Fatalf("%d generations", n)
 			}
 			if m := reissueMark(t, f.u.Dir, f.mbx); m != 0 {
@@ -456,7 +466,7 @@ func TestSeedProofMatchesKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.env.Warnings.Take()
-	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || err != nil {
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || err != nil {
 		t.Fatalf("continuation: generation %d, %v", gen, err)
 	}
 	w := f.env.Warnings.Take()
@@ -499,7 +509,7 @@ func TestFoldersNotCheckedBeforeDeviceLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.env.Warnings.Take()
-	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || !errors.Is(err, client.ErrPartial) {
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || !errors.Is(err, client.ErrPartial) {
 		t.Fatalf("continuation: generation %d, %v", gen, err)
 	}
 	w := strings.Join(f.env.Warnings.Take(), "\n")
@@ -513,7 +523,7 @@ func TestFoldersNotCheckedBeforeDeviceLost(t *testing.T) {
 		t.Fatalf("no warning:\n%s", w)
 	}
 	// The own wraps are sealed again regardless (seed proof), the mail reads.
-	ownWrapsFor(t, f, f.u, 2)
+	ownWrapsFor(t, f, f.u, 3)
 	readBody(t, f.env, f.env.Reopen(f.u), f.mbx, old.ID, "secret")
 }
 

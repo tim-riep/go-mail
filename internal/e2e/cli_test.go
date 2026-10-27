@@ -33,11 +33,6 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	// The test binary doubles as the client log helper of
-	// scripts/two-host-test.sh (twohost_test.go).
-	if os.Getenv(helperEnv) == helperLogAppend {
-		os.Exit(logAppendMain(os.Args[1:], os.Stdout, os.Stderr))
-	}
 	code := m.Run()
 	if binDir != "" {
 		os.RemoveAll(binDir)
@@ -53,6 +48,16 @@ func TestMain(m *testing.M) {
 // gomail_test, task 15c finding 7): the tests must not fail on the free
 // space of the host (452 below the 10 % of 5.1).
 const testMinFree = "GOMAIL_TEST_MIN_FREE=0.000001"
+
+// testHeadGap lets the server of a test build sign a head at most every
+// second while the log grows (GOMAIL_TEST_HEAD_GAP, task 14) instead of
+// once a minute, and testDevIdentity lets gomailctl of a test build
+// accept the development pin of the ceremony (GOMAIL_TEST_DEV_IDENTITY,
+// client.Config.AllowDevIdentity).
+const (
+	testHeadGap     = "GOMAIL_TEST_HEAD_GAP=1s"
+	testDevIdentity = "GOMAIL_TEST_DEV_IDENTITY=1"
+)
 
 // buildTags are the tags of the programs of these tests: gomail_test,
 // the hidden test switch of gomail-server (cmd/gomail-server/
@@ -113,7 +118,7 @@ func newPlatform(t *testing.T) *platform {
 func (p *platform) exec(stdin, name string, args ...string) (int, string, string) {
 	p.t.Helper()
 	cmd := exec.Command(filepath.Join(p.bin, name), args...)
-	cmd.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple", testMinFree)
+	cmd.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple", testMinFree, testHeadGap, testDevIdentity)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -166,7 +171,7 @@ func (p *platform) startServer() *serverProc {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.t.Cleanup(cancel)
 	s := &serverProc{cmd: exec.CommandContext(ctx, filepath.Join(p.bin, "gomail-server"), p.serveArgs()...)}
-	s.cmd.Env = append(os.Environ(), testMinFree)
+	s.cmd.Env = append(os.Environ(), testMinFree, testHeadGap)
 	stderr, _ := s.cmd.StderrPipe()
 	if err := s.cmd.Start(); err != nil {
 		p.t.Fatal(err)
@@ -245,16 +250,36 @@ func (p *platform) startWitnessGen(s *serverProc, gen uint32) (stop func()) {
 	return stop
 }
 
+// runLogged runs a gomailctl command until it succeeds, at most for a
+// minute: it needs a head with the witness's cosignature that covers the
+// newest log entries (task 14), which the server signs at most every
+// second while the log grows (testHeadGap) and the witness cosigns
+// within a second. It returns the output of the successful run.
+func (p *platform) runLogged(stdin, name string, args ...string) string {
+	p.t.Helper()
+	var errb string
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
+		code, out, e := p.exec(stdin, name, args...)
+		if code == 0 {
+			return out
+		}
+		errb = e
+	}
+	p.t.Fatalf("%s %v: no success within a minute\n%s", name, args, errb)
+	return ""
+}
+
 // keygen runs "gomailctl keygen" with the arguments common and answers
 // the three questions from the words shown. A production gomailctl
 // shows the seed only on a terminal and reads the words only from one
 // (task 13b, tested on a pseudo terminal in cmd/gomailctl); the test
-// build runs on pipes with GOMAILCTL_TEST_KEYGEN_PIPE=1.
+// build runs on pipes with GOMAILCTL_TEST_KEYGEN_PIPE=1 and accepts the
+// development pin with GOMAIL_TEST_DEV_IDENTITY=1 (task 14).
 func (p *platform) keygen(common []string) {
 	t := p.t
 	t.Helper()
 	kg := exec.Command(filepath.Join(p.bin, "gomailctl"), append([]string{"keygen"}, common...)...)
-	kg.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple", "GOMAILCTL_TEST_KEYGEN_PIPE=1")
+	kg.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple", "GOMAILCTL_TEST_KEYGEN_PIPE=1", testDevIdentity)
 	stdin, _ := kg.StdinPipe()
 	stdout, _ := kg.StdoutPipe()
 	stderr, _ := kg.StderrPipe()
@@ -291,17 +316,6 @@ func (p *platform) keygen(common []string) {
 	}
 }
 
-// logAsClient appends records to the operator log of the data directory
-// as the client will do itself. TODO(task-14): gomailctl appends user,
-// epochs and the signer's user.rec to the log; until then it runs with
-// --insecure-no-log, and the test logs what it wrote.
-func (p *platform) logAsClient(kind translog.Kind, files ...string) {
-	p.t.Helper()
-	if _, err := appendAsClient(p.data, p.pin, kind, files...); err != nil {
-		p.t.Fatal(err)
-	}
-}
-
 // TestRunbook builds the programs and runs the steps of docs/RUNBOOK.md:
 // ceremony, server with the transparency log and a witness, keygen,
 // invite, register, mailbox, address, mail via SMTP, list, read,
@@ -310,7 +324,11 @@ func TestRunbook(t *testing.T) {
 	p := newPlatform(t)
 	data, keys, alice := p.data, p.keys, filepath.Join(p.dir, "alice")
 	run := p.run
-	common := []string{"--data", data, "--dir", alice, "--platform", p.pin, "--insecure-no-log"}
+	common := []string{"--data", data, "--dir", alice, "--pin", p.pin}
+	// --insecure-no-log is no switch of gomailctl any more (task 14).
+	if code, _, e := p.exec("", "gomailctl", append([]string{"sync", "--insecure-no-log"}, common...)...); code != 2 || !strings.Contains(e, "insecure-no-log") {
+		t.Fatalf("gomailctl --insecure-no-log: exit %d %s", code, e)
+	}
 
 	// 2. Server, only with the log; then the witness.
 	if code, _, _ := p.exec("", "gomail-server", "serve", "--data", data, "--ingest-key", p.ingestKey); code != 2 {
@@ -326,16 +344,20 @@ func TestRunbook(t *testing.T) {
 	code := strings.TrimSpace(run("", "gomail-server", "invite", "create", "--data", data))
 	reg := run("", "gomailctl", append([]string{"register", "--invite", code}, common...)...)
 	userID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reg), "Registriert:"))
-	p.logAsClient(translog.KindUser, filepath.Join(data, "users", userID, "user.rec"))
+	// gomailctl appended its user.rec to the log itself (task 14).
+	if _, err := os.Stat(filepath.Join(data, "users", userID, "user.rec")); err != nil {
+		t.Fatal(err)
+	}
 
-	// 5. Mailbox and address.
-	mbx := strings.TrimSpace(run("", "gomailctl", append([]string{"mailbox", "create", "Büro"}, common...)...))
+	// 5. Mailbox and address: mailbox create waits for a head that
+	// covers the user entry; it logs its epochs itself.
+	mbx := strings.TrimSpace(p.runLogged("", "gomailctl", append([]string{"mailbox", "create", "Büro"}, common...)...))
 	epochs, _ := filepath.Glob(filepath.Join(data, "mailboxes", mbx, "epochs", "*", "epoch.rec"))
 	if len(epochs) == 0 {
 		t.Fatal("no epochs")
 	}
-	for n := 1; n <= len(epochs); n++ {
-		p.logAsClient(translog.KindEpoch, filepath.Join(data, "mailboxes", mbx, "epochs", strconv.Itoa(n), "epoch.rec"))
+	if _, err := os.Stat(filepath.Join(alice, "new-mailboxes", mbx)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("copy of the new mailbox left in the client directory: %v", err)
 	}
 	if c, _, _ := p.exec("", "gomail-server", "address", "add", "info@brownbear.example", "--mailbox", mbx, "--data", data,
 		"--admin-key", p.admin, "--insecure-no-log"); c != 2 {
@@ -355,8 +377,16 @@ func TestRunbook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 7. list, read, inspect, sync.
-	list := run("", "gomailctl", append([]string{"list", mbx}, common...)...)
+	// 7. list, read, inspect, sync. list is repeated until a head
+	// covers the address assignment too: without it the mail is not
+	// shown (2.3).
+	var list string
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(250 * time.Millisecond) {
+		list = p.runLogged("", "gomailctl", append([]string{"list", mbx}, common...)...)
+		if strings.Contains(list, "Rechnung 4711") || time.Now().After(deadline) {
+			break
+		}
+	}
 	if !strings.Contains(list, "Rechnung 4711") {
 		t.Fatalf("list: %q", list)
 	}
@@ -460,7 +490,7 @@ func TestProgramsRefuse(t *testing.T) {
 	}
 
 	// A client without a running server.
-	common := []string{"--data", p.data, "--dir", filepath.Join(p.dir, "c"), "--platform", p.pin, "--insecure-no-log"}
+	common := []string{"--data", p.data, "--dir", filepath.Join(p.dir, "c"), "--pin", p.pin}
 	if code, _, e := p.exec("", "gomailctl", append([]string{"sync"}, common...)...); code != 1 || !strings.Contains(e, "Testsperre") {
 		t.Fatalf("client without a server: exit %d %s", code, e)
 	}

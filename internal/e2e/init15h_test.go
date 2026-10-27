@@ -187,13 +187,13 @@ func TestInitProduction(t *testing.T) {
 	p.startWitness(srv)
 
 	// 5. User, mailbox, address, mail, list, a cosigned head.
-	common := []string{"--data", p.data, "--dir", filepath.Join(dir, "alice"), "--platform", p.pin, "--insecure-no-log"}
+	common := []string{"--data", p.data, "--dir", filepath.Join(dir, "alice"), "--pin", p.pin}
 	mbx := p.userMailbox(common, "info@brownbear.example")
 	msg := "From: a@lieferant.example\r\nTo: info@brownbear.example\r\nSubject: Erstinstallation\r\n\r\nx\r\n"
 	if err := smtp.SendMail(srv.smtp, nil, "a@lieferant.example", []string{"info@brownbear.example"}, []byte(msg)); err != nil {
 		t.Fatal(err)
 	}
-	if list := p.run("", "gomailctl", append([]string{"list", mbx}, common...)...); !strings.Contains(list, "Erstinstallation") {
+	if list := p.listUntil(mbx, common, "Erstinstallation"); !strings.Contains(list, "Erstinstallation") {
 		t.Fatalf("list: %q", list)
 	}
 	deadline := time.Now().Add(30 * time.Second)

@@ -644,8 +644,11 @@ func (o *operatorLog) PublishHead(h *Head) error {
 //     bytes is replaced), the key file of every valid entry and then
 //     tree.rec with m and the recomputed root hash.
 //
-// Steps 1 to 4 write no file (only missing directories of log/ are
-// created first); an error there leaves the files as they were.
+// Steps 1 to 4 write no file: only missing directories of log/ and the
+// lock file log/lock (taken for the whole repair, store.LockPath creates
+// it when it is missing; task 14, low finding of the verification of
+// task 15d) are created first; an error there leaves the files as they
+// were.
 //
 // TODO(ask): doc.go says "exist and decode"; read strictly, an entry that
 // is in the tree but does not decode with DecodeEntry (written past

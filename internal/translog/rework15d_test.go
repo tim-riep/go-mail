@@ -3,7 +3,10 @@ package translog
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,10 +78,31 @@ func TestRepairTreeOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Task 14 (low finding of the verification of task 15d): the refused
+	// repair writes nothing, neither tree.rec nor a tile nor a file of
+	// keys/ (every file of log/ but the lock is compared).
+	before := logFiles(t, e.st.Root)
 	var oe *OrphanEntriesError
 	err = RepairTree(e.serverOptions())
 	if !errors.As(err, &oe) || !errors.Is(err, ErrConsistency) {
 		t.Fatalf("repair with orphans: %v", err)
+	}
+	after := logFiles(t, e.st.Root)
+	if len(after) != len(before) {
+		t.Fatalf("the refused repair changed the set of files under log/: %d to %d", len(before), len(after))
+	}
+	for p, v := range before {
+		if after[p] != v {
+			t.Fatalf("the refused repair changed %s", p)
+		}
+	}
+	tiles, keyFiles := 0, 0
+	for p := range before {
+		tiles += btoi(strings.HasPrefix(p, "tree/"))
+		keyFiles += btoi(strings.HasPrefix(p, "keys/"))
+	}
+	if tiles == 0 || keyFiles == 0 {
+		t.Fatalf("nothing compared: %d tiles, %d key files", tiles, keyFiles)
 	}
 	if oe.Size != n+1 || oe.Count != 2 || oe.First != n+2 || oe.Last != n+3 {
 		t.Fatalf("reported %+v, want size %d, 2 orphans %d to %d", *oe, n+1, n+2, n+3)
@@ -128,4 +152,43 @@ func TestOrphanEntriesErrorText(t *testing.T) {
 			t.Error("does not wrap ErrConsistency")
 		}
 	}
+}
+
+// logFiles returns every file under log/ of the data directory root but
+// the lock, by path relative to log/ (with "/"), with its mode and
+// content.
+func logFiles(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	base := filepath.Join(root, Dir)
+	err := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(base, p)
+		if err != nil || d.IsDir() || rel == "lock" {
+			return err
+		}
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(rel)] = fi.Mode().String() + "|" + string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

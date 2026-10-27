@@ -20,12 +20,16 @@
 // client.ErrPartial) and for the commands of 9.2 that are not built.
 //
 // Common flags: --data <dir> (data directory), --dir <dir> (client
-// directory, default ~/.config/gomailctl), --platform <file> (trusted
-// platform identity, identity-1.pin of the ceremony) and
-// --insecure-no-log (required until task 14 builds the client log). The
-// passphrase of the key store is read from GOMAILCTL_PASSPHRASE, from
-// --passphrase-file or from standard input (one line of at most 4096
-// bytes).
+// directory, default ~/.config/gomailctl) and --pin <file> (the pin of
+// the platform, identity-<gen>.pin of the ceremony: identity, log origin,
+// witnesses; --platform is the older name of the same flag). Every
+// command works with the transparency log of the data directory (task
+// 14): the client opens it itself with the pin, there is no switch to run
+// without it (--insecure-no-log is a usage error). A pin of a development
+// ceremony is accepted only by a test build (tag gomail_test) with
+// GOMAIL_TEST_DEV_IDENTITY=1 (devpin_tagged.go). The passphrase of the
+// key store is read from GOMAILCTL_PASSPHRASE, from --passphrase-file or
+// from standard input (one line of at most 4096 bytes).
 //
 // The seed and shares appear only on a terminal and are cleared from it
 // (screen.go): keygen requires a terminal on standard output and on
@@ -53,7 +57,6 @@ import (
 	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 func main() {
@@ -79,8 +82,7 @@ const usage = `Aufruf:
 Gemeinsame Optionen:
   --data <dir>             Datenverzeichnis
   --dir <dir>              Client-Verzeichnis (Standard ~/.config/gomailctl)
-  --platform <datei>       Plattformidentität (identity-1.pin)
-  --insecure-no-log        ohne Transparenzlog (bis zum Client-Log erforderlich)
+  --pin <datei>            Pin der Plattform (identity-<gen>.pin; älterer Name --platform)
   --passphrase-file <datei> Passphrase aus Datei (sonst GOMAILCTL_PASSPHRASE oder Eingabe)
 `
 
@@ -90,9 +92,12 @@ type env struct {
 	stdout io.Writer
 	stderr io.Writer
 	now    func() time.Time
+	// beforeRefresh is client.Config.BeforeRefresh, set only by the tests
+	// of this package (the test platform publishes a head before every
+	// Refresh of the client log); nil in the program.
+	beforeRefresh func()
 
 	data, dir, platform, passFile, invite, folder string
-	noLog                                         bool
 }
 
 func (e *env) flags(name string) *flag.FlagSet {
@@ -100,9 +105,9 @@ func (e *env) flags(name string) *flag.FlagSet {
 	fs.SetOutput(e.stderr)
 	fs.StringVar(&e.data, "data", "", "Datenverzeichnis")
 	fs.StringVar(&e.dir, "dir", "", "Client-Verzeichnis")
-	fs.StringVar(&e.platform, "platform", "", "Plattformidentität")
+	fs.StringVar(&e.platform, "pin", "", "Pin der Plattform")
+	fs.StringVar(&e.platform, "platform", "", "Pin der Plattform (älterer Name von --pin)")
 	fs.StringVar(&e.passFile, "passphrase-file", "", "Datei mit der Passphrase")
-	fs.BoolVar(&e.noLog, "insecure-no-log", false, "ohne Transparenzlog")
 	return fs
 }
 
@@ -224,13 +229,7 @@ func (e *env) fail(err error) int {
 // both are refused (fail closed).
 func (e *env) config() (client.Config, func(), error) {
 	if e.data == "" || e.platform == "" {
-		return client.Config{}, nil, errors.New("--data und --platform sind erforderlich")
-	}
-	// TODO(task-14): the client log (translog.Open with a Verifier,
-	// Refresh, state.json) replaces the placeholder and --insecure-no-log.
-	log, err := translogtest.NewUnverified(e.noLog)
-	if err != nil {
-		return client.Config{}, nil, err
+		return client.Config{}, nil, errors.New("--data und --pin sind erforderlich")
 	}
 	st, err := store.Open(e.data)
 	if err != nil {
@@ -257,8 +256,15 @@ func (e *env) config() (client.Config, func(), error) {
 		return client.Config{}, nil, fmt.Errorf("Testsperre (9.1): keine wirksame Sperre eines laufenden gomail-server auf locks/server; "+
 			"der Client arbeitet nur neben einem Server, dessen Sperre hier wirkt: %w", err)
 	}
-	return client.Config{Store: st, Dir: dir, Pin: pin, Log: log, Now: e.now,
-		Warn: func(s string) { fmt.Fprintln(e.stderr, s) }}, release, nil
+	// The client log is opened by the client itself from the pin
+	// (client.Open: Refresh, CheckFresh, reference head in state.json).
+	cfg := client.Config{Store: st, Dir: dir, Pin: pin, Now: e.now, BeforeRefresh: e.beforeRefresh,
+		Warn: func(s string) { fmt.Fprintln(e.stderr, s) }}
+	if err := devIdentity(&cfg); err != nil {
+		release()
+		return client.Config{}, nil, err
+	}
+	return cfg, release, nil
 }
 
 // passphrase reads the passphrase: GOMAILCTL_PASSPHRASE, the file, or a

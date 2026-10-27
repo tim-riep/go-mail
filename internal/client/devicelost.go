@@ -114,33 +114,20 @@ func sameGenerations(a, b []*keys.GenerationCert) bool {
 // ErrRecovery: ConfirmRecovery, then Sync). Sync completes it (2.2 point
 // 5: every user member issues again what a revoked generation signed,
 // syncGenerations), and so does DeviceLost run again with the seed while
-// a mailbox is marked: it continues step 4 with the generation g+1 of
-// the key store and the earlier ones derived from the seed
-// (resumeReissue), and creates no further generation unless
-// DeviceLostOptions.ForceNewGeneration is set. A mailbox whose mailbox.rec
-// no longer exists in the data directory (store.ErrNotFound) is never
-// marked, and its local state stays as it is (mailboxState: no path makes
+// a mailbox is marked (task 14, 06h point 1): every DeviceLost creates
+// the next generation (2.2 point 2: the device with g+1 may be lost as
+// well, so it must always be revocable), and step 4 of that run works on
+// the marked mailboxes like on every other one, with the new generation
+// and the earlier ones derived from the seed. A mark therefore never
+// keeps the user from revoking a generation: a mailbox that stays marked
+// (a strawman membership without a wrap, a chain that does not check)
+// only makes the result ErrPartial again. A mailbox whose mailbox.rec no
+// longer exists in the data directory (store.ErrNotFound) gets no new
+// mark, keeps an existing one and makes the result ErrPartial; its local
+// state stays as it is (mailboxState: no path makes
 // that memory smaller); a warning names it. Other members wrap their
 // epochs for g+1 on their next Sync (2.2 point 5).
 func DeviceLost(cfg Config, passphrase []byte, seedWords []string) (uint32, error) {
-	return DeviceLostWithOptions(cfg, passphrase, seedWords, DeviceLostOptions{})
-}
-
-// DeviceLostOptions are the options of DeviceLostWithOptions.
-type DeviceLostOptions struct {
-	// ForceNewGeneration creates the next generation even while a mailbox
-	// is marked for the continuation of an earlier DeviceLost
-	// (reissuePending), which otherwise only continues: the device with
-	// the generation g+1 of that run may be lost as well, and it must be
-	// revocable. The marked mailboxes are then worked on with the new
-	// generation g+2 like every other one; the templates and own wraps of
-	// g and g+1 are checked with the key stores derived from the seed.
-	// TODO(ask): whether DeviceLost should do this by default is open.
-	ForceNewGeneration bool
-}
-
-// DeviceLostWithOptions is DeviceLost with options (DeviceLostOptions).
-func DeviceLostWithOptions(cfg Config, passphrase []byte, seedWords []string, opts DeviceLostOptions) (uint32, error) {
 	if err := cfg.check(); err != nil {
 		return 0, err
 	}
@@ -161,11 +148,8 @@ func DeviceLostWithOptions(cfg Config, passphrase []byte, seedWords []string, op
 		return 0, err
 	}
 	defer c.Close()
-	if c.reissuePending(local, remote) {
-		if !opts.ForceNewGeneration {
-			return c.resumeReissue(seed, remote)
-		}
-		c.warn("Hinweis: device lost erzeugt trotz vorgemerkter Neuausstellung eine neue Generation (ForceNewGeneration); die vorgemerkten Postfächer werden mit der neuen Generation neu ausgestellt.")
+	if c.marked() {
+		c.warn("Hinweis: Für vorgemerkte Postfächer wird die Neuausstellung mit der neuen Generation fortgesetzt.")
 	}
 	old := c.ks
 	gen := old.Generation + 1
@@ -176,8 +160,8 @@ func DeviceLostWithOptions(cfg Config, passphrase []byte, seedWords []string, op
 	nks := next.ks
 	defer nks.Zero()
 	// The earlier generations from the seed, for the own wraps and the
-	// templates they made (a continuation forced into a new generation,
-	// an interrupted run, a mailbox that step 2 could not prepare).
+	// templates they made (a marked mailbox of an earlier run, an
+	// interrupted run, a mailbox that step 2 could not prepare).
 	prev, err := seedGenerations(seed, next.user, gen, old)
 	if err != nil {
 		return 0, err
@@ -213,10 +197,12 @@ func DeviceLostWithOptions(cfg Config, passphrase []byte, seedWords []string, op
 			return 0, errCrashed
 		}
 	}
-	// TODO(phase3-translog): user.rec with generation g+1 into the log; the
-	// generation is valid only from then on (2.2 rule 3). Appending is
-	// idempotent, so a resumed run appends again.
-	if err := c.cfg.Log.AppendUser(c.me, next.data); err != nil {
+	// user.rec with generation g+1 into the log (record first, then log
+	// entry: translog doc.go "Who writes"); the generation is valid only
+	// from then on (2.2 rule 3). Appending is idempotent, so a resumed run
+	// appends again; the pending entry is in state.json before anything
+	// relies on it.
+	if _, err := c.lg.appendRecord(translog.KindUser, next.data); err != nil {
 		return 0, err
 	}
 	if crash("devicelost-logged") {
@@ -256,6 +242,9 @@ func DeviceLostWithOptions(cfg Config, passphrase []byte, seedWords []string, op
 type reissueOutcome struct {
 	failed   []string // mailboxes whose files were not all issued again
 	recovery bool     // one of them for want of a confirmed recovery record
+	// noFolders are the failed mailboxes of a sole user member without a
+	// checked folder list of the epoch (Q18): no remedy at present.
+	noFolders []string
 }
 
 // err returns ErrPartial naming the mailboxes not completed and the
@@ -270,6 +259,13 @@ func (o *reissueOutcome) err() error {
 	if o.recovery {
 		return fmt.Errorf("%w: %w: files of mailboxes %s not issued again; confirm the recovery recipient on this device (ConfirmRecovery), then Sync", ErrPartial, ErrRecovery, list)
 	}
+	if len(o.noFolders) == len(o.failed) {
+		return fmt.Errorf("%w: the epoch generation-revoked of mailboxes %s is not created: %w", ErrPartial, list, errNoCheckedFolders)
+	}
+	if len(o.noFolders) > 0 {
+		sort.Strings(o.noFolders)
+		return fmt.Errorf("%w: files of mailboxes %s not issued again; Sync or device lost run again completes it, except for %s: %w", ErrPartial, list, strings.Join(o.noFolders, ", "), errNoCheckedFolders)
+	}
 	return fmt.Errorf("%w: files of mailboxes %s not issued again; Sync or device lost run again completes it", ErrPartial, list)
 }
 
@@ -278,18 +274,21 @@ func (o *reissueOutcome) err() error {
 // marks every mailbox not completed with gen (mailboxState.Reissue) and
 // clears the mark of every completed one; the caller saves the state. A
 // mailbox whose mailbox.rec is not in the data directory
-// (store.ErrNotFound) is not marked (an earlier mark is cleared), nothing
-// can complete it, so that it never blocks a further generation. Its
-// local state stays complete (task 06h): the highest epoch seen, the
-// discarded epochs, the check records, the recovery record and the
-// versions keep protecting it if it is put back, rolled back or not
-// (mailboxState). A simulated crash is returned as the error.
+// (store.ErrNotFound) gets no new mark, but an existing mark stays (task
+// 14, 06h point 2: the head may still name the revoked generation, and
+// hiding mailbox.rec must not make the continuation look complete), and
+// it is counted as not completed (ErrPartial). Since every DeviceLost
+// creates a new generation, a mark never blocks a further one. Its local
+// state stays complete (task 06h): the highest epoch seen, the discarded
+// epochs, the check records, the recovery record and the versions keep
+// protecting it if it is put back, rolled back or not (mailboxState). A
+// simulated crash is returned as the error.
 func (c *Client) reissueAll(boxes []store.ID, gen uint32) (*reissueOutcome, error) {
 	out := &reissueOutcome{}
 	for _, mbx := range boxes {
 		if _, err := c.st.ReadMailbox(mbx); errors.Is(err, store.ErrNotFound) {
-			c.mailboxState(mbx).Reissue = 0
-			c.warn("WARNUNG: %s fehlt im Datenverzeichnis (mailbox.rec nicht gefunden); die Dateien werden nicht neu ausgestellt und nichts wird vorgemerkt. Der lokale Zustand des Postfachs bleibt erhalten. Taucht es wieder auf, device lost erneut ausführen.", mbx)
+			out.failed = append(out.failed, mbx.String())
+			c.warn("WARNUNG: %s fehlt im Datenverzeichnis (mailbox.rec nicht gefunden); die Dateien werden nicht neu ausgestellt. Eine bestehende Vormerkung bleibt, eine neue wird nicht gesetzt; der lokale Zustand des Postfachs bleibt erhalten.", mbx)
 			continue
 		}
 		err := c.reissue(mbx)
@@ -306,6 +305,9 @@ func (c *Client) reissueAll(boxes []store.ID, gen uint32) (*reissueOutcome, erro
 		if errors.Is(err, ErrRecovery) {
 			out.recovery = true
 			c.warn("WARNUNG: Die Dateien von %s wurden nicht vollständig neu ausgestellt: der Wiederherstellungsempfänger ist auf diesem Gerät nicht bestätigt. Abhilfe: ConfirmRecovery, dann Sync.", mbx)
+		} else if errors.Is(err, errNoCheckedFolders) {
+			out.noFolders = append(out.noFolders, mbx.String())
+			c.warn("WARNUNG: Für %s wird die Epoche zur neuen Generation nicht angelegt: dieser Benutzer ist das einzige Mitglied, das Epochen anlegen kann, und es gibt keine geprüfte Ordnerliste der Epoche (folders.gml ist von einer widerrufenen Generation signiert und wurde vorher nicht geprüft); derzeit keine Abhilfe, siehe Q18.", mbx)
 		} else {
 			c.warn("WARNUNG: Die Dateien von %s wurden nicht vollständig neu ausgestellt. Abhilfe: Sync oder device lost erneut ausführen.", mbx)
 		}
@@ -313,71 +315,15 @@ func (c *Client) reissueAll(boxes []store.ID, gen uint32) (*reissueOutcome, erro
 	return out, nil
 }
 
-// reissuePending reports whether DeviceLost continues an incomplete step
-// 4 instead of creating a generation: the key store holds the current
-// generation of user.rec in the client directory and in the data
-// directory (both the same certificates), and a mailbox is marked with it
-// (mailboxState.Reissue, set by an earlier run that ended with
-// ErrPartial). Without a mark a further DeviceLost creates generation
-// g+2 as always: the device with g+1 may be lost as well.
-//
-// While a mailbox stays marked (its chain is broken, the recovery record
-// is not confirmed), DeviceLost only continues; DeviceLostOptions.
-// ForceNewGeneration revokes g+1 anyway (the device with g+1 may be lost
-// as well), and the marked mailboxes are worked on with g+2. A mailbox
-// missing from the data directory is never marked (reissueAll), nor is a
-// mailbox adopted without a valid chain (adoptMemberships).
-// TODO(ask): whether the forced generation should be the default is open.
-func (c *Client) reissuePending(local, remote *store.User) bool {
-	gen := c.ks.Generation
-	if gen < 2 || local.Current().Gen != gen || remote.Current().Gen != gen || !sameGenerations(local.Generations, remote.Generations) {
-		return false
-	}
+// marked reports whether a mailbox of the local state is marked for the
+// continuation of an earlier DeviceLost (mailboxState.Reissue).
+func (c *Client) marked() bool {
 	for _, mbx := range c.Mailboxes() {
-		if c.mailboxState(mbx).Reissue == gen {
+		if c.mailboxState(mbx).Reissue != 0 {
 			return true
 		}
 	}
 	return false
-}
-
-// resumeReissue continues step 4 of an earlier DeviceLost that ended
-// with ErrPartial (reissuePending): the key store holds generation g+1,
-// and the earlier generations, whose signatures the templates and own
-// wraps carry, are derived from the seed; g must be the one user.rec
-// names (ErrSeed otherwise). user.rec still names them, so their
-// templates check (oldGenKey). No generation is created; only the marked
-// mailboxes are worked on. It returns g+1.
-func (c *Client) resumeReissue(seed *keys.Seed, remote *store.User) (uint32, error) {
-	gen := c.ks.Generation
-	if remote.Generation(gen-1) == nil {
-		return 0, fmt.Errorf("%w: user.rec has no generation %d", ErrUserRecord, gen-1)
-	}
-	prev, err := seedGenerations(seed, remote, gen, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer zeroAll(prev)
-	if keystoreOf(prev, gen-1) == nil {
-		return 0, fmt.Errorf("%w: generation %d of user.rec is not derived from this seed", ErrSeed, gen-1)
-	}
-	c.warn("Hinweis: device lost setzt die Neuausstellung der Dateien der Generation %d fort; es wird keine neue Generation erzeugt. Ist auch das Gerät mit Generation %d verloren, device lost mit ForceNewGeneration ausführen.", gen-1, gen)
-	var boxes []store.ID
-	for _, mbx := range c.Mailboxes() {
-		if c.mailboxState(mbx).Reissue == gen {
-			boxes = append(boxes, mbx)
-		}
-	}
-	c.prevKs = prev
-	defer func() { c.prevKs = nil }()
-	out, err := c.reissueAll(boxes, gen)
-	if err != nil {
-		return 0, err
-	}
-	if err := c.save(); err != nil {
-		return gen, err
-	}
-	return gen, out.err()
 }
 
 // seedGenerations derives from seed the key stores of the generations of
@@ -496,13 +442,6 @@ func openForDeviceLost(cfg Config, passphrase []byte) (c *Client, local, remote 
 			unlock()
 		}
 	}()
-	if !cfg.Log.Verified() {
-		cfg.Warn(translog.Warning)
-	}
-	// TODO(phase3-translog): tree head with witness signature at most 24 hours old (2.3).
-	if err := cfg.Log.CheckFresh(cfg.Now()); err != nil {
-		return nil, nil, nil, err
-	}
 	st, err := loadState(cfg.statePath())
 	if err != nil {
 		return nil, nil, nil, err
@@ -523,9 +462,35 @@ func openForDeviceLost(cfg Config, passphrase []byte) (c *Client, local, remote 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: %v", ErrUserRecord, err)
 	}
-	// TODO(phase3-translog): user.rec of the data directory in the log (2.7).
-	if err := cfg.Log.CheckUser(me, rawRemote); err != nil {
+	c = &Client{cfg: cfg, st: cfg.Store, user: local, me: me, state: st,
+		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}
+	lc, err := openLog(&c.cfg, st, false)
+	if err != nil {
 		return nil, nil, nil, err
+	}
+	c.lg = lc
+	defer func() {
+		if err != nil {
+			lc.close()
+		}
+	}()
+	// Once refreshLog (2.7 "bei jedem Sync", task 14b point 12); the key
+	// store is not open yet, so no checkpoint is written here: the next
+	// Open writes it with the new generation (state.Checkpointed).
+	if err := c.refreshLog(); err != nil {
+		return nil, nil, nil, err
+	}
+	// user.rec of the data directory in the log (2.7). After a run
+	// interrupted between store.ReplaceUser and its log entry it names
+	// the new generation, which is appended on resuming: then the
+	// registered user.rec must be the one in the log.
+	if err := c.checkUser(me, rawRemote); err != nil {
+		if !extendsUser(local, rawRemote) || !errors.Is(err, translog.ErrNotInLog) {
+			return nil, nil, nil, err
+		}
+		if err := c.checkUser(me, raw); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	ksData, err := keys.ReadKeystoreFile(cfg.keystorePath())
 	if err != nil {
@@ -542,8 +507,8 @@ func openForDeviceLost(cfg Config, passphrase []byte) (c *Client, local, remote 
 		return nil, nil, nil, fmt.Errorf("client: the key store does not hold a generation of the user")
 	}
 	warnUnconfirmed(cfg, st)
-	return &Client{cfg: cfg, st: cfg.Store, ks: ks, user: local, me: me, state: st, unlock: unlock,
-		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}, local, remote, nil
+	c.ks, c.unlock = ks, unlock
+	return c, local, remote, nil
 }
 
 // newGeneration is generation g+1 of DeviceLost: its key store and the
@@ -739,6 +704,13 @@ func (c *Client) reissue(mbx store.ID) error {
 		if m, _ := head.Member(c.me); m.Gen == c.ks.Generation {
 			// An earlier run or another member created it already.
 			return c.finish(ch)
+		}
+		// The fixed cause of Q18 (task 14, 06h point 3): a sole user
+		// member without a checked folder list cannot create the epoch,
+		// and no other member can. TODO(Q18): no way out until Q18 is
+		// answered.
+		if _, _, err := c.folderList(ch); errors.Is(err, ErrRevoked) && c.soleUserMember(head) {
+			return fmt.Errorf("%w: %w", ErrPartial, errNoCheckedFolders)
 		}
 		return c.immediate(ch, store.ReasonGenerationRevoked, head.Members)
 	})
@@ -1382,19 +1354,21 @@ func (c *Client) syncGenerations(ch *chain, now time.Time) (bool, error) {
 	others, own := c.staleGeneration(head)
 	stale := others || own
 	var blocked error
-	if own && !others {
-		// Only this user's entry: the epoch needs folders.gml of the
-		// newest epoch with access. Without it (its own wraps are still
-		// for the revoked generation, or folders.gml was signed by it and
-		// not checked before) this client cannot create the epoch.
+	hinted := false
+	if stale {
+		// The epoch needs folders.gml of the newest epoch with access
+		// (createEpoch). Without it (the own wraps are still for the
+		// revoked generation, or folders.gml was signed by a revoked
+		// generation and not checked before) this client cannot create
+		// the epoch, whose entry is stale (task 14, 06h point 3: a fixed
+		// cause, also when another member's entry is stale, never the
+		// text of the error). Nor does it create a supply then: the
+		// epoch generation-revoked of another member discards it (K1
+		// point 4), and the supply needs the same folder list.
 		if _, _, err := c.folderList(ch); err != nil {
 			stale = false
-			if c.soleUserMember(head) {
-				c.warn("WARNUNG: %s nennt diesen Benutzer noch mit der widerrufenen Generation, und er ist das einzige Mitglied, das Epochen anlegen kann; ohne Zugriff auf die neueste Epoche kann die Epoche zur neuen Generation nicht angelegt werden. Abhilfe: device lost erneut ausführen.", ch.mailbox.ID)
-				blocked = fmt.Errorf("%w: mailbox %s still names this user with a revoked generation and has no other user member; without access to the newest epoch the epoch generation-revoked cannot be created; run device lost again", ErrPartial, ch.mailbox.ID)
-			} else {
-				c.warn("Hinweis: %s nennt diesen Benutzer noch mit der widerrufenen Generation; ohne Zugriff auf die neueste Epoche legt ein anderes Mitglied die Epoche zur neuen Generation an (oder device lost erneut ausführen).", ch.mailbox.ID)
-			}
+			blocked = c.blockedGeneration(ch, head, own, err)
+			hinted = blocked == nil
 		}
 	}
 	until := int64(1<<63 - 1)
@@ -1403,6 +1377,13 @@ func (c *Client) syncGenerations(ch *chain, now time.Time) (bool, error) {
 		until = now.UnixMilli()
 	}
 	left, err := c.rewrapGenerations(ch, until)
+	if err != nil && hinted && !errors.Is(err, errCrashed) {
+		// Without access to the newest epoch the wraps of the other
+		// members are not issued again either: a fixed cause, no raw
+		// error text (task 14, 06h point 3).
+		c.warn("WARNUNG: Die Verpackungen anderer Mitglieder von %s werden nicht neu ausgestellt: %s.", ch.mailbox.ID, warnCause(err))
+		return true, fmt.Errorf("%w: mailbox %s: the wraps of other members are not issued again without access to the newest epoch", ErrPartial, ch.mailbox.ID)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -1422,7 +1403,45 @@ func (c *Client) syncGenerations(ch *chain, now time.Time) (bool, error) {
 	if blocked != nil {
 		return false, blocked
 	}
-	return stale, nil
+	return stale || hinted, nil
+}
+
+// errNoCheckedFolders is the fixed cause of a sole user member who cannot
+// create the epoch generation-revoked because folders.gml of the newest
+// epoch with access is signed by a revoked generation that this client
+// did not check before the revocation (2.2 point 4): there is no checked
+// folder list of the epoch, and no member can help. TODO(Q18): the way
+// out (taking over the unchecked list after an explicit confirmation, or
+// an empty list) is built only once Q18 is answered; until then the
+// state is reported as it is, without a remedy.
+var errNoCheckedFolders = errors.New("no checked folder list of the epoch; no remedy at present, see Q18")
+
+// blockedGeneration reports why the epoch generation-revoked of ch cannot
+// be created by this client (folderList failed with err), with a fixed
+// cause and remedy: a warning, and ErrPartial if this user is the only
+// user member who could create it (another member can do it otherwise,
+// and a hint says so). own reports that the head names this user's own
+// revoked generation.
+func (c *Client) blockedGeneration(ch *chain, head *store.Epoch, own bool, err error) error {
+	mbx := ch.mailbox.ID
+	whose := "einen Benutzer"
+	if own {
+		whose = "diesen Benutzer"
+	}
+	if errors.Is(err, ErrRevoked) {
+		if c.soleUserMember(head) {
+			c.warn("WARNUNG: %s nennt %s noch mit einer widerrufenen Generation, und dieser Benutzer ist das einzige Mitglied, das Epochen anlegen kann. Die Epoche zur neuen Generation kann nicht angelegt werden: keine geprüfte Ordnerliste der Epoche (folders.gml ist von einer widerrufenen Generation signiert und wurde vorher nicht geprüft); derzeit keine Abhilfe, siehe Q18.", mbx, whose)
+			return fmt.Errorf("%w: mailbox %s still names a revoked generation and has no other user member: %w", ErrPartial, mbx, errNoCheckedFolders)
+		}
+		c.warn("Hinweis: %s nennt %s noch mit einer widerrufenen Generation; ohne geprüfte Ordnerliste der Epoche legt ein anderes Mitglied die Epoche zur neuen Generation an.", mbx, whose)
+		return nil
+	}
+	if c.soleUserMember(head) {
+		c.warn("WARNUNG: %s nennt %s noch mit einer widerrufenen Generation, und dieser Benutzer ist das einzige Mitglied, das Epochen anlegen kann; ohne Zugriff auf die neueste Epoche (%s) kann die Epoche zur neuen Generation nicht angelegt werden. Abhilfe: device lost erneut ausführen.", mbx, whose, warnCause(err))
+		return fmt.Errorf("%w: mailbox %s still names a revoked generation and has no other user member; without access to the newest epoch the epoch generation-revoked cannot be created; run device lost again", ErrPartial, mbx)
+	}
+	c.warn("Hinweis: %s nennt %s noch mit einer widerrufenen Generation; ohne Zugriff auf die neueste Epoche (%s) legt ein anderes Mitglied die Epoche zur neuen Generation an.", mbx, whose, warnCause(err))
+	return nil
 }
 
 // soleUserMember reports whether this user is the only user member (kind

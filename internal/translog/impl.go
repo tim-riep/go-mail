@@ -1391,6 +1391,9 @@ func (l *fileLog) refresh(now time.Time) error {
 	if err != nil {
 		return err
 	}
+	if v.Last != nil && h.Size < v.Last.Size {
+		return l.olderHead(h, cands, now)
+	}
 	ns := l.ref
 	var proof tlog.TreeProof
 	if v.Last == nil || h.Size > v.Last.Size {
@@ -1431,6 +1434,48 @@ func (l *fileLog) refresh(now time.Time) error {
 	v.Last, v.LogKeys, v.Pending = vc.Last, vc.LogKeys, keep
 	l.ref = ns
 	return l.fresh(now)
+}
+
+// olderHead handles a newest published head h smaller than the reference
+// head (task 14b point 2, ErrOlderHead): h is judged with
+// Verifier.CheckOlderHead against the reference head, with the log keys
+// judged in the reference tree and the consistency proof from h to the
+// reference head over the tiles of the reference tree. A head that fails
+// returns that error (ErrConsistency for a contradiction, the errors of
+// CheckHead otherwise) and nothing changes. A head that passes is not
+// taken over; the Pending entries are checked against the reference head
+// and the freshness rules applied as without a published head, and only
+// when they pass is the result ErrOlderHead.
+//
+// Reading: the log keys are judged in the reference tree, which extends
+// the tree of h. A generation whose successor certificate entered the
+// log after h may then not cover the time of h any more and h fails
+// with ErrHead; that is a warning for the caller as well, not a verdict
+// on the log.
+func (l *fileLog) olderHead(h *Head, cands []candidate, now time.Time) error {
+	v := l.v
+	last := treeState{Size: v.Last.Size, Hash: v.Last.Hash}
+	proof, err := tlog.ProveTree(last.Size, h.Size, l.f.reader(last))
+	if err != nil {
+		return wrapConsistency(err)
+	}
+	vc := *v
+	vc.LogKeys = judge(l.ref, cands)
+	if err := vc.CheckOlderHead(h, proof); err != nil {
+		return err
+	}
+	keep, err := l.checkCovered(last)
+	if err != nil {
+		return err
+	}
+	if l.ownErr != nil {
+		return l.ownErr
+	}
+	v.Pending = keep
+	if err := l.fresh(now); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: newest published head %d, reference head %d", ErrOlderHead, h.Size, last.Size)
 }
 
 // checkCovered checks every Pending entry that the tree t covers against

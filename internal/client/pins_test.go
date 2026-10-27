@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
@@ -259,13 +260,13 @@ func TestWrapOfRevokedSignerGeneration(t *testing.T) {
 	}
 }
 
-// TestReaderIgnoresEpochBeyondHead: the head of the chain is mailbox.rec
-// for the reader as for the server. After a crash between epoch.rec 5
-// and mailbox.rec (still 4), the server encrypts mails for epoch 4 even
-// after the begin of epoch 5; the reader accepts such a mail, because
-// epoch 5 does not count for it, and does not read the folders of epoch
-// 5 (ErrEpoch).
-func TestReaderIgnoresEpochBeyondHead(t *testing.T) {
+// TestReaderCountsLoggedEpochBeyondHead (task 14, replaces
+// TestReaderIgnoresEpochBeyondHead): after a crash between the log entry
+// of epoch 5 and mailbox.rec (still 4), mailbox.rec lags behind the log.
+// The server refuses to deliver then (ingest.ErrRollback); the reader
+// verifies the chain up to the logged epoch 5, reports the rollback and
+// rejects a mail for epoch 4 received after the begin of epoch 5 (2.4).
+func TestReaderCountsLoggedEpochBeyondHead(t *testing.T) {
 	f := newFixture(t)
 	f.env.Clock.Set(time.Date(2026, 12, 15, 0, 0, 0, 0, time.UTC))
 	client.SetCrashHook(t, func(p string) bool { return p == "epoch-written" })
@@ -288,11 +289,11 @@ func TestReaderIgnoresEpochBeyondHead(t *testing.T) {
 	late := time.UnixMilli(e5.Begin).Add(time.Hour)
 	id := f.forge(t, e4, late, "for epoch 4 after the begin of 5", 1, f.env.IngestKey, 1)
 	f.env.Warnings.Take()
-	if _, body, err := c.Read(f.mbx, id); err != nil || string(body) != "for epoch 4 after the begin of 5" {
-		t.Fatalf("mail for the head epoch 4: %v (%q)", err, f.env.Warnings.Take())
+	if _, _, err := c.Read(f.mbx, id); !errors.Is(err, client.ErrStaleEpoch) {
+		t.Fatalf("mail for epoch 4 after the begin of the logged epoch 5: %v (%q)", err, f.env.Warnings.Take())
 	}
-	if _, err := c.FoldersOfEpoch(f.mbx, 5); !errors.Is(err, client.ErrEpoch) {
-		t.Fatalf("folders of the epoch beyond the head: %v", err)
+	if _, err := c.List(f.mbx, store.ID{}); !errors.Is(err, client.ErrRollback) {
+		t.Fatalf("mailbox.rec behind the log: %v", err)
 	}
 	if _, err := c.FoldersOfEpoch(f.mbx, 4); err != nil {
 		t.Fatal(err)
@@ -381,9 +382,20 @@ func TestIncompleteDiscards(t *testing.T) {
 		if _, err := c.FoldersOfEpoch(f.mbx, 5); !errors.Is(err, client.ErrEpoch) {
 			t.Fatalf("folders of the invalid epoch: %v", err)
 		}
+		// Epoch 5 is the head of mailbox.rec and can never be logged
+		// (ErrOrder): the change of a user member replaces it with its own
+		// epoch 5 first (task 14b point 3), then shares.
+		forged := mustRead(t, f.env.Store.EpochFile(f.mbx, 5))
 		bob := f.env.NewUser("bob")
-		if _, err := c.Share(f.mbx, bob.ID, client.ShareOptions{}); !errors.Is(err, store.ErrChain) {
-			t.Fatalf("share on the broken chain: %v", err)
+		if _, err := c.Share(f.mbx, bob.ID, client.ShareOptions{}); err != nil {
+			t.Fatalf("share over the unloggable head: %v", err)
+		}
+		if bytes.Equal(mustRead(t, f.env.Store.EpochFile(f.mbx, 5)), forged) {
+			t.Fatal("the unloggable head was not replaced")
+		}
+		logMatchesStore(t, f.env, f.mbx)
+		if _, err := bob.Client.List(f.mbx, store.ID{}); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

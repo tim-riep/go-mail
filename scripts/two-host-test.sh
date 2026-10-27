@@ -5,7 +5,7 @@
 #
 #   scripts/two-host-test.sh --server-host srv --client-host cli \
 #       --export /srv/gomail --mount /mnt/gomail [--pin FILE] [--witness FILE] \
-#       --log-helper FILE [--bin DIR] [--workdir DIR] [--out DIR] [--keep]
+#       [--bin DIR] [--workdir DIR] [--out DIR] [--keep]
 #
 # The server host exports --export over NFSv4, the client host has it
 # mounted at --mount. Both are reached over SSH (BatchMode, keys, a POSIX
@@ -29,7 +29,7 @@
 #
 # Local mode (no NFS, no second machine, no root, no second user):
 #
-#   scripts/two-host-test.sh --local [--bin DIR] [--log-helper FILE] [--out DIR]
+#   scripts/two-host-test.sh --local [--bin DIR] [--out DIR]
 #
 # Steps (each aborts the run on failure, set -eu):
 #   a  prerequisites: tools, programs, users, group gomail, umask, NFSv4
@@ -43,10 +43,11 @@
 #      the mount; a second server on the client host refuses; a client on
 #      the client host holds locks/client while a server with
 #      --require-client-lock starts and sees it
-#   d  end to end: keygen, invite, register, mailbox, address, mail over
-#      SMTP to the server, sync/list/read on the client host, a second
-#      user on the client host who reads the mailbox only after
-#      "gomailctl mailbox share", a log head cosigned by the witness
+#   d  end to end: the witness, keygen, invite, register, mailbox,
+#      address, mail over SMTP to the server, sync/list/read on the
+#      client host, a second user on the client host who reads the
+#      mailbox only after "gomailctl mailbox share", a log head cosigned
+#      by the witness
 #   e  evidence on the export: no private keys (0600 files, key files,
 #      key stores), no plaintext (subject and body token), rights of
 #      every file and directory
@@ -81,7 +82,11 @@
 # and seed words never reach it.
 #
 # Environment (task 16c): the script reads PATH, TMPDIR,
-# GOMAIL_TEST_MIN_FREE and what ssh needs, nothing else. Every variable
+# GOMAIL_TEST_MIN_FREE and what ssh needs, nothing else. It sets two
+# switches of a test build itself (task 14): GOMAIL_TEST_DEV_IDENTITY=1
+# for gomailctl, which accepts the pin of the development ceremony only
+# with it, and GOMAIL_TEST_HEAD_GAP=1s for gomail-server, so that a head
+# covering the new entries is signed within seconds, not a minute. Every variable
 # of its own starts empty or 0 before the EXIT trap is set, and the
 # clean-up deletes only paths this run made itself (its flags, checked
 # against the paths it derives). Subject, body token and passphrase
@@ -90,10 +95,14 @@
 # input of the remote shell. The addresses are arguments of curl and of
 # "gomail-server address add" (their interface).
 #
-# Until task 14, gomailctl does not append its records to the
-# transparency log; --log-helper names the test program of internal/e2e
-# (go test -c -tags gomail_test ./internal/e2e), which appends user.rec
-# and epoch.rec as the client will. TODO(task-14): drop --log-helper.
+# gomailctl appends its records to the transparency log itself and works
+# only with a head cosigned by the witness (task 14): the witness starts
+# at the beginning of step d, and every client command that needs a head
+# covering the newest entries is repeated until one is published (at
+# most a minute). The programs must be a test build (go build -tags
+# gomail_test): the development ceremony gives a development pin, which
+# a production gomailctl refuses. --log-helper of task 16 is gone (a
+# usage error).
 # Step d registers a second user, checks that it cannot read the mailbox,
 # shares the mailbox with it from epoch 1 ("gomailctl mailbox share",
 # task 13) and checks that it reads the mail then.
@@ -106,28 +115,28 @@ set -eu
 # would take precedence over --passphrase-file; CDPATH, ENV and BASH_ENV
 # change cd and the shells started.
 unset GOMAILCTL_PASSPHRASE GOMAILCTL_TEST_KEYGEN_PIPE GOMAIL_E2E_HELPER CDPATH ENV BASH_ENV \
-	LOCAL KEEP GROUP SERVER_HOST CLIENT_HOST EXPORT MOUNT PIN WITNESS OUT BIN WORKDIR LOG_HELPER \
+	LOCAL KEEP GROUP SERVER_HOST CLIENT_HOST EXPORT MOUNT PIN WITNESS OUT BIN WORKDIR \
 	RUNID SUBJECT BODY ADDR FROM PASSPHRASE RCM P T TBASE T_OURS STATUS STEP MODE WARN PROTO RC XRUN \
-	SRV CER WIT CTL ENV_SRV REDACT PIDS TOOLS RW SW CW RW_OURS SW_OURS CW_OURS \
-	SDATA CDATA KEYS SPIN INGEST ADMIN CPIN WKEY PASS ALICE BOB ROOT BUILD HELP \
+	SRV CER WIT CTL CTLE ENV_SRV REDACT PIDS TOOLS RW SW CW RW_OURS SW_OURS CW_OURS \
+	SDATA CDATA KEYS SPIN INGEST ADMIN CPIN WKEY PASS ALICE BOB ROOT BUILD \
 	SID SHOST SUMASK CID CHOST CUMASK GCHECK SGID CGID MOUNTS MLINE FSTYPE MOPTS MARK MARKF MKWORK \
 	DATA_OURS WKEY_OURS PIN_OURS PASS_OURS MARK_OURS MADE_LINK MADE_EXPORT MADE_WORKDIR MADE_SWORKDIR MADE_CWORKDIR \
-	RIGHTS C_ARGS SERVE SMTP LOG KEYGEN INV_A INV_B UID_A UID_B MBX NEP MAILID VKEY ORIGIN WNAME HEADF \
+	RIGHTS C_ARGS SERVE SMTP LOG KEYGEN INV_A INV_B UID_A UID_B MBX MAILID VKEY ORIGIN WNAME HEADF \
 	rc why a b e f m n p w
 IFS=$(printf ' \t\nx')
 IFS=${IFS%x}
 LOCAL=0 KEEP=0 GROUP=gomail
-SERVER_HOST='' CLIENT_HOST='' EXPORT='' MOUNT='' PIN='' WITNESS='' OUT='' BIN='' WORKDIR='' LOG_HELPER=''
+SERVER_HOST='' CLIENT_HOST='' EXPORT='' MOUNT='' PIN='' WITNESS='' OUT='' BIN='' WORKDIR=''
 RUNID='' SUBJECT='' BODY='' ADDR='' FROM='' PASSPHRASE='' RCM='' P='' T='' TBASE='' T_OURS=0
 STATUS=abgebrochen STEP=Start MODE='' WARN='' PROTO=0 RC=0 XRUN=run_on
-SRV='' CER='' WIT='' CTL='' ENV_SRV='' REDACT='' PIDS='' TOOLS=''
+SRV='' CER='' WIT='' CTL='' CTLE='' ENV_SRV='' REDACT='' PIDS='' TOOLS=''
 RW='' SW='' CW='' RW_OURS=0 SW_OURS=0 CW_OURS=0
-SDATA='' CDATA='' KEYS='' SPIN='' INGEST='' ADMIN='' CPIN='' WKEY='' PASS='' ALICE='' BOB='' ROOT='' BUILD='' HELP=''
+SDATA='' CDATA='' KEYS='' SPIN='' INGEST='' ADMIN='' CPIN='' WKEY='' PASS='' ALICE='' BOB='' ROOT='' BUILD=''
 SID='' SHOST='' SUMASK='' CID='' CHOST='' CUMASK='' GCHECK='' SGID='' CGID='' MOUNTS='' MLINE='' FSTYPE='' MOPTS=''
 MARK='' MARKF='' MKWORK=''
 DATA_OURS=0 WKEY_OURS=0 PIN_OURS=0 PASS_OURS=0 MARK_OURS=0
 MADE_LINK=0 MADE_EXPORT=0 MADE_WORKDIR=0 MADE_SWORKDIR=0 MADE_CWORKDIR=0
-RIGHTS='' C_ARGS='' SERVE='' SMTP='' LOG='' KEYGEN='' INV_A='' INV_B='' UID_A='' UID_B='' MBX='' NEP=0 MAILID=''
+RIGHTS='' C_ARGS='' SERVE='' SMTP='' LOG='' KEYGEN='' INV_A='' INV_B='' UID_A='' UID_B='' MBX='' MAILID=''
 VKEY='' ORIGIN='' WNAME='' HEADF=''
 rc=0 why='' a='' b='' e='' f='' m='' n='' p='' w=''
 
@@ -135,10 +144,10 @@ usage() {
 	cat <<'EOF'
 Aufruf:
   two-host-test.sh --server-host <ssh-ziel> --client-host <ssh-ziel>
-                   --export <dir> --mount <dir> --log-helper <datei>
+                   --export <dir> --mount <dir>
                    [--pin <datei>] [--witness <datei>] [--bin <dir>]
                    [--workdir <dir>] [--out <dir>] [--group gomail] [--keep]
-  two-host-test.sh --local [--bin <dir>] [--log-helper <datei>]
+  two-host-test.sh --local [--bin <dir>]
                    [--workdir <dir>] [--out <dir>] [--keep]
 
   --server-host, --client-host  SSH-Ziele (Server-Host exportiert, Client-Host mountet)
@@ -148,8 +157,6 @@ Aufruf:
   --witness  Ablageort des Zeugenschlüssels auf dem Server-Host (Standard: im eigenen
              Verzeichnis); beide dürfen noch nicht existieren, ihr Verzeichnis muss es;
              das Skript schreibt sie (0600) und löscht sie am Ende (außer mit --keep)
-  --log-helper  Testprogramm aus internal/e2e (go test -c -tags gomail_test ./internal/e2e),
-             trägt bis Auftrag 14 user.rec und epoch.rec ins Log ein
   --bin      Verzeichnis der Programme auf beiden Hosts, Testbuild (-tags gomail_test: keygen über
              FIFOs) (Standard: PATH; lokal: wird gebaut), gebaut mit -tags gomail_dev,gomail_test
              (gomail-ceremony init --dev)
@@ -179,7 +186,10 @@ while [ $# -gt 0 ]; do
 		usage
 		exit 0
 		;;
-	--server-host | --client-host | --export | --mount | --pin | --witness | --out | --bin | --workdir | --log-helper | --group)
+	--log-helper)
+		die "--log-helper entfällt seit Auftrag 14: gomailctl trägt seine Einträge selbst ins Log ein"
+		;;
+	--server-host | --client-host | --export | --mount | --pin | --witness | --out | --bin | --workdir | --group)
 		[ $# -ge 2 ] || die "$1 braucht einen Wert"
 		case $1 in
 		--server-host) SERVER_HOST=$2 ;;
@@ -191,7 +201,6 @@ while [ $# -gt 0 ]; do
 		--out) OUT=$2 ;;
 		--bin) BIN=$2 ;;
 		--workdir) WORKDIR=$2 ;;
-		--log-helper) LOG_HELPER=$2 ;;
 		--group) GROUP=$2 ;;
 		esac
 		shift
@@ -219,11 +228,9 @@ if [ "$LOCAL" = 1 ]; then
 	[ -z "$PIN" ] || PIN=$(abs "$PIN")
 	[ -z "$WITNESS" ] || WITNESS=$(abs "$WITNESS")
 	[ -z "$BIN" ] || BIN=$(abs "$BIN")
-	[ -z "$LOG_HELPER" ] || LOG_HELPER=$(abs "$LOG_HELPER")
 else
 	[ -n "$SERVER_HOST" ] && [ -n "$CLIENT_HOST" ] && [ -n "$EXPORT" ] && [ -n "$MOUNT" ] ||
 		die "--server-host, --client-host, --export und --mount sind erforderlich (oder --local)"
-	[ -n "$LOG_HELPER" ] || die "--log-helper ist bis Auftrag 14 erforderlich (go test -c -tags gomail_test ./internal/e2e)"
 	WORKDIR=${WORKDIR:-/tmp}
 	for p in "$EXPORT" "$MOUNT" "$WORKDIR" ${PIN:+"$PIN"} ${WITNESS:+"$WITNESS"}; do
 		case $p in /*) ;; *) die "Pfade auf den Hosts müssen absolut sein: $p" ;; esac
@@ -259,11 +266,17 @@ progs() {
 	CER=$(q "$(prog gomail-ceremony)")
 	WIT=$(q "$(prog gomail-witness)")
 	CTL=$(q "$(prog gomailctl)")
+	# The client of a test build accepts the development pin only with
+	# GOMAIL_TEST_DEV_IDENTITY=1 (task 14).
+	CTLE="env GOMAIL_TEST_DEV_IDENTITY=1 $CTL"
 }
 progs
+# Read only by a test build (-tags gomail_test): a head at most every
+# second while the log grows (task 14), and the free space (task 15c
+# finding 7).
+ENV_SRV="env GOMAIL_TEST_HEAD_GAP=1s "
 if [ -n "${GOMAIL_TEST_MIN_FREE:-}" ]; then
-	# Read only by a test build (-tags gomail_test, task 15c finding 7).
-	ENV_SRV="env GOMAIL_TEST_MIN_FREE=$(q "$GOMAIL_TEST_MIN_FREE") "
+	ENV_SRV="env GOMAIL_TEST_HEAD_GAP=1s GOMAIL_TEST_MIN_FREE=$(q "$GOMAIL_TEST_MIN_FREE") "
 fi
 
 # redact replaces subject, body token, addresses and passphrase by
@@ -623,25 +636,20 @@ md "" "- Export (Server-Host): $EXPORT" "- Mount (Client-Host): $MOUNT" \
 
 if [ "$LOCAL" = 1 ]; then
 	ROOT=$(cd "$(dirname "$0")/.." && pwd)
-	if [ -z "$BIN" ] || [ -z "$LOG_HELPER" ]; then
-		command -v go >/dev/null || die "--bin und --log-helper fehlen und go ist nicht vorhanden"
+	if [ -z "$BIN" ]; then
+		command -v go >/dev/null || die "--bin fehlt und go ist nicht vorhanden"
 		BUILD=$RW/bin
 		mkdir "$BUILD"
-		BIN=${BIN:-$BUILD}
-		say "Baue Programme (-tags gomail_dev,gomail_test) und Log-Helfer (-tags gomail_test) nach $BUILD"
+		BIN=$BUILD
+		say "Baue Programme (-tags gomail_dev,gomail_test) nach $BUILD"
 		(cd "$ROOT" && go build -tags gomail_dev,gomail_test -o "$BUILD/" ./cmd/...)
-		if [ -z "$LOG_HELPER" ]; then
-			(cd "$ROOT" && go test -c -tags gomail_test -o "$BUILD/e2e.test" ./internal/e2e)
-			LOG_HELPER=$BUILD/e2e.test
-		fi
 		progs
 	fi
 fi
-HELP="GOMAIL_E2E_HELPER=log-append $(q "$LOG_HELPER")"
 
 must server "for p in $SRV $CER $WIT; do command -v \"\$p\" >/dev/null || { echo \"fehlt: \$p\"; exit 1; }; done; echo 'Programme vorhanden'"
-must client "for p in $CTL $SRV $(q "$LOG_HELPER"); do command -v \"\$p\" >/dev/null || { echo \"fehlt: \$p\"; exit 1; }; done; echo 'Programme vorhanden'"
-ok "Programme vorhanden: Server-Host gomail-server, gomail-ceremony, gomail-witness; Client-Host gomailctl, gomail-server, Log-Helfer"
+must client "for p in $CTL $SRV; do command -v \"\$p\" >/dev/null || { echo \"fehlt: \$p\"; exit 1; }; done; echo 'Programme vorhanden'"
+ok "Programme vorhanden: Server-Host gomail-server, gomail-ceremony, gomail-witness; Client-Host gomailctl, gomail-server"
 
 must server "echo \"Benutzer \$(id -un) uid \$(id -u) Gruppen \$(id -nG)\"; echo \"Maschine \$(uname -n)\"; echo \"umask \$(umask)\""
 SID=$(sed -n 's/^Benutzer \([^ ]*\) uid \([0-9]*\).*/\1:\2/p' "$T/out")
@@ -771,12 +779,12 @@ PASS_OURS=1
 printf '%s\n' "$PASSPHRASE" | run_on client "umask 077; set -C; cat >$(q "$PASS")"
 ok "Pin auf dem Client-Host ($CPIN), Zeugenschlüssel getrennt von den Plattformschlüsseln ($WKEY), beide 0600; Passphrase-Datei 0600"
 
-C_ARGS="--data $(q "$CDATA") --platform $(q "$CPIN") --insecure-no-log --passphrase-file $(q "$PASS")"
+C_ARGS="--data $(q "$CDATA") --pin $(q "$CPIN") --passphrase-file $(q "$PASS")"
 
 # ---------------------------------------------------------------- c
 step "c) Sperrtest (9.1 Testsperre, D70)"
 
-refuse client "$CTL sync $C_ARGS --dir $(q "$ALICE")" "Testsperre"
+refuse client "$CTLE sync $C_ARGS --dir $(q "$ALICE")" "Testsperre"
 ok "ohne laufenden Server verweigert der Client auf dem Client-Host (Testsperre)"
 
 SERVE="$ENV_SRV$SRV serve --data $(q "$SDATA") --listen 127.0.0.1:0 --ingest-key $(q "$INGEST") --pin $(q "$SPIN") --log-listen 127.0.0.1:0"
@@ -816,7 +824,7 @@ ok "Server A läuft auf dem Server-Host und hält locks/server (SMTP $SMTP, Log 
 
 # Positive proof: the client passes the lock check and fails only later,
 # at the missing user (task 16b finding 7).
-x client "$CTL sync $C_ARGS --dir $(q "$ALICE")"
+x client "$CTLE sync $C_ARGS --dir $(q "$ALICE")"
 [ "$RC" -eq 1 ] || fail "sync ohne Benutzer: erwartet Exit 1, erhalten: Exit $RC"
 if grep -q Testsperre "$T/err"; then fail "Client sieht die Serversperre über den Mount nicht"; fi
 grep -q 'no registered user' "$T/err" || fail "sync ohne Benutzer: erwartet \"no registered user\" nach der Sperrprüfung"
@@ -833,7 +841,7 @@ ok "zweiter Server auf dem Client-Host verweigert (gomail-server log repair beko
 # known to cleanup before the start (task 16b finding 4).
 PIDS="$PIDS client:$CW/holder.pid client:$CW/holder.sleep"
 must client "cd $(q "$CW") && mkfifo holder.in || exit 1
-$(bg "$CW/holder.pid" "$CW/holder.log" "unset GOMAILCTL_PASSPHRASE; exec <$(q "$CW/holder.in"); exec $CTL sync --data $(q "$CDATA") --platform $(q "$CPIN") --insecure-no-log --dir $(q "$ALICE")")
+$(bg "$CW/holder.pid" "$CW/holder.log" "unset GOMAILCTL_PASSPHRASE; exec <$(q "$CW/holder.in"); exec $CTLE sync --data $(q "$CDATA") --pin $(q "$CPIN") --dir $(q "$ALICE")")
 $(bg "$CW/holder.sleep" /dev/null "exec sleep 3600 >$(q "$CW/holder.in")")
 $(waitpid "$CW/holder.pid" "$CW/holder.sleep")
 i=0
@@ -854,6 +862,33 @@ ok "Server B mit --require-client-lock startet, weil die Client-Sperre vom Clien
 
 # ---------------------------------------------------------------- d
 step "d) Ende zu Ende"
+
+# The witness first (task 14): gomailctl works only with a head that the
+# witness cosigned.
+must server "pub=$(q "$SDATA/platform/ingest-1.pub")
+h=\$({ printf 'gomail-log\n\001'; cat \"\$pub\"; } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8)
+k=\$({ printf '\001'; cat \"\$pub\"; } | base64 | tr -d '\n')
+echo \"gomail-log+\$h+\$k\"" "Prüfschlüssel des Logs aus platform/ingest-1.pub (note: gomail-log+<hash>+<schlüssel>)"
+VKEY=$(tail -n 1 "$T/out")
+must client "$CTL inspect $(q "$CPIN")"
+ORIGIN=$(sed -n 's/.*"origin": "\(.*\)".*/\1/p' "$T/out")
+WNAME=$(sed -n 's/.*"name": "\(.*\)".*/\1/p' "$T/out" | head -n 1)
+[ -n "$ORIGIN" ] && [ -n "$WNAME" ] || fail "Pin ohne Origin oder Zeugen"
+PIDS="$PIDS server:$SW/witness.pid"
+must server "cd $(q "$SW") || exit 1
+$(bg "$SW/witness.pid" "$SW/witness.log" "exec $WIT serve --log $(q "http://$LOG") --log-key $(q "$VKEY") --origin $(q "$ORIGIN") --key $(q "$WKEY") --state $(q "$SW/witness-state") --interval 1s")
+$(waitpid "$SW/witness.pid")
+echo \"Zeuge gestartet: pid \$(cat $(q "$SW/witness.pid"))\"" \
+	"gomail-witness serve --log http://$LOG --key $WKEY --interval 1s ... >$SW/witness.log 2>&1 &"
+ok "Zeuge läuft auf dem Server-Host (Origin $ORIGIN, Zeuge $WNAME)"
+
+# again CMD is a command that runs CMD until it succeeds, at most 120
+# times every half second: a client command that needs a head covering
+# the newest log entries (the server signs one at most every second
+# while the log grows, the witness cosigns it within a second).
+again() {
+	printf 'i=0; until %s; do [ $i -lt 120 ] || exit 1; sleep 0.5; i=$((i + 1)); done' "$1"
+}
 
 # KEYGEN answers the three word questions of gomailctl keygen. The words
 # never reach a file (task 16b finding 1): standard output comes through
@@ -878,7 +913,7 @@ errline() {
 	sed "s/Wort Nr\. [0-9]*: //g" "$t/err" 2>/dev/null | awk "NF { l = \$0 } END { if (l != \"\") print l }" >&2
 }
 mkfifo "$t/in" "$t/out"
-GOMAILCTL_TEST_KEYGEN_PIPE=1 "$ctl" keygen --data "$data" --dir "$dir" --platform "$pin" --insecure-no-log --passphrase-file "$pass" <"$t/in" >"$t/out" 2>"$t/err" &
+env GOMAILCTL_TEST_KEYGEN_PIPE=1 GOMAIL_TEST_DEV_IDENTITY=1 "$ctl" keygen --data "$data" --dir "$dir" --pin "$pin" --passphrase-file "$pass" <"$t/in" >"$t/out" 2>"$t/err" &
 p=$!
 echo "$p" >"$kp"
 exec 3>"$t/in" 4<"$t/out"
@@ -925,22 +960,17 @@ must server "$SRV invite create --data $(q "$SDATA")"
 INV_A=$(tail -n 1 "$T/out")
 must server "$SRV invite create --data $(q "$SDATA")"
 INV_B=$(tail -n 1 "$T/out")
-must client "$CTL register --invite $(q "$INV_A") $C_ARGS --dir $(q "$ALICE")"
+must client "$CTLE register --invite $(q "$INV_A") $C_ARGS --dir $(q "$ALICE")"
 UID_A=$(sed -n 's/^Registriert: //p' "$T/out")
-must client "$CTL register --invite $(q "$INV_B") $C_ARGS --dir $(q "$BOB")"
+must client "$CTLE register --invite $(q "$INV_B") $C_ARGS --dir $(q "$BOB")"
 UID_B=$(sed -n 's/^Registriert: //p' "$T/out")
 [ -n "$UID_A" ] && [ -n "$UID_B" ] || fail "keine Benutzer-ID"
-md "" "TODO(task-14): gomailctl trägt user.rec und epoch.rec noch nicht ins Log ein; der Log-Helfer tut es auf dem Client-Host."
-must client "$HELP $(q "$CDATA") $(q "$CPIN") user $(q "$CDATA/users/$UID_A/user.rec") $(q "$CDATA/users/$UID_B/user.rec")"
-ok "Einladungen auf dem Server-Host, Registrierung auf dem Client-Host: $UID_A, $UID_B"
+ok "Einladungen auf dem Server-Host, Registrierung auf dem Client-Host (user.rec von gomailctl ins Log eingetragen): $UID_A, $UID_B"
 
-must client "$CTL mailbox create Buero $C_ARGS --dir $(q "$ALICE")"
+# mailbox create needs a head that covers the own user entry; the
+# epochs it creates are appended to the log by gomailctl itself.
+must client "$(again "$CTLE mailbox create Buero $C_ARGS --dir $(q "$ALICE")")" "gomailctl mailbox create Buero $C_ARGS --dir $ALICE   # wiederholt, bis ein Kopf den Benutzereintrag enthält"
 MBX=$(tail -n 1 "$T/out")
-must client "d=$(q "$CDATA/mailboxes/$MBX/epochs"); n=1; set --
-while [ -f \"\$d/\$n/epoch.rec\" ]; do set -- \"\$@\" \"\$d/\$n/epoch.rec\"; n=\$((n + 1)); done
-[ \$# -gt 0 ] || { echo 'keine Epochen'; exit 1; }
-$HELP $(q "$CDATA") $(q "$CPIN") epoch \"\$@\""
-NEP=$(grep -c '^epoch ' "$T/out") || fail "keine Epoche im Log"
 must server "$SRV address add $(q "$ADDR") --mailbox $(q "$MBX") --data $(q "$SDATA") --admin-key $(q "$ADMIN") --pin $(q "$SPIN")"
 ok "Postfach $MBX mit Adresse <Adresse> (signiert und geloggt auf dem Server-Host)"
 
@@ -962,16 +992,27 @@ ok "Mail über SMTP an den Server auf dem Server-Host eingeliefert (250)"
 # line "$RCM <status>"; subject and text reach awk through the
 # environment (GM_S, GM_B from run_sec), neither through its arguments
 # nor through the command line of the shell (task 16c finding 8).
-must client "$CTL sync $C_ARGS --dir $(q "$ALICE")"
-must_sec client "{ $CTL list $(q "$MBX") $C_ARGS --dir $(q "$ALICE") || echo $RCM \$?; } |
+must client "$(again "$CTLE sync $C_ARGS --dir $(q "$ALICE")")" "gomailctl sync $C_ARGS --dir $ALICE   # wiederholt, bis ein Kopf die Epochen enthält"
+# list is repeated until a head covers the address assignment as well
+# (the client shows no mail whose address the log does not assign); only
+# the result of the last run is printed, from a variable of the shell.
+must_sec client "i=0
+while :; do
+	o=\$({ $CTLE list $(q "$MBX") $C_ARGS --dir $(q "$ALICE") || echo $RCM \$?; } |
 GM_M=$RCM LC_ALL=C awk '
 \$1 == ENVIRON[\"GM_M\"] && NF == 2 { rc = \$2; next }
 { print \$1, \"Größe\", \$4; if (index(\$0, ENVIRON[\"GM_S\"])) n++ }
-END { print \"Zeilen mit dem Betreff: \" n + 0; if (rc != \"\") { print \"Exit \" rc; exit 1 } }'" \
-	"gomailctl list $MBX $C_ARGS --dir $ALICE | awk ...   # nur Mail-ID und Größe ins Protokoll, keine Datei"
+END { print \"Zeilen mit dem Betreff: \" n + 0; if (rc != \"\") print \"Exit \" rc }')
+	case \$o in *'Zeilen mit dem Betreff: 1'*) break ;; esac
+	[ \$i -lt 120 ] || break
+	sleep 0.5; i=\$((i + 1))
+done
+printf '%s\\n' \"\$o\"
+case \$o in *'Exit '*) exit 1 ;; esac" \
+	"gomailctl list $MBX $C_ARGS --dir $ALICE | awk ...   # nur Mail-ID und Größe ins Protokoll, keine Datei; wiederholt, bis ein Kopf die Adresse enthält"
 grep -q 'Zeilen mit dem Betreff: 1' "$T/out" || fail "die Mail fehlt in der Liste"
 MAILID=$(awk 'NR == 1 { print $1 }' "$T/out")
-must_sec client "{ $CTL read $(q "$MBX") $(q "$MAILID") $C_ARGS --dir $(q "$ALICE") || echo $RCM \$?; } |
+must_sec client "{ $CTLE read $(q "$MBX") $(q "$MAILID") $C_ARGS --dir $(q "$ALICE") || echo $RCM \$?; } |
 GM_M=$RCM LC_ALL=C awk '
 \$1 == ENVIRON[\"GM_M\"] && NF == 2 { rc = \$2; next }
 { n += length(\$0) + 1 }
@@ -992,28 +1033,34 @@ ok "sync, list und read auf dem Client-Host: Mail $MAILID entschlüsselt, Betref
 
 # Only the exit status and standard error count: standard output (a list
 # the second user must not see) goes to /dev/null (task 16c finding 5).
-x client "$CTL list $(q "$MBX") $C_ARGS --dir $(q "$BOB") >/dev/null"
+x client "$CTLE list $(q "$MBX") $C_ARGS --dir $(q "$BOB") >/dev/null"
 [ "$RC" -ne 0 ] || fail "der zweite Benutzer liest das Postfach ohne Freigabe"
 if grep -q Testsperre "$T/err"; then fail "zweiter Benutzer scheitert an der Testsperre statt am fehlenden Zugang"; fi
 ok "zweiter Benutzer $UID_B auf dem Client-Host liest $MBX ohne Freigabe nicht"
 
 # The share (2.5, 9.2): the wrap of epoch 1 for the second user and an
-# epoch member-added with its supply, which the log helper appends to
-# the log like the epochs of the mailbox (TODO(task-14)).
-must client "$CTL mailbox share $(q "$MBX") $(q "$UID_B") --from 1 $C_ARGS --dir $(q "$ALICE")"
+# epoch member-added with its supply, which gomailctl appends to the log
+# itself (task 14). The list of the second user is repeated until a head
+# covers the new epoch as well (until then it shows the mail of epoch 1
+# but ends with an error for the uncovered epoch).
+must client "$CTLE mailbox share $(q "$MBX") $(q "$UID_B") --from 1 $C_ARGS --dir $(q "$ALICE")"
 grep -q "Verpackt für $UID_B: Epochen 1" "$T/out" || fail "share: Epoche 1 nicht für den zweiten Benutzer verpackt"
-must client "d=$(q "$CDATA/mailboxes/$MBX/epochs"); n=1; set --
-while [ -f \"\$d/\$n/epoch.rec\" ]; do [ \$n -le $NEP ] || set -- \"\$@\" \"\$d/\$n/epoch.rec\"; n=\$((n + 1)); done
-[ \$# -gt 0 ] || { echo 'keine neue Epoche'; exit 1; }
-$HELP $(q "$CDATA") $(q "$CPIN") epoch \"\$@\""
-must_sec client "{ $CTL list $(q "$MBX") $C_ARGS --dir $(q "$BOB") || echo $RCM \$?; } |
+must_sec client "i=0
+while :; do
+	o=\$({ $CTLE list $(q "$MBX") $C_ARGS --dir $(q "$BOB") || echo $RCM \$?; } |
 GM_M=$RCM LC_ALL=C awk '
 \$1 == ENVIRON[\"GM_M\"] && NF == 2 { rc = \$2; next }
 { print \$1, \"Größe\", \$4; if (index(\$0, ENVIRON[\"GM_S\"])) n++ }
-END { print \"Zeilen mit dem Betreff: \" n + 0; if (rc != \"\") { print \"Exit \" rc; exit 1 } }'" \
-	"gomailctl list $MBX $C_ARGS --dir $BOB | awk ...   # nur Mail-ID und Größe ins Protokoll, keine Datei"
+END { print \"Zeilen mit dem Betreff: \" n + 0; if (rc != \"\") print \"Exit \" rc }')
+	case \$o in *'Exit '*) ;; *'Zeilen mit dem Betreff: 1'*) break ;; esac
+	[ \$i -lt 120 ] || break
+	sleep 0.5; i=\$((i + 1))
+done
+printf '%s\\n' \"\$o\"
+case \$o in *'Exit '*) exit 1 ;; esac" \
+	"gomailctl list $MBX $C_ARGS --dir $BOB | awk ...   # nur Mail-ID und Größe ins Protokoll, keine Datei; wiederholt, bis ein Kopf die neue Epoche enthält"
 grep -q 'Zeilen mit dem Betreff: 1' "$T/out" || fail "der zweite Benutzer sieht die Mail nach der Freigabe nicht"
-must_sec client "{ $CTL read $(q "$MBX") $(q "$MAILID") $C_ARGS --dir $(q "$BOB") || echo $RCM \$?; } |
+must_sec client "{ $CTLE read $(q "$MBX") $(q "$MAILID") $C_ARGS --dir $(q "$BOB") || echo $RCM \$?; } |
 GM_M=$RCM LC_ALL=C awk '
 \$1 == ENVIRON[\"GM_M\"] && NF == 2 { rc = \$2; next }
 index(\$0, ENVIRON[\"GM_B\"]) { b = 1 }
@@ -1024,21 +1071,6 @@ END {
 grep -q 'Text: ja' "$T/out" || fail "read des zweiten Benutzers: Text fehlt"
 ok "mailbox share $MBX an $UID_B ab Epoche 1: der zweite Benutzer liest die Mail $MAILID nach der Freigabe (geprüft in der Pipe, ohne Datei)"
 
-must server "pub=$(q "$SDATA/platform/ingest-1.pub")
-h=\$({ printf 'gomail-log\n\001'; cat \"\$pub\"; } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8)
-k=\$({ printf '\001'; cat \"\$pub\"; } | base64 | tr -d '\n')
-echo \"gomail-log+\$h+\$k\"" "Prüfschlüssel des Logs aus platform/ingest-1.pub (note: gomail-log+<hash>+<schlüssel>)"
-VKEY=$(tail -n 1 "$T/out")
-must client "$CTL inspect $(q "$CPIN")"
-ORIGIN=$(sed -n 's/.*"origin": "\(.*\)".*/\1/p' "$T/out")
-WNAME=$(sed -n 's/.*"name": "\(.*\)".*/\1/p' "$T/out" | head -n 1)
-[ -n "$ORIGIN" ] && [ -n "$WNAME" ] || fail "Pin ohne Origin oder Zeugen"
-PIDS="$PIDS server:$SW/witness.pid"
-must server "cd $(q "$SW") || exit 1
-$(bg "$SW/witness.pid" "$SW/witness.log" "exec $WIT serve --log $(q "http://$LOG") --log-key $(q "$VKEY") --origin $(q "$ORIGIN") --key $(q "$WKEY") --state $(q "$SW/witness-state") --interval 1s")
-$(waitpid "$SW/witness.pid")
-echo \"Zeuge gestartet: pid \$(cat $(q "$SW/witness.pid"))\"" \
-	"gomail-witness serve --log http://$LOG --key $WKEY --interval 1s ... >$SW/witness.log 2>&1 &"
 # The server host waits for the head while the witness lives (task 16b
 # finding 7); then the client host reads it over the mount.
 must server "h=$(q "$SDATA/log/heads"); w=\$(cat $(q "$SW/witness.pid")); i=0

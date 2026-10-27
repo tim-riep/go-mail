@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,32 +184,38 @@ func TestDeviceLostTwoMembers(t *testing.T) {
 			}
 		}
 	}
-	// An epoch signed with the old key store breaks the chain.
-	m, err := f.env.Store.ReadMailbox(f.mbx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// An epoch signed with the old key store, named by mailbox.rec: it
+	// can never be logged (the revocation is logged before it). Readers
+	// stop with the fixed cause (task 14b point 3).
 	head := after[len(after)-1]
 	forged := f.env.ForgeEpoch(&testenv.User{Dir: thief, ID: alice.ID}, f.mbx, f.env.Clock.Now(), store.ReasonMemberAdded, head.Members, "A")
 	if forged.SignerGen != 1 {
 		t.Fatal("not forged with generation 1")
 	}
 	f.env.Warnings.Take()
-	err = f.env.Reopen(bob).Sync()
-	if !errors.Is(err, store.ErrChain) || !strings.Contains(err.Error(), "signed by a revoked generation") || !strings.Contains(err.Error(), "names a newer generation") {
+	if _, err := f.env.Reopen(bob).List(f.mbx, store.ID{}); !errors.Is(err, store.ErrChain) {
 		t.Fatalf("bob accepts an epoch of the revoked generation: %v", err)
 	}
 	// The warning names the epoch and a fixed cause, not the error text.
-	w := f.env.Warnings.Take()
-	onlyIDs(t, w)
-	if s := strings.Join(w, "\n"); !strings.Contains(s, "bricht bei Epoche") || !strings.Contains(s, "widerrufenen Generation") {
-		t.Fatalf("warnings: %s", s)
+	warningWith(t, f.env.Warnings.Take(), fmt.Sprintf("Epoche %d von %s ist nicht loggbar", forged.Number, f.mbx), "share, revoke oder sync")
+	// A change of a user member replaces it with the same number;
+	// mailbox.rec keeps naming it.
+	if err := f.env.Reopen(alice).Sync(); err != nil {
+		t.Fatalf("alice's Sync over the unloggable head: %v", err)
 	}
-	if err := f.env.Reopen(alice).Sync(); !errors.Is(err, store.ErrChain) {
-		t.Fatalf("alice accepts an epoch of her revoked generation: %v", err)
+	if e, _, err := f.env.Store.ReadEpoch(f.mbx, forged.Number); err != nil || e.SignerID != alice.ID || e.SignerGen != 2 {
+		t.Fatalf("forged epoch at the head not replaced: %v", err)
+	}
+	if headOf(t, f.env, f.mbx) < forged.Number {
+		t.Fatal("mailbox.rec set back")
 	}
 	// Beyond the head (the server ignores it), it is invalid for good and
 	// the next change replaces it.
+	m, err := f.env.Store.ReadMailbox(f.mbx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged = f.env.ForgeEpoch(&testenv.User{Dir: thief, ID: alice.ID}, f.mbx, f.env.Clock.Now(), store.ReasonMemberAdded, nil, "A")
 	if err := f.env.Store.WriteMailbox(m); err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +275,7 @@ func TestDeviceLostWrongSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.SetCrashHook(t, nil)
+	_, user2, _ := env.Store.ReadUser(alice.ID)
 	if err := store.WriteFileAtomic(env.Store.UserFile(alice.ID), user); err != nil {
 		t.Fatal(err)
 	}
@@ -277,12 +285,21 @@ func TestDeviceLostWrongSeed(t *testing.T) {
 	if _, err := client.Open(cfg, testenv.Passphrase); !errors.Is(err, client.ErrUserRecord) {
 		t.Fatalf("open with a rolled back user.rec: %v", err)
 	}
-	// Completed, and a second device lost moves on to generation 3.
+	// The log holds generation 2 (task 14): a user.rec of generation 1 is
+	// outdated also when the client directory holds it as well.
 	if err := store.WritePrivateFileAtomic(filepath.Join(alice.Dir, "user.rec"), user); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.DeviceLost(cfg, testenv.Passphrase, alice.Words); err != nil {
+	if _, err := client.DeviceLost(cfg, testenv.Passphrase, alice.Words); !errors.Is(err, client.ErrSuperseded) {
+		t.Fatalf("both user.rec rolled back: %v", err)
+	}
+	// With the logged user.rec back, the interrupted run is completed,
+	// and a second device lost moves on to generation 3.
+	if err := store.WriteFileAtomic(env.Store.UserFile(alice.ID), user2); err != nil {
 		t.Fatal(err)
+	}
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, alice.Words); gen != 2 || err != nil {
+		t.Fatalf("completed: %d, %v", gen, err)
 	}
 	env.Reopen(alice)
 	if gen := env.DeviceLost(alice); gen != 3 {

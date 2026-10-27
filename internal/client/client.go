@@ -23,7 +23,6 @@ import (
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 // Errors of the client. Every rejection of a file is reported through
@@ -32,7 +31,7 @@ var (
 	ErrNotRegistered = errors.New("client: no registered user in this client directory")
 	ErrRegistered    = errors.New("client: this client directory already has a user")
 	ErrConfirm       = errors.New("client: the seed words were not confirmed")
-	ErrDevIdentity   = errors.New("client: a development platform identity is accepted only with --insecure-no-log")
+	ErrDevIdentity   = errors.New("client: a development platform identity is accepted only by tests (Config.AllowDevIdentity)")
 	ErrPlatform      = errors.New("client: platform certificate not valid")
 	ErrUserRecord    = errors.New("client: user.rec in the data directory differs from the registered one")
 	ErrRollback      = errors.New("client: mailbox.rec points to an older epoch than already seen")
@@ -102,10 +101,22 @@ type Config struct {
 	// store, own user.rec and local state. It must not be inside the data
 	// directory.
 	Dir string
-	// Pin is the trusted platform identity (2.3).
+	// Pin is the trusted platform identity (2.3) and the anchor of the
+	// transparency log (translog doc.go "Pin"): origin, witnesses, quorum
+	// and identity list. The client opens the log of the data directory
+	// itself with it (task 14); there is no way to run without the log.
 	Pin *store.PlatformPin
-	// Log is the transparency log (phase 1: translogtest.Unverified).
-	Log translog.Log
+	// AllowDevIdentity accepts a pin with the development flag (pin field
+	// 3, ceremony init --dev). Only tests set it (package testenv, and
+	// gomailctl in a build with the tag gomail_test); without it such a
+	// pin is refused (ErrDevIdentity). There is no command line flag.
+	AllowDevIdentity bool
+	// BeforeRefresh, if set, runs before every Refresh of the client log.
+	// gomailctl leaves it nil; a test platform (package testenv) lets its
+	// server sign and publish a head with witness cosignatures there, as
+	// gomail-server does on its own cadence. It cannot weaken a check:
+	// Refresh verifies every head it finds.
+	BeforeRefresh func()
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 	// Warn receives warnings for the user (stderr in gomailctl).
@@ -133,10 +144,10 @@ func (cfg *Config) check() error {
 // checkReader checks everything but the client directory, which a
 // client opened with RecoverRead does not use.
 func (cfg *Config) checkReader() error {
-	if cfg.Store == nil || cfg.Pin == nil || cfg.Log == nil {
+	if cfg.Store == nil || cfg.Pin == nil {
 		return fmt.Errorf("client: incomplete configuration")
 	}
-	if cfg.Pin.Dev && cfg.Log.Verified() {
+	if cfg.Pin.Dev && !cfg.AllowDevIdentity {
 		return ErrDevIdentity
 	}
 	if cfg.Now == nil {
@@ -162,9 +173,29 @@ type state struct {
 	// Unconfirmed is set by Restore: the client was restored from the
 	// seed without another device and trusts on first contact (2.7 "Neue
 	// Geräte und Wiederherstellung"); every start warns until a confirmed
-	// state exists. TODO(task-14): cleared once a tree head with witness
-	// signatures has been checked.
+	// state exists. TODO(Q20), strictest reading (task 14b point 6): the
+	// mark stays until a valid checkpoint of another user member (another
+	// user, not another device of this user) was compared with the
+	// reference head and agreed (checkCheckpoints: same view, or a
+	// checkpoint the own head covers); a witnessed head alone does not
+	// clear it, because witnesses check consistency, not completeness. A
+	// sole member stays marked for good (a warning, no error).
 	Unconfirmed bool `json:"unconfirmed,omitempty"`
+	// Checkpointed names, per mailbox, the reference head and the
+	// generation of the last checkpoint this client wrote there
+	// (checkpointMark; task 14b point 4): Open and every refresh write a
+	// checkpoint again whenever the reference head or the generation
+	// differs, also after Restore and DeviceLost, which do not change the
+	// head. Only IDs, numbers and hashes.
+	Checkpointed map[string]string `json:"checkpointed,omitempty"`
+	// InviteUsed is set by Register right after the invitation was
+	// consumed and before the user entry is appended to the log, so that
+	// a resumed Register skips ConsumeInvite (translog doc.go "Who
+	// writes", finding 03d-5).
+	InviteUsed bool `json:"invite_used,omitempty"`
+	// Log is the client log's memory: reference head and pending
+	// entries (task 14).
+	Log *logMemory `json:"log,omitempty"`
 	// Device is the random device ID of this client directory, the first
 	// part of the name of its index segments (6.2, K5). Created by the
 	// first Index.
@@ -182,7 +213,10 @@ type state struct {
 // adoption of memberships (adoptMemberships, which adds entries only).
 // Only a command by which the user explicitly asks to forget a mailbox
 // could remove an entry; there is none. Reissue is a mark, not memory:
-// it is set and cleared.
+// it is set and cleared. One exception, which removes nothing remembered
+// (task 06h): an entry that state.json holds as null (in Epochs, a
+// damaged memo) is dropped when the state is loaded (mailboxState); it
+// carries no value, and the chain fills it in again.
 type mailboxState struct {
 	Epoch     uint32            `json:"epoch"`
 	EpochHash string            `json:"epoch_hash"`
@@ -213,8 +247,9 @@ type mailboxState struct {
 	Checked map[string]*checkMemo `json:"checked,omitempty"`
 	// Reissue is set by DeviceLost to the new generation if it could not
 	// issue every file of this mailbox again (ErrPartial); DeviceLost run
-	// again then continues instead of creating a generation, and Sync
-	// clears it once nothing signed by the revoked generation is left
+	// again (which always creates the next generation, task 14) works on
+	// it in the same run, and Sync clears it once nothing signed by the
+	// revoked generation is left and the head no longer names it
 	// (syncGenerations). Only a number.
 	Reissue uint32 `json:"reissue,omitempty"`
 	// Mails holds, per mail, the epoch, the receipt time and the SHA-256
@@ -315,11 +350,30 @@ type Client struct {
 	// state but not yet saved (checkMeta); saveSeen writes it once per
 	// List, Read, Search, Index or SetFlags.
 	dirty bool
+	// lg is the client log (task 14).
+	lg *logConn
+	// mbxUnlock releases the mailbox lock that mutate holds (nil
+	// without one), so that a replacement by store.ReplaceEpoch, which
+	// takes the lock itself, can run inside a change (withoutLock).
+	mbxUnlock func()
+	// addrRefreshed is set once a check of an address assignment
+	// refreshed the client log in the running operation (checkMeta);
+	// ready clears it.
+	addrRefreshed bool
+	// cpSeen holds, per checkpoint file of another client, the hash of
+	// the file and the reference head it was checked against
+	// (checkCheckpoints).
+	cpSeen map[string]string
 }
 
 type ingestKey struct {
 	pub       ed25519.PublicKey
 	validFrom int64
+	// until is valid_from of the next generation's certificate once that
+	// is a valid entry of the log (superseded), the receipt time from
+	// which this generation signs nothing validly (ingestKeyFor).
+	until      int64
+	superseded bool
 }
 
 type epochRef struct {
@@ -328,7 +382,18 @@ type epochRef struct {
 }
 
 // Open unlocks the key store with passphrase and loads the registered
-// user. It warns on every start without a verifying log (translog).
+// user. It opens the client log (task 14): Refresh and then always
+// CheckFresh (2.3: no verified tree head with witness signatures at most
+// 24 hours old, or an own entry withheld, stops everything with ErrLog),
+// the reference head into state.json, and CheckUser of the own user.rec
+// (a newer logged user.rec makes it outdated: ErrSuperseded; one the log
+// does not hold is tried once more after a rebuild of the audit index
+// and once more after appending it again, checkOwnUser). The mark
+// Unconfirmed of Restore stays until checkCheckpoints compared the view
+// with another user member (TODO(Q20)); every start warns while it is
+// set. The checkpoints are written when none were written for the
+// reference head and the current generation yet. A CreateMailbox
+// interrupted after its log entry is completed (resumeMailboxes).
 func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	if err := cfg.check(); err != nil {
 		return nil, err
@@ -347,13 +412,6 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 			unlock()
 		}
 	}()
-	if !cfg.Log.Verified() {
-		cfg.Warn(translog.Warning)
-	}
-	// TODO(phase3-translog): tree head with witness signature at most 24 hours old (2.3).
-	if err := cfg.Log.CheckFresh(cfg.Now()); err != nil {
-		return nil, err
-	}
 	st, err := loadState(cfg.statePath())
 	if err != nil {
 		return nil, err
@@ -373,6 +431,21 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	if err != nil || user.ID != me {
 		return nil, ErrNotRegistered
 	}
+	c = &Client{cfg: cfg, st: cfg.Store, user: user, me: me, state: st,
+		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}
+	lc, err := openLog(&c.cfg, st, false)
+	if err != nil {
+		return nil, err
+	}
+	c.lg = lc
+	defer func() {
+		if err != nil {
+			lc.close()
+		}
+	}()
+	if _, err := lc.refresh(); err != nil {
+		return nil, err
+	}
 	// The data directory must hold exactly the user.rec this client
 	// registered (2.2), and the log must contain it.
 	_, remote, err := cfg.Store.ReadUser(me)
@@ -384,8 +457,7 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 		cfg.Warn("WARNUNG: user.rec im Datenverzeichnis weicht vom registrierten Stand ab.")
 		return nil, ErrUserRecord
 	}
-	// TODO(phase3-translog): own user.rec included in the log (2.7).
-	if err := cfg.Log.CheckUser(me, local); err != nil {
+	if err := c.checkOwnUser(local); err != nil {
 		return nil, err
 	}
 	ksData, err := keys.ReadKeystoreFile(cfg.keystorePath())
@@ -406,9 +478,24 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 		}
 		return nil, fmt.Errorf("client: the key store does not hold the current generation of the user")
 	}
+	c.ks = ks
+	defer func() {
+		if err != nil {
+			ks.Zero()
+		}
+	}()
+	// TODO(Q20): every start warns while the view is not compared with a
+	// checkpoint of another user member (checkCheckpoints clears it).
 	warnUnconfirmed(cfg, st)
-	return &Client{cfg: cfg, st: cfg.Store, ks: ks, user: user, me: me, state: st, unlock: unlock,
-		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}, nil
+	// The checkpoints for the reference head and the current generation,
+	// if none were written for them yet (task 14b point 4: also after
+	// Restore and DeviceLost, which do not change the head).
+	c.writeCheckpoints()
+	if err := c.resumeMailboxes(); err != nil {
+		return nil, err
+	}
+	c.unlock = unlock
+	return c, nil
 }
 
 // UserID returns the user's ID.
@@ -427,6 +514,7 @@ func (c *Client) Close() {
 		c.ks = nil
 	}
 	c.rk = nil
+	c.lg.close()
 	if c.unlock != nil {
 		c.unlock()
 		c.unlock = nil

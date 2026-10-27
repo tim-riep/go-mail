@@ -1,6 +1,9 @@
 package client
 
-import "github.com/tim-riep/go-mail/internal/store"
+import (
+	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
+)
 
 // FoldersOfEpoch opens folders.gml of epoch n of the verified chain, for
 // tests: the folders of a discarded epoch are never read.
@@ -38,3 +41,11 @@ func (c *Client) WithoutMailboxLock() { c.skipLock = true }
 
 // WarnCause is warnCause for the tests of package client_test.
 var WarnCause = warnCause
+
+// SetLogHook wraps the client log of every client opened (Open,
+// openForDeviceLost, Restore, RecoverRead) until the test ends, so that
+// a check of the real log can be made to fail.
+func SetLogHook(t interface{ Cleanup(func()) }, f func(translog.Log) translog.Log) {
+	logHook = f
+	t.Cleanup(func() { logHook = nil })
+}

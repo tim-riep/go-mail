@@ -435,9 +435,9 @@ func TestSegmentRejected(t *testing.T) {
 		if got := search(t, c, f.mbx, "from:evil@x.example", ""); got != "" {
 			t.Fatalf("%s: forged hit %q", tc.name, got)
 		}
-		if !warned(f.env, "wird ignoriert") {
-			t.Fatalf("%s: no warning", tc.name)
-		}
+		// Task 14b point 11: the warning names the file and a fixed
+		// cause, never the text of the error (warningWith: onlyIDs).
+		warningWith(t, f.env.Warnings.Take(), "Indexsegment", "wird ignoriert")
 		os.Remove(f.env.Store.IndexSegmentFile(f.mbx, 1, tc.dev, uint64(100+i)))
 	}
 	// The same segment signed by alice, a user member, is accepted.

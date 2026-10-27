@@ -42,6 +42,12 @@ func warnCause(err error) string {
 		return "Entschlüsselung fehlgeschlagen"
 	case errors.Is(err, envelope.ErrSuite):
 		return "Algorithmensatz passt nicht"
+	case errors.Is(err, ErrAddress):
+		return "Adresse nicht zugeordnet"
+	case errors.Is(err, ErrSuperseded):
+		return "user.rec ist veraltet"
+	case errors.Is(err, ErrLog), errors.Is(err, translog.ErrStale), errors.Is(err, translog.ErrConsistency):
+		return "das Transparenzlog bestätigt den Zustand nicht"
 	case errors.Is(err, translog.ErrNotInLog), errors.Is(err, translog.ErrMismatch), errors.Is(err, translog.ErrOrder),
 		errors.Is(err, translog.ErrSuperseded), errors.Is(err, translog.ErrPrerequisite):
 		return "nicht im Transparenzlog oder im Widerspruch dazu"

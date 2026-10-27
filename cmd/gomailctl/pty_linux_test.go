@@ -137,6 +137,7 @@ type child struct {
 // switch of the test build (keygen_pipe_tagged.go).
 func (c *cli) start(t *testing.T, dir string, stdin, stdout, stderr *os.File, ctty bool, env []string, args ...string) *child {
 	t.Helper()
+	c.childHead()
 	cmd := exec.Command(os.Args[0], c.args(dir, args)...)
 	cmd.Env = childEnv(env)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
@@ -146,9 +147,21 @@ func (c *cli) start(t *testing.T, dir string, stdin, stdout, stderr *os.File, ct
 	return startChild(t, cmd)
 }
 
+// childHead publishes a head of the test platform before gomailctl
+// starts as a child process (task 14: it works with its client log and
+// has no BeforeRefresh). The child reads the real time, so the clock of
+// the platform is moved up to it first: a head older than 24 hours is
+// not fresh (2.3).
+func (c *cli) childHead() {
+	if now := time.Now(); now.After(c.env.Clock.Now()) {
+		c.env.Clock.Set(now)
+	}
+	c.env.PublishHead()
+}
+
 // args appends the common options for client directory dir to args.
 func (c *cli) args(dir string, args []string) []string {
-	return append(args, "--data", c.env.Store.Path(""), "--dir", dir, "--platform", c.pin, "--insecure-no-log")
+	return append(args, "--data", c.env.Store.Path(""), "--dir", dir, "--pin", c.pin)
 }
 
 // childEnv is the environment of gomailctl started from this test

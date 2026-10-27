@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/tim-riep/go-mail/internal/ingest"
 )
@@ -29,4 +30,21 @@ func testConfig(c *ingest.Config) error {
 	}
 	c.MinFree = f
 	return nil
+}
+
+// testEnvHeadGap is read only by a test build: the shortest time between
+// two signed heads (loghttp.Config.MinGap), so that the end-to-end tests
+// of the client log (task 14) do not wait a minute for every head that
+// covers their entries. A production build has neither this file nor the
+// variable.
+const testEnvHeadGap = "GOMAIL_TEST_HEAD_GAP"
+
+// testMinGap applies GOMAIL_TEST_HEAD_GAP, a duration of at least one
+// second; an unset, malformed or smaller value leaves the default.
+func testMinGap() time.Duration {
+	d, err := time.ParseDuration(os.Getenv(testEnvHeadGap))
+	if err != nil || d < time.Second {
+		return 0
+	}
+	return d
 }

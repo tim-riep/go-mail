@@ -149,6 +149,7 @@ func TestPtyWordsStderrClosed(t *testing.T) {
 // before the redirection.
 func (c *cli) startShell(t *testing.T, dir string, ctty, stdin, stdout, stderr *os.File, redir string, args ...string) *child {
 	t.Helper()
+	c.childHead()
 	cmd := exec.Command("/bin/sh", append([]string{"-c", `exec "$0" "$@" ` + redir, os.Args[0]}, c.args(dir, args)...)...)
 	cmd.Env = childEnv(nil)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr

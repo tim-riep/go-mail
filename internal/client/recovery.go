@@ -11,7 +11,6 @@ import (
 	"github.com/tim-riep/go-mail/internal/envelope"
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 // The recovery recipient (2.4 "Wiederherstellungsempfänger", K3,
@@ -291,13 +290,6 @@ func RecoverRead(cfg Config, mbx store.ID, words []string) (*Client, error) {
 	if err := cfg.checkReader(); err != nil {
 		return nil, err
 	}
-	if !cfg.Log.Verified() {
-		cfg.Warn(translog.Warning)
-	}
-	// TODO(phase3-translog): tree head with witness signature at most 24 hours old (2.3).
-	if err := cfg.Log.CheckFresh(cfg.Now()); err != nil {
-		return nil, err
-	}
 	normalized, err := normalizeList(words)
 	if err != nil {
 		return nil, err
@@ -320,8 +312,21 @@ func RecoverRead(cfg Config, mbx store.ID, words []string) (*Client, error) {
 	}
 	c := &Client{cfg: cfg, st: cfg.Store, rk: &recoveryKey{unwrap: unwrap}, state: &state{Mailboxes: map[string]*mailboxState{}},
 		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}
+	// The client log on first contact (2.7), kept in memory with its
+	// audit index in a directory of its own (removed by Close): a tree
+	// head with witness signatures at most 24 hours old (Refresh,
+	// CheckFresh) before anything is read.
+	c.cfg.Dir = ""
+	if c.lg, err = openLog(&c.cfg, c.state, true); err != nil {
+		return nil, err
+	}
+	if _, err := c.lg.refresh(); err != nil {
+		c.lg.close()
+		return nil, err
+	}
 	ch, err := c.verifyChain(mbx)
 	if err != nil {
+		c.lg.close()
 		return nil, err
 	}
 	idPub := identity.Public().(ed25519.PublicKey)
@@ -336,6 +341,7 @@ func RecoverRead(cfg Config, mbx store.ID, words []string) (*Client, error) {
 		}
 	}
 	if c.rk.id.IsZero() {
+		c.lg.close()
 		return nil, fmt.Errorf("%w: no recovery recipient of %s matches the seed", ErrRecovery, mbx)
 	}
 	c.me = c.rk.id

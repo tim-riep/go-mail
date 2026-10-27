@@ -16,7 +16,7 @@ import (
 // Geräte und Wiederherstellung", task 06b C).
 
 // warnUnconfirmedState is shown on every start of a restored client.
-const warnUnconfirmedState = "WARNUNG: Noch kein bestätigter Zustand. Dieser Client wurde aus dem Seed wiederhergestellt und vertraut den Daten beim ersten Kontakt; ein Server könnte ihm einen abweichenden Zustand zeigen, bis er mit dem Log und den Vermerken anderer Mitglieder abgeglichen ist."
+const warnUnconfirmedState = "WARNUNG: Noch kein bestätigter Zustand: Sicht noch nicht mit einem anderen Mitglied abgeglichen. Dieser Client wurde aus dem Seed wiederhergestellt und vertraut den Daten beim ersten Kontakt; ein Server könnte ihm einen abweichenden Zustand zeigen, bis der Vermerk eines anderen Benutzer-Mitglieds mit dem eigenen Baumkopf übereinstimmt (ein alleiniges Mitglied bleibt markiert)."
 
 // warnUnconfirmed warns on every start while the state of the client is
 // not confirmed (2.7: "Der Client zeigt deutlich an, dass er noch keinen
@@ -83,9 +83,28 @@ func Restore(cfg Config, opts RestoreOptions, passphrase []byte) (store.ID, erro
 	if err != nil {
 		return store.ID{}, err
 	}
-	// TODO(phase3-translog): user.rec included in the log (2.7); the first
-	// contact is confirmed by task 14.
-	if err := cfg.Log.CheckUser(user.ID, raw); err != nil {
+	// The first contact (2.7 "Neue Geräte und Wiederherstellung"): the
+	// client log is opened without a reference head, takes the newest
+	// head with witness cosignatures (Refresh, CheckFresh), and user.rec
+	// must be the one in the log (CheckUser, not outdated). The audit
+	// index lies in a directory of its own until the client directory is
+	// written (nothing is written there unless the seed matches); Open
+	// builds it again in the client directory. The head goes into
+	// state.json; Unconfirmed stays until the view agrees with a
+	// checkpoint of another user member (TODO(Q20), checkCheckpoints).
+	st := &state{UserID: user.ID.String(), Registered: true, Unconfirmed: true, Mailboxes: map[string]*mailboxState{}}
+	lcfg := cfg
+	lcfg.Dir = ""
+	lc, err := openLog(&lcfg, st, true)
+	if err != nil {
+		return store.ID{}, err
+	}
+	defer lc.close()
+	if _, err := lc.refresh(); err != nil {
+		return store.ID{}, err
+	}
+	rc := &Client{cfg: lcfg, st: cfg.Store, me: user.ID, state: st, lg: lc}
+	if err := rc.checkUser(user.ID, raw); err != nil {
 		return store.ID{}, err
 	}
 	g := user.Current()
@@ -124,7 +143,6 @@ func Restore(cfg Config, opts RestoreOptions, passphrase []byte) (store.ID, erro
 	if err := emptyClientDir(cfg); err != nil {
 		return store.ID{}, err
 	}
-	st := &state{UserID: user.ID.String(), Registered: true, Unconfirmed: true, Mailboxes: map[string]*mailboxState{}}
 	for _, id := range boxes {
 		st.Mailboxes[id.String()] = &mailboxState{Versions: map[string]uint32{}, Epochs: map[string]*epochMemo{}}
 	}

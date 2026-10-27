@@ -9,7 +9,6 @@ import (
 	"net/smtp"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,27 +66,42 @@ func holders(shown map[int][]string, idx ...int) *sharePrompter {
 }
 
 // userMailbox registers a user with gomailctl (common: its arguments),
-// logs the user and the epochs as the client will do itself
-// (logAsClient), creates a mailbox and assigns addr to it with "address
-// add"; it returns the mailbox ID.
+// which logs the user and the epochs itself (task 14), creates a mailbox
+// (repeated until a head cosigned by the witness covers the user entry,
+// runLogged) and assigns addr to it with "address add"; it returns the
+// mailbox ID. A witness must run.
 func (p *platform) userMailbox(common []string, addr string) string {
 	t := p.t
 	t.Helper()
 	p.keygen(common)
 	code := strings.TrimSpace(p.run("", "gomail-server", "invite", "create", "--data", p.data))
-	reg := p.run("", "gomailctl", append([]string{"register", "--invite", code}, common...)...)
-	userID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reg), "Registriert:"))
-	p.logAsClient(translog.KindUser, filepath.Join(p.data, "users", userID, "user.rec"))
-	mbx := strings.TrimSpace(p.run("", "gomailctl", append([]string{"mailbox", "create", "Büro"}, common...)...))
+	p.run("", "gomailctl", append([]string{"register", "--invite", code}, common...)...)
+	mbx := strings.TrimSpace(p.runLogged("", "gomailctl", append([]string{"mailbox", "create", "Büro"}, common...)...))
 	epochs, _ := filepath.Glob(filepath.Join(p.data, "mailboxes", mbx, "epochs", "*", "epoch.rec"))
 	if len(epochs) == 0 {
 		t.Fatal("no epochs")
 	}
-	for n := 1; n <= len(epochs); n++ {
-		p.logAsClient(translog.KindEpoch, filepath.Join(p.data, "mailboxes", mbx, "epochs", strconv.Itoa(n), "epoch.rec"))
-	}
 	p.run("", "gomail-server", "address", "add", addr, "--mailbox", mbx, "--data", p.data, "--admin-key", p.admin, "--pin", p.pin)
 	return mbx
+}
+
+// listUntil runs "gomailctl list mbx" until its output contains every
+// one of want, at most for a minute (a head cosigned by the witness must
+// cover the address assignment and the epochs, task 14), and returns the
+// last output.
+func (p *platform) listUntil(mbx string, common []string, want ...string) string {
+	p.t.Helper()
+	var list string
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(250 * time.Millisecond) {
+		list = p.runLogged("", "gomailctl", append([]string{"list", mbx}, common...)...)
+		all := true
+		for _, w := range want {
+			all = all && strings.Contains(list, w)
+		}
+		if all || time.Now().After(deadline) {
+			return list
+		}
+	}
 }
 
 // clientLog opens the log of the data directory as a client with the
@@ -169,10 +183,11 @@ func refreshUntil(t *testing.T, l translog.Log, logs func() string, check func()
 //     refuses to start with it (ingest.ErrSuperseded), and a client log
 //     with pin 3 (heads cosigned by the new witness) ends generation 1 at
 //     that valid_from (LogKey.Until) and accepts the new certificate
-//     issued by identity 3. TODO(task-14): gomailctl itself has no client
-//     log yet (--insecure-no-log); the rule for metadata signed by ingest
-//     generation 1 after that time (translog doc.go "Platform
-//     generations") is built there.
+//     issued by identity 3. TODO(task-14): this step checks the end of
+//     generation 1 on a client log of its own (clientLog), not through
+//     gomailctl; the rule for metadata signed by ingest generation 1
+//     after that time (translog doc.go "Platform generations") in the
+//     client log of gomailctl is not covered here.
 func TestSuccessionEndToEnd(t *testing.T) {
 	bin := programs(t)
 	dir := t.TempDir()
@@ -213,7 +228,10 @@ func TestSuccessionEndToEnd(t *testing.T) {
 		t.Fatalf("publish: %q", out)
 	}
 	srv := p.startServer()
-	common := []string{"--data", data, "--dir", filepath.Join(dir, "alice"), "--platform", pin1, "--insecure-no-log"}
+	// gomailctl works only with heads cosigned by the witness (task 14):
+	// the witness runs from the start.
+	stopWitness := p.startWitnessGen(srv, 1)
+	common := []string{"--data", data, "--dir", filepath.Join(dir, "alice"), "--pin", pin1}
 	mbx := p.userMailbox(common, "info@brownbear.example")
 	mail := func(s *serverProc, subject string) error {
 		return smtp.SendMail(s.smtp, nil, "a@lieferant.example", []string{"info@brownbear.example"},
@@ -233,6 +251,7 @@ func TestSuccessionEndToEnd(t *testing.T) {
 	if code, _, e := p.exec("", "gomail-ceremony", "publish", "--from", out2, "--data", data, "--pin", pin2); code != 1 || !strings.Contains(e, "Server läuft") {
 		t.Fatalf("publish beside the server: %d %s", code, e)
 	}
+	stopWitness()
 	srv.stop()
 	if code, _, e := p.exec("", "gomail-ceremony", "publish", "--from", out2, "--data", data, "--pin", pin1); code != 1 || !strings.Contains(e, "install the new pin") {
 		t.Fatalf("publish of the succession with pin 1: %d %s", code, e)
@@ -243,11 +262,11 @@ func TestSuccessionEndToEnd(t *testing.T) {
 	}
 	p.pin = pin2
 	srv = p.startServer()
-	stopWitness := p.startWitnessGen(srv, 1)
+	stopWitness = p.startWitnessGen(srv, 1)
 	if err := mail(srv, "nach der Nachfolge"); err != nil {
 		t.Fatal(err)
 	}
-	if list := p.run("", "gomailctl", append([]string{"list", mbx}, common...)...); !strings.Contains(list, "vor der Nachfolge") || !strings.Contains(list, "nach der Nachfolge") {
+	if list := p.listUntil(mbx, common, "vor der Nachfolge", "nach der Nachfolge"); !strings.Contains(list, "vor der Nachfolge") || !strings.Contains(list, "nach der Nachfolge") {
 		t.Fatalf("list: %q", list)
 	}
 	succData, err := os.ReadFile(filepath.Join(data, "platform", "identity-2.succ"))

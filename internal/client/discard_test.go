@@ -244,8 +244,11 @@ func TestDiscardsRemembered(t *testing.T) {
 	if _, err := c.FoldersOfEpoch(f.mbx, 2); !errors.Is(err, client.ErrDiscardedEpoch) {
 		t.Fatalf("discarded epoch 2 after the replacement: %v", err)
 	}
-	if !warned(f.env, "Epoche 5 von "+f.mbx.String()+" wurde ersetzt") {
-		t.Fatal("replacement not noticed")
+	// Since task 14 the log holds the original epoch 5: the replacement
+	// contradicts it (CheckEpoch, ErrMismatch) and the chain ends before it.
+	if w := strings.Join(f.env.Warnings.Take(), "\n"); !strings.Contains(w, "Epoche 5 von "+f.mbx.String()+" wurde ersetzt") &&
+		!strings.Contains(w, f.mbx.String()+" bricht bei Epoche 5 ab") {
+		t.Fatalf("replacement not noticed: %s", w)
 	}
 	if _, _, err := c.Read(f.mbx, two); !errors.Is(err, client.ErrDiscardedEpoch) {
 		t.Fatalf("mail of discarded epoch 2 after the replacement: %v", err)

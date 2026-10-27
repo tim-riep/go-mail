@@ -4,9 +4,11 @@ import (
 	"crypto/ecdh"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 // Members of a mailbox (2.5, K1, K2, K3, QUESTIONS Q1 and Q6).
@@ -59,7 +61,13 @@ func (c *Client) mutate(mbx store.ID, op func(ch *chain) error) error {
 		if err != nil {
 			return err
 		}
-		defer unlock()
+		c.mbxUnlock = unlock
+		defer func() {
+			if c.mbxUnlock != nil {
+				c.mbxUnlock()
+			}
+			c.mbxUnlock = nil
+		}()
 	}
 	c.locked = mbx
 	defer func() { c.next, c.locked = nil, store.ID{} }()
@@ -76,14 +84,22 @@ func (c *Client) mutate(mbx store.ID, op func(ch *chain) error) error {
 		if len(ch.epochs) == 0 {
 			return fmt.Errorf("%w: no epochs", store.ErrChain)
 		}
-		err = op(ch)
+		if ch.unloggableHead {
+			err = c.healHead(ch)
+		}
+		if err == nil {
+			err = op(ch)
+		}
 		if !errors.Is(err, errRace) {
 			return err
 		}
 		// K2 rule 3: the epoch written first under the mailbox lock wins;
 		// the loser creates its change again on the basis of the winner.
-		// TODO(phase3-translog): K2 rule 4, the order in the transparency
-		// log replaces "first written".
+		// K2 rule 4 (task 14): the log decides which one is valid; an
+		// epoch.rec in the data directory is adopted only once it is
+		// logged (checkEpoch, readBeyond: an unlogged one is appended
+		// first, an unloggable one replaced, one that contradicts the log
+		// never used), so "written first" and "logged first" agree.
 		if attempt >= maxEpochAttempts {
 			return fmt.Errorf("client: no epoch of %s written in %d attempts, last attempt: %w", mbx, attempt, err)
 		}
@@ -103,13 +119,13 @@ func (c *Client) currentGeneration(id store.ID) (uint32, *ecdh.PublicKey, error)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w: user.rec of %s: %v", ErrArgument, id, err)
 	}
-	// TODO(phase3-translog): user.rec in the log, generation valid only
-	// from its log entry on (2.2 rule 3).
-	if err := c.cfg.Log.CheckUser(id, raw); err != nil {
+	// user.rec in the log and not outdated, and the generation valid
+	// only from its log entry on (2.2 rule 3).
+	if err := c.checkUser(id, raw); err != nil {
 		return 0, nil, err
 	}
 	g := u.Current()
-	if err := c.cfg.Log.CheckGeneration(id, g.Gen); err != nil {
+	if err := c.logged(func(l translog.Log) error { return l.CheckGeneration(id, g.Gen) }); err != nil {
 		return 0, nil, err
 	}
 	return g.Gen, g.UnwrapPub, nil
@@ -219,9 +235,56 @@ func (c *Client) finish(ch *chain) error {
 	return c.commitHead(ch, e, d)
 }
 
+// healHead replaces the epoch.rec at the head of mailbox.rec that can
+// never be logged (ch.unloggableHead, task 14b point 3; translog doc.go
+// "Unlogged epoch.rec" step 3) by a new epoch with the same number n,
+// created by this user member like any epoch after the end of the chain
+// (createEpoch: store.ReplaceEpoch, which runs the log protocol again
+// under the mailbox lock and replaces only on ErrOrder). mailbox.rec
+// keeps naming n: the head never sinks (2.4). The new epoch is a planned
+// epoch with the members of epoch n-1 in their current generation; it
+// begins in the month after epoch n-1, at the earliest ImmediateDelay
+// from now (like the fallback epoch of Sync). ch is extended by it, so
+// that the change then runs on the repaired chain. A client that is not
+// a user member of epoch n-1 cannot repair it (errUnloggableHead).
+func (c *Client) healHead(ch *chain) error {
+	if err := c.mayCreate(ch); err != nil {
+		return fmt.Errorf("%w: %w", errUnloggableHead, err)
+	}
+	mbx := ch.mailbox.ID
+	head, headData := ch.head()
+	if x := c.next; x == nil || x.mailbox != mbx || x.number != head.Number+1 || head.Number+1 != ch.mailbox.Epoch {
+		return fmt.Errorf("%w: epoch after %d", errUnloggableHead, head.Number)
+	}
+	members, err := c.resolveMembers(mbx, head.Members)
+	if err != nil {
+		return err
+	}
+	begin := max(c.cfg.Now().Add(ImmediateDelay).UnixMilli(), monthStart(time.UnixMilli(head.Begin), 1))
+	e, d, err := c.createEpoch(mbx, head.Number+1, begin, store.ReasonRegular, headData, members, nil, c.currentFolders(ch))
+	if err != nil {
+		return err
+	}
+	if err := c.commitHead(ch, e, d); err != nil {
+		return err
+	}
+	if err := ch.links.Add(e, d); err != nil {
+		return err
+	}
+	ch.epochs, ch.data = append(ch.epochs, e), append(ch.data, d)
+	ch.next, ch.unloggableHead, c.next = nil, false, nil
+	c.warn("Hinweis: Die nicht loggbare Epoche %d von %s wurde durch eine neue Epoche %d ersetzt.", e.Number, mbx, e.Number)
+	return nil
+}
+
 // commitHead writes mailbox.rec with head, the last file of every change
 // (DECISIONS D57, D61), and remembers head as the highest epoch seen.
+// mailbox.rec never names an older epoch than before (2.4: the head
+// never sinks; ErrRollback otherwise, nothing written).
 func (c *Client) commitHead(ch *chain, head *store.Epoch, headData []byte) error {
+	if head.Number < ch.mailbox.Epoch {
+		return fmt.Errorf("%w: head %d of %s would be set back to %d", ErrRollback, ch.mailbox.Epoch, ch.mailbox.ID, head.Number)
+	}
 	if head.Number != ch.mailbox.Epoch {
 		m := *ch.mailbox
 		m.Epoch = head.Number

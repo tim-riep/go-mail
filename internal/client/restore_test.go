@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -163,12 +164,21 @@ func TestKeygenSharesAndRestore(t *testing.T) {
 		if w := strings.Join(env.Warnings.Take(), "\n"); !strings.Contains(w, "Noch kein bestätigter Zustand") {
 			t.Fatalf("%s: warnings: %s", name, w)
 		}
+		if !unconfirmed(t, rcfg.Dir) {
+			t.Fatalf("%s: restored state not marked unconfirmed", name)
+		}
 		rc, err := client.Open(rcfg, testenv.Passphrase)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if w := strings.Join(env.Warnings.Take(), "\n"); !strings.Contains(w, "Noch kein bestätigter Zustand") {
+		// Task 14b point 6 (Q20, strictest reading): a witnessed head
+		// does not clear the mark; only a checkpoint of another user
+		// member does, and alice is the only member: every start warns.
+		if w := strings.Join(env.Warnings.Take(), "\n"); !strings.Contains(w, "Sicht noch nicht mit einem anderen Mitglied abgeglichen") {
 			t.Fatalf("%s: no warning on start: %s", name, w)
+		}
+		if !unconfirmed(t, rcfg.Dir) {
+			t.Fatalf("%s: confirmed without another member", name)
 		}
 		if n, err := rc.MailboxName(mbx); err != nil || n != "A" {
 			t.Fatalf("%s: mailbox: %q, %v", name, n, err)
@@ -278,4 +288,16 @@ func TestRestorePastPeriodReader(t *testing.T) {
 		t.Fatalf("mailboxes %v", got)
 	}
 	readBody(t, f.env, c, f.mbx, old.ID, "october")
+}
+
+// unconfirmed reports the mark Unconfirmed in state.json of dir.
+func unconfirmed(t *testing.T, dir string) bool {
+	t.Helper()
+	var st struct {
+		Unconfirmed bool `json:"unconfirmed"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(dir, "state.json")), &st); err != nil {
+		t.Fatal(err)
+	}
+	return st.Unconfirmed
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,17 +29,60 @@ func (l *failLog) err(op string) error {
 	}
 	return nil
 }
-func (l *failLog) AppendUser(store.ID, []byte) error          { return l.err("AppendUser") }
-func (l *failLog) AppendEpoch(store.ID, uint32, []byte) error { return l.err("AppendEpoch") }
-func (l *failLog) CheckUser(store.ID, []byte) error           { return l.err("CheckUser") }
-func (l *failLog) CheckGeneration(store.ID, uint32) error     { return l.err("CheckGeneration") }
-func (l *failLog) CheckRevokedSignature(store.ID, uint32, []byte) error {
-	return l.err("CheckRevokedSignature")
+func (l *failLog) Append(kind translog.Kind, content []byte) (int64, error) {
+	op := map[translog.Kind]string{translog.KindUser: "AppendUser", translog.KindEpoch: "AppendEpoch"}[kind]
+	if err := l.err(op); err != nil {
+		return -1, err
+	}
+	return l.Log.Append(kind, content)
 }
-func (l *failLog) CheckEpoch(store.ID, uint32, []byte) error  { return l.err("CheckEpoch") }
-func (l *failLog) CheckAddress(string, store.ID, int64) error { return l.err("CheckAddress") }
-func (l *failLog) CheckPlatform(string, []byte) error         { return l.err("CheckPlatform") }
-func (l *failLog) CheckFresh(time.Time) error                 { return l.err("CheckFresh") }
+func (l *failLog) CheckUser(u store.ID, d []byte) error {
+	if err := l.err("CheckUser"); err != nil {
+		return err
+	}
+	return l.Log.CheckUser(u, d)
+}
+func (l *failLog) CheckGeneration(u store.ID, g uint32) error {
+	if err := l.err("CheckGeneration"); err != nil {
+		return err
+	}
+	return l.Log.CheckGeneration(u, g)
+}
+func (l *failLog) CheckRevokedSignature(u store.ID, g uint32, d []byte) error {
+	if err := l.err("CheckRevokedSignature"); err != nil {
+		return err
+	}
+	return l.Log.CheckRevokedSignature(u, g, d)
+}
+func (l *failLog) CheckEpoch(m store.ID, n uint32, d []byte) error {
+	if err := l.err("CheckEpoch"); err != nil {
+		return err
+	}
+	return l.Log.CheckEpoch(m, n, d)
+}
+func (l *failLog) CheckAddress(a string, m store.ID, at int64) error {
+	if err := l.err("CheckAddress"); err != nil {
+		return err
+	}
+	return l.Log.CheckAddress(a, m, at)
+}
+func (l *failLog) CheckPlatform(n string, d []byte) error {
+	if err := l.err("CheckPlatform"); err != nil {
+		return err
+	}
+	return l.Log.CheckPlatform(n, d)
+}
+func (l *failLog) CheckFresh(now time.Time) error {
+	if err := l.err("CheckFresh"); err != nil {
+		return err
+	}
+	return l.Log.CheckFresh(now)
+}
+
+// failing makes every client log opened afterwards refuse op.
+func failing(t *testing.T, op string) {
+	client.SetLogHook(t, func(l translog.Log) translog.Log { return &failLog{Log: l, fail: op} })
+}
 
 // TestLogRefusalsStopEverything checks that every log check is binding:
 // when the log refuses, the operation fails (phase 3 plugs in the real
@@ -47,9 +91,8 @@ func TestLogRefusalsStopEverything(t *testing.T) {
 	f := newFixture(t)
 	a := f.deliver(t, "a", "x")
 	open := func(fail string) (*client.Client, error) {
-		cfg := f.env.ClientConfig(f.u.Dir)
-		cfg.Log = &failLog{Log: f.env.Log, fail: fail}
-		return client.Open(cfg, testenv.Passphrase)
+		failing(t, fail)
+		return client.Open(f.env.ClientConfig(f.u.Dir), testenv.Passphrase)
 	}
 	f.u.Client.Close()
 	for _, op := range []string{"CheckFresh", "CheckUser"} {
@@ -78,7 +121,7 @@ func TestLogRefusalsStopEverything(t *testing.T) {
 	// Registration fails when the log refuses the user.
 	dir := filepath.Join(f.env.Base, "reg")
 	cfg := f.env.ClientConfig(dir)
-	cfg.Log = &failLog{Log: f.env.Log, fail: "AppendUser"}
+	failing(t, "AppendUser")
 	client.Keygen(cfg, testenv.Passphrase, &testenv.Echo{})
 	code, _ := f.env.Store.CreateInvite(0)
 	if _, err := client.Register(cfg, code); !errors.Is(err, errLog) {
@@ -105,8 +148,10 @@ func TestSeenEpochReplacedWithValidSignature(t *testing.T) {
 	if _, err := f.u.Client.List(f.mbx, store.ID{}); !errors.Is(err, store.ErrChain) {
 		t.Fatalf("replaced epoch: %v", err)
 	}
-	if !warned(f.env, "wurde ersetzt") {
-		t.Fatal("no warning")
+	// Since task 14 the log holds the original epoch 4: the replacement
+	// contradicts it (CheckEpoch, ErrMismatch), the chain ends there.
+	if w := strings.Join(f.env.Warnings.Take(), "\n"); !strings.Contains(w, "wurde ersetzt") && !strings.Contains(w, "bricht bei Epoche 4 ab") {
+		t.Fatalf("no warning: %s", w)
 	}
 }
 

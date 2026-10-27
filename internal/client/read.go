@@ -11,11 +11,19 @@ import (
 	"github.com/tim-riep/go-mail/internal/envelope"
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 // ingestKeyFor returns the ingest key of generation gen (2.3, section 7):
-// ingest-<gen>.cert signed by the pinned platform identity and present in
-// the log.
+// ingest-<gen>.cert signed by the platform identity of its identity_gen
+// (the key of the pin's identity list, or above the list the key named
+// by the valid logged successions, translog doc.go "Validity rules") and
+// a valid entry of the log (CheckPlatform). until is valid_from of
+// ingest-<gen+1>.cert once that is a valid entry of the log (Lookup):
+// the strictest reading without Q8 (translog doc.go "Platform
+// generations", Log.CheckPlatform), the generation signs validly only
+// metadata received before it. The cache is emptied whenever the
+// reference head changes (refreshLog).
 func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	c.mu.Lock()
 	k, ok := c.ingest[gen]
@@ -27,12 +35,11 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	if err != nil {
 		return ingestKey{}, fmt.Errorf("%w: ingest-%d.cert: %v", ErrPlatform, gen, err)
 	}
-	if cert.IdentityGen != c.cfg.Pin.Gen {
-		// Successions of the platform identity (identity-<gen>.succ) are
-		// not part of phase 1; only the pinned generation is trusted.
-		return ingestKey{}, fmt.Errorf("%w: issued by identity generation %d", ErrPlatform, cert.IdentityGen)
+	idKey, err := c.identityKey(cert.IdentityGen)
+	if err != nil {
+		return ingestKey{}, err
 	}
-	if err := cert.Verify(c.cfg.Pin.Pub); err != nil {
+	if err := cert.Verify(idKey); err != nil {
 		return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
 	}
 	name := store.PlatformFileName("ingest", gen, "cert")
@@ -40,15 +47,63 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	if err != nil {
 		return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
 	}
-	// TODO(phase3-translog): certificate in the log, generation not compromised (2.3, 7).
-	if err := c.cfg.Log.CheckPlatform(name, raw); err != nil {
+	// The certificate in the log, its generation not compromised (2.3,
+	// 7; pin field 7 only if Q8).
+	if err := c.logged(func(l translog.Log) error { return l.CheckPlatform(name, raw) }); err != nil {
 		return ingestKey{}, err
 	}
 	k = ingestKey{pub: cert.Pub, validFrom: cert.ValidFrom}
+	if gen < ^uint32(0) {
+		next, err := c.lg.log.Lookup(translog.KindPlatform, []byte(store.PlatformFileName("ingest", gen+1, "cert")))
+		if err != nil {
+			return ingestKey{}, err
+		}
+		if len(next) > 0 {
+			nc, err := keys.DecodePlatformCert(next[0].Content)
+			if err != nil {
+				return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
+			}
+			k.until, k.superseded = nc.ValidFrom, true
+		}
+	}
 	c.mu.Lock()
 	c.ingest[gen] = k
 	c.mu.Unlock()
 	return k, nil
+}
+
+// identityKey returns the key of platform identity generation gen: from
+// the pin's identity list (field 8), or, above it, from the chain of
+// valid successions identity-<g>.succ in the log, each verified with the
+// key of generation g-1 (translog doc.go "Validity rules", "Pin"); never
+// from the data directory alone.
+func (c *Client) identityKey(gen uint32) (ed25519.PublicKey, error) {
+	ids := make([]translog.Identity, 0, len(c.cfg.Pin.Identities))
+	for _, id := range c.cfg.Pin.Identities {
+		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: id.Pub})
+	}
+	if k, ok := translog.IdentityKey(ids, gen); ok {
+		return k, nil
+	}
+	if gen == 0 || len(ids) == 0 || uint64(gen) > uint64(len(ids))+translog.MaxIdentities {
+		return nil, fmt.Errorf("%w: identity generation %d unknown", ErrPlatform, gen)
+	}
+	key := ids[len(ids)-1].Pub
+	for g := uint32(len(ids)) + 1; g <= gen; g++ {
+		ents, err := c.lg.log.Lookup(translog.KindPlatform, []byte(store.PlatformFileName("identity", g, "succ")))
+		if err != nil {
+			return nil, err
+		}
+		if len(ents) == 0 {
+			return nil, fmt.Errorf("%w: succession to identity generation %d not in the log", ErrPlatform, g)
+		}
+		sc, err := keys.DecodePlatformSuccession(ents[0].Content)
+		if err != nil || sc.Gen != g || sc.Verify(key, g-1) != nil {
+			return nil, fmt.Errorf("%w: succession to identity generation %d", ErrPlatform, g)
+		}
+		key = sc.Pub
+	}
+	return key, nil
 }
 
 // Mail is the checked metadata of one mail.
@@ -110,6 +165,7 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	}
 	var pub ed25519.PublicKey
 	validFrom, ingest := int64(0), false
+	superseded, until := false, int64(0)
 	switch ref := f.Trailer.Signer; {
 	case ref.Type == envelope.SignerIngest && ref.ID == ([16]byte{}):
 		if h.Version != 1 {
@@ -120,6 +176,7 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 			return nil, err
 		}
 		pub, validFrom, ingest = ik.pub, ik.validFrom, true
+		superseded, until = ik.superseded, ik.until
 	case ref.Type == envelope.SignerUser:
 		if h.Version < 2 {
 			return nil, fmt.Errorf("%w: user signature on metadata version %d", ErrSigner, h.Version)
@@ -160,12 +217,32 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if ingest && m.Received < validFrom {
 		return nil, fmt.Errorf("%w: ingest key not yet valid at receipt", ErrPlatform)
 	}
+	if ingest && superseded && m.Received >= until {
+		return nil, fmt.Errorf("%w: %w: ingest key superseded by the next generation at receipt", ErrPlatform, translog.ErrMismatch)
+	}
 	if err := c.checkEpochRule(ch, e, m.Received); err != nil {
 		return nil, err
 	}
 	for _, a := range m.Recipients {
-		// TODO(phase3-translog): address assigned to this mailbox at receipt (2.3).
-		if err := c.cfg.Log.CheckAddress(a, mbx, m.Received); err != nil {
+		// The address assigned to this mailbox at receipt according to
+		// the log (2.3, "stilles Umleiten"); the error never names the
+		// address.
+		check := func(l translog.Log) error { return l.CheckAddress(a, mbx, m.Received) }
+		err := c.logged(check)
+		if (errors.Is(err, translog.ErrNotInLog) || errors.Is(err, translog.ErrMismatch)) && !c.addrRefreshed {
+			// An assignment logged after the reference head is not
+			// visible to CheckAddress (it answers from the audit index):
+			// one Refresh per operation, then the answer is final.
+			c.addrRefreshed = true
+			if rerr := c.refreshLog(); rerr != nil {
+				return nil, rerr
+			}
+			err = c.logged(check)
+		}
+		if errors.Is(err, translog.ErrNotInLog) || errors.Is(err, translog.ErrMismatch) {
+			return nil, fmt.Errorf("%w: %w", ErrAddress, err)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -436,6 +513,9 @@ func (c *Client) openPending(ch *chain, e *store.Epoch, file store.ID) (*store.P
 	}
 	if f.Header.Created < ik.validFrom {
 		return reject(fmt.Errorf("%w: ingest key not yet valid", ErrPlatform))
+	}
+	if ik.superseded && f.Header.Created >= ik.until {
+		return reject(fmt.Errorf("%w: %w: ingest key superseded by the next generation", ErrPlatform, translog.ErrMismatch))
 	}
 	if err := c.checkEpochRule(ch, e, f.Header.Created); err != nil {
 		return reject(err)

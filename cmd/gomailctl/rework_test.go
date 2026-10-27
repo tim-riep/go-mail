@@ -51,8 +51,8 @@ func TestKeygenTerminalRules(t *testing.T) {
 				in = tc.in(kb)
 			}
 			r := in.(interface{ Read([]byte) (int, error) })
-			e := &env{stdin: bufio.NewReader(r), in: r, stdout: tc.out, stderr: kb.err, now: c.env.Clock.Now}
-			args := append(append([]string{"keygen"}, split...), "--data", c.env.Store.Path(""), "--dir", dir, "--platform", c.pin, "--insecure-no-log")
+			e := &env{stdin: bufio.NewReader(r), in: r, stdout: tc.out, stderr: kb.err, now: c.env.Clock.Now, beforeRefresh: c.beforeRefresh()}
+			args := append(append([]string{"keygen"}, split...), "--data", c.env.Store.Path(""), "--dir", dir, "--pin", c.pin)
 			code := e.run(args)
 			var shown string
 			if s, ok := tc.out.(interface{ String() string }); ok {
@@ -144,8 +144,8 @@ func TestWordInputTerminal(t *testing.T) {
 		return "", false
 	}
 	runWith := func(dir string, out interface{ Write([]byte) (int, error) }, kb *keyboard, args ...string) int {
-		args = append(args, "--data", c.env.Store.Path(""), "--dir", dir, "--platform", c.pin, "--insecure-no-log")
-		e := &env{stdin: bufio.NewReader(kb), in: kb, stdout: out, stderr: kb.err, now: c.env.Clock.Now}
+		args = append(args, "--data", c.env.Store.Path(""), "--dir", dir, "--pin", c.pin)
+		e := &env{stdin: bufio.NewReader(kb), in: kb, stdout: out, stderr: kb.err, now: c.env.Clock.Now, beforeRefresh: c.beforeRefresh()}
 		return e.run(args)
 	}
 	dev := filepath.Join(c.env.Base, "clients", "dev")

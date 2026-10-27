@@ -425,7 +425,7 @@ func (c *Client) readSegments(ch *chain, e *store.Epoch) ([]segment, error) {
 	for _, ref := range refs {
 		seg, err := c.readSegment(ch, e, ref)
 		if err != nil {
-			c.warn("WARNUNG: Indexsegment %s-%d der Epoche %d von %s wird ignoriert: %v", ref.Device, ref.Seq, e.Number, ch.mailbox.ID, err)
+			c.warn("WARNUNG: Indexsegment %s-%d der Epoche %d von %s wird ignoriert: %s.", ref.Device, ref.Seq, e.Number, ch.mailbox.ID, warnCause(err))
 			continue
 		}
 		out = append(out, segment{ref, seg})

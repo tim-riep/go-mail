@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,89 +15,14 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog"
 )
-
-// The test binary of this package is the client log helper of
-// scripts/two-host-test.sh (--log-helper): run with GOMAIL_E2E_HELPER=
-// log-append it appends user.rec or epoch.rec files to the operator log
-// of a data directory, as gomailctl will do itself. TODO(task-14): the
-// client log in gomailctl replaces the helper.
-const (
-	helperEnv       = "GOMAIL_E2E_HELPER"
-	helperLogAppend = "log-append"
-)
-
-// logAppendMain is the helper: <data> <pin> user|epoch <file>...; it
-// prints the log index of every file it appended.
-func logAppendMain(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 4 {
-		fmt.Fprintln(stderr, "Aufruf: GOMAIL_E2E_HELPER=log-append e2e.test <datenverzeichnis> <pin> user|epoch <datei>...")
-		return 2
-	}
-	var kind translog.Kind
-	switch args[2] {
-	case "user":
-		kind = translog.KindUser
-	case "epoch":
-		kind = translog.KindEpoch
-	default:
-		fmt.Fprintln(stderr, "log-append: Art user oder epoch")
-		return 2
-	}
-	idx, err := appendAsClient(args[0], args[1], kind, args[3:]...)
-	if err != nil {
-		fmt.Fprintln(stderr, "log-append:", err)
-		return 1
-	}
-	for i, f := range args[3:] {
-		fmt.Fprintf(stdout, "%s %s: Logeintrag %d\n", args[2], f, idx[i])
-	}
-	return 0
-}
-
-// appendAsClient appends the records in files, in this order, to the
-// operator log of the data directory data, opened against the identity
-// of the pin, and returns their log indexes (logAsClient,
-// logAppendMain).
-func appendAsClient(data, pinFile string, kind translog.Kind, files ...string) ([]int64, error) {
-	st, err := store.Open(data)
-	if err != nil {
-		return nil, err
-	}
-	pin, err := store.ReadPlatformPin(pinFile)
-	if err != nil {
-		return nil, err
-	}
-	if len(pin.Identities) == 0 {
-		return nil, errors.New("pin without identities")
-	}
-	l, err := translog.Open(translog.Options{Store: st, Identities: []translog.Identity{{Gen: pin.Identities[0].Gen, Pub: pin.Identities[0].Pub}}})
-	if err != nil {
-		return nil, err
-	}
-	var idx []int64
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			return nil, err
-		}
-		n, err := l.Append(kind, b)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Base(f), err)
-		}
-		idx = append(idx, n)
-	}
-	return idx, nil
-}
 
 // twoHost holds what the runs of scripts/two-host-test.sh need: sh, the
-// script, the programs (built with the tag gomail_test) and this test
-// binary as the log helper.
+// script and the programs (built with the tag gomail_test). Since task 14
+// gomailctl appends its records to the log itself; the log helper of
+// task 16 (--log-helper) is gone.
 type twoHost struct {
-	sh, script, bin, helper string
+	sh, script, bin string
 }
 
 // newTwoHost skips the test when sh or a tool the script needs is
@@ -126,15 +50,11 @@ func newTwoHost(t *testing.T) *twoHost {
 		t.Skip("curl without SMTP")
 	}
 	bin := programs(t)
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "two-host-test.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &twoHost{sh: sh, script: script, bin: bin, helper: exe}
+	return &twoHost{sh: sh, script: script, bin: bin}
 }
 
 // scriptDirs is the layout of one run: TMPDIR, a --workdir with files of
@@ -195,14 +115,14 @@ func (d *scriptDirs) check(t *testing.T, want int) {
 }
 
 func (h *twoHost) args(bin string, d *scriptDirs, more ...string) []string {
-	return append([]string{h.script, "--local", "--bin", bin, "--log-helper", h.helper, "--workdir", d.work, "--out", d.out}, more...)
+	return append([]string{h.script, "--local", "--bin", bin, "--workdir", d.work, "--out", d.out}, more...)
 }
 
 // remoteArgs are the arguments of the two-host mode over the ssh
 // substitute f (hosts srv and cli).
 func (h *twoHost) remoteArgs(bin string, d *scriptDirs, f *fakeSSH, more ...string) []string {
 	return append([]string{h.script, "--server-host", "srv", "--client-host", "cli", "--export", f.export, "--mount", f.mount,
-		"--group", f.group, "--bin", bin, "--log-helper", h.helper, "--workdir", d.work, "--out", d.out}, more...)
+		"--group", f.group, "--bin", bin, "--workdir", d.work, "--out", d.out}, more...)
 }
 
 func protocol(t *testing.T, d *scriptDirs) string {
@@ -220,7 +140,7 @@ var secretPrefixes = []string{"Nordlicht-", "Kennwort-", "geheim-"}
 
 // TestTwoHostScript runs scripts/two-host-test.sh in its local mode
 // (task 16): the programs of this package (built with the tag
-// gomail_test), this test binary as the log helper, everything on this
+// gomail_test), everything on this
 // machine as one user and without NFS. It is skipped when sh or a tool
 // the script needs is missing. The local mode proves no separation of
 // 9.1 (the script says so); the test checks that the run passes, that
@@ -483,6 +403,20 @@ func TestTwoHostScript(t *testing.T) {
 			d.check(t, 0)
 		})
 	}
+
+	// --log-helper of task 16 is gone (task 14): a usage error before the
+	// script makes anything.
+	t.Run("--log-helper refused", func(t *testing.T) {
+		d := newScriptDirs(t)
+		cmd := exec.Command(h.sh, h.args(h.bin, d, "--log-helper", filepath.Join(d.dir, "helper"))...)
+		cmd.Env = d.env()
+		output, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 2 || !strings.Contains(string(output), "--log-helper entfällt") {
+			t.Fatalf("--log-helper: %v\n%s", err, output)
+		}
+		d.check(t, 0)
+	})
 
 	// A keygen that fails after its word questions (task 16c finding 2):
 	// the wrapper passes the first answer and replaces the others. The

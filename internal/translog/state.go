@@ -304,8 +304,18 @@ func (s *state) checkKeys() error {
 	}
 	for _, x := range s.Invalid {
 		if seen[x.Index] {
-			return bad("invalid entry recorded as valid")
+			return bad("invalid entry recorded as valid or twice")
 		}
+		seen[x.Index] = true
+	}
+	// Every entry below Size is either valid (one key) or invalid
+	// (replay records exactly one of them), so the counts cover the
+	// reference size (task 14b point 7: an index with the size and root
+	// of the reference head but empty tables would answer "no entry" for
+	// everything). The indices are distinct and below Size (checkStructure),
+	// so this count is a full cover.
+	if int64(len(seen)) != s.Size {
+		return bad("the entries do not cover the reference size")
 	}
 	n := 0
 	want := func(kid string, index int64) error {

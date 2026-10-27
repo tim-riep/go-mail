@@ -23,7 +23,7 @@ import (
 // Tests of task 06g: a template signed by a revoked generation heals only
 // recipients the head of the chain still names; own wraps are proven by
 // the seed during device lost; a mailbox missing from the data directory
-// leaves no mark; ForceNewGeneration; recovery.wrap is checked before the
+// leaves no mark; device lost always creates a generation; recovery.wrap is checked before the
 // record; device lost covers every membership.
 
 // reissueMark returns the mark of an incomplete device lost of mailbox
@@ -206,13 +206,8 @@ func TestStep2SkippedMissing(t *testing.T) {
 	cfg := f.env.ClientConfig(f.u.Dir)
 	mrec := f.env.Store.MailboxFile(f.mbx)
 	hidden := mrec + ".hidden"
-	cfg.Warn = func(s string) {
-		f.env.Warnings.Add(s)
-		if s == translog.Warning {
-			if err := os.Rename(mrec, hidden); err != nil {
-				t.Fatal(err)
-			}
-		}
+	if err := os.Rename(mrec, hidden); err != nil {
+		t.Fatal(err)
 	}
 	client.SetCrashHook(t, func(p string) bool {
 		if p == "devicelost-prepared" {
@@ -267,18 +262,20 @@ func TestStep2InvalidContinuation(t *testing.T) {
 	if err := store.WriteFileAtomic(mrec, good); err != nil {
 		t.Fatal(err)
 	}
+	// Task 14 (06h point 1): device lost run again creates generation 3
+	// and completes the marked mailbox in the same run.
 	gen, err = client.DeviceLost(cfg, testenv.Passphrase, f.u.Words)
-	if gen != 2 || err != nil {
+	if gen != 3 || err != nil {
 		t.Fatalf("continuation: generation %d, %v", gen, err)
 	}
-	if n := generations(t, f, f.u); n != 2 {
+	if n := generations(t, f, f.u); n != 3 {
 		t.Fatalf("%d generations", n)
 	}
 	if m := reissueMark(t, f.u.Dir, f.mbx); m != 0 {
 		t.Fatalf("mark %d", m)
 	}
-	ownWrapsFor(t, f, f.u, 2)
-	if g := headGen(t, f, f.u); g != 2 {
+	ownWrapsFor(t, f, f.u, 3)
+	if g := headGen(t, f, f.u); g != 3 {
 		t.Fatalf("head names generation %d", g)
 	}
 	readBody(t, f.env, f.env.Reopen(f.u), f.mbx, old.ID, "secret")
@@ -346,7 +343,7 @@ func TestSeedProofNeedsMatchingKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.env.Warnings.Take()
-	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || err != nil {
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || err != nil {
 		t.Fatalf("continuation with a planted own wrap: generation %d, %v", gen, err)
 	}
 	warningWith(t, f.env.Warnings.Take(), "eigene Verpackung der Epoche 1 von "+f.mbx.String(), "wird nicht neu ausgestellt")
@@ -359,9 +356,10 @@ func TestSeedProofNeedsMatchingKeys(t *testing.T) {
 }
 
 // TestMissingMailboxNoMark: a mailbox of the local state no longer exists
-// in the data directory. Device lost warns and marks nothing (task 06g
-// finding 3), so a second device lost creates generation 3; the local
-// state of the mailbox stays (task 06h finding 1).
+// in the data directory. Device lost warns, marks nothing (task 06g
+// finding 3) and reports ErrPartial (task 14, 06h point 2); a second
+// device lost creates generation 3; the local state of the mailbox stays
+// (task 06h finding 1).
 func TestMissingMailboxNoMark(t *testing.T) {
 	f := newFixture(t)
 	second := f.env.Mailbox(f.u, "B", "b@example.org")
@@ -372,14 +370,14 @@ func TestMissingMailboxNoMark(t *testing.T) {
 	}
 	cfg := f.env.ClientConfig(f.u.Dir)
 	f.env.Warnings.Take()
-	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || err != nil {
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || !errors.Is(err, client.ErrPartial) {
 		t.Fatalf("device lost: generation %d, %v", gen, err)
 	}
-	warningWith(t, f.env.Warnings.Take(), second.String(), "fehlt im Datenverzeichnis", "nichts wird vorgemerkt", "bleibt erhalten")
+	warningWith(t, f.env.Warnings.Take(), second.String(), "fehlt im Datenverzeichnis", "eine neue wird nicht gesetzt", "bleibt erhalten")
 	if !knows(t, f.u.Dir, second) || reissueMark(t, f.u.Dir, second) != 0 {
 		t.Fatal("the missing mailbox left the state or is marked")
 	}
-	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || err != nil {
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || !errors.Is(err, client.ErrPartial) {
 		t.Fatalf("second device lost: generation %d, %v", gen, err)
 	}
 	if n := generations(t, f, f.u); n != 3 {
@@ -387,13 +385,15 @@ func TestMissingMailboxNoMark(t *testing.T) {
 	}
 }
 
-// TestForceNewGeneration: a mailbox stays marked (mailbox.rec invalid).
-// Device lost without options only continues (generation 2 stays); with
-// ForceNewGeneration it creates generation 3 (the device with generation 2
-// may be lost as well), and the marked mailbox is completed with it: its
-// own wraps of generation 1 are opened with the key store derived from
-// the seed and sealed for generation 3.
-func TestForceNewGeneration(t *testing.T) {
+// TestDeviceLostAlwaysNewGeneration (task 14, 06h point 1, replaces
+// TestForceNewGeneration): a mailbox stays marked (mailbox.rec invalid).
+// Device lost run again creates generation 3 all the same (2.2 point 2:
+// the device with generation 2 may be lost as well) and works on the
+// marked mailbox in the same run: ErrPartial while mailbox.rec is invalid,
+// the mark stays. Once mailbox.rec is back, the next device lost
+// (generation 4) completes it: its own wraps of generation 1 are opened
+// with the key store derived from the seed and sealed for generation 4.
+func TestDeviceLostAlwaysNewGeneration(t *testing.T) {
 	f := newFixture(t)
 	old := f.deliver(t, "old", "secret")
 	f.env.Clock.Advance(time.Minute)
@@ -408,30 +408,30 @@ func TestForceNewGeneration(t *testing.T) {
 		t.Fatalf("device lost: generation %d, %v", gen, err)
 	}
 	f.env.Warnings.Take()
-	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 2 || !errors.Is(err, client.ErrPartial) {
-		t.Fatalf("continuation: generation %d, %v", gen, err)
+	f.env.Clock.Advance(time.Minute)
+	if gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words); gen != 3 || !errors.Is(err, client.ErrPartial) {
+		t.Fatalf("second device lost: generation %d, %v", gen, err)
 	}
-	warningWith(t, f.env.Warnings.Take(), "setzt die Neuausstellung", "ForceNewGeneration")
-	if n := generations(t, f, f.u); n != 2 {
+	warningWith(t, f.env.Warnings.Take(), "vorgemerkte Postfächer")
+	if n := generations(t, f, f.u); n != 3 {
 		t.Fatalf("%d generations", n)
+	}
+	if m := reissueMark(t, f.u.Dir, f.mbx); m == 0 {
+		t.Fatal("mark cleared while mailbox.rec is invalid")
 	}
 	if err := store.WriteFileAtomic(mrec, good); err != nil {
 		t.Fatal(err)
 	}
 	f.env.Clock.Advance(time.Minute)
-	gen, err := client.DeviceLostWithOptions(cfg, testenv.Passphrase, f.u.Words, client.DeviceLostOptions{ForceNewGeneration: true})
-	if gen != 3 || err != nil {
-		t.Fatalf("forced: generation %d, %v", gen, err)
-	}
-	warningWith(t, f.env.Warnings.Take(), "ForceNewGeneration")
-	if n := generations(t, f, f.u); n != 3 {
-		t.Fatalf("%d generations", n)
+	gen, err := client.DeviceLost(cfg, testenv.Passphrase, f.u.Words)
+	if gen != 4 || err != nil {
+		t.Fatalf("third device lost: generation %d, %v", gen, err)
 	}
 	if m := reissueMark(t, f.u.Dir, f.mbx); m != 0 {
 		t.Fatalf("mark %d", m)
 	}
-	ownWrapsFor(t, f, f.u, 3)
-	if g := headGen(t, f, f.u); g != 3 {
+	ownWrapsFor(t, f, f.u, 4)
+	if g := headGen(t, f, f.u); g != 4 {
 		t.Fatalf("head names generation %d", g)
 	}
 	readBody(t, f.env, f.env.Reopen(f.u), f.mbx, old.ID, "secret")

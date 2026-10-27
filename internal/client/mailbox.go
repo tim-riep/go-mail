@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/envelope"
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 )
 
 // SupplyMonths is how far ahead epochs are created (2.4: "Epochen für die
@@ -134,6 +136,10 @@ type nextEpoch struct {
 	number  uint32
 	// replace: it can never become valid (task 06c, readBeyond).
 	replace bool
+	// unlogged: it decodes and its append to the log failed with
+	// ErrOrder (task 14); it is replaced by store.ReplaceEpoch, every
+	// other replaceable file by store.ReplaceInvalidEpoch.
+	unlogged bool
 	// data is its content if replace (nil: larger than
 	// store.MaxRecordFile).
 	data []byte
@@ -143,48 +149,57 @@ type nextEpoch struct {
 
 // replaceable reports whether the epoch.rec of epoch n, which createEpoch
 // is about to create after prev, exists and can never become valid, and
-// returns its content for store.ReplaceInvalidEpoch (nil: larger than
-// store.MaxRecordFile). Only an epoch.rec beyond the head of mailbox.rec
-// is ever replaced (the server never uses it), and only by a user member
-// of the head under the mailbox lock (the callers of createEpoch):
+// returns its content (nil: larger than store.MaxRecordFile) and whether
+// it decodes and is replaced through the log (unlogged, store.ReplaceEpoch)
+// or does not decode (store.ReplaceInvalidEpoch). Only an epoch.rec
+// beyond the head of mailbox.rec is ever replaced (the server never uses
+// it), or the one at the head that can never be logged (ingest refuses
+// a head that is not logged, so the server never used it either; task
+// 14b point 3), and only by a user member of the end of the verified
+// chain under the mailbox lock (the callers of createEpoch):
 //
 //   - the epoch.rec after the verified chain that loadChain found invalid
-//     for good (c.next): it does not decode, names another mailbox or
-//     number, breaks store.Chain.Add against the head, or is not signed
-//     by its signer according to user.rec;
+//     for good (c.next: readBeyond, or the unloggable head, healHead);
 //   - an epoch.rec n after an epoch n-1 that this change wrote (or one of
-//     the chain whose successor was missing): it does not decode, names
-//     another mailbox or number, or does not name prev as its predecessor
-//     (store.Chain.Add rule 3 against the head prev), so it can never
-//     follow the epoch n-1 on disk.
+//     the chain whose successor was missing): it does not decode or names
+//     another mailbox or number (task 06c), or it decodes, does not name
+//     prev as its predecessor and its append to the log fails with
+//     ErrOrder (task 14: only the log decides that a decodable epoch.rec
+//     can never become valid).
 //
 // An epoch.rec that names prev and decodes may be valid: that is a race
 // (K2 rule 3), never replaced; one that verifies is adopted by loadChain
 // and never reaches createEpoch.
-func (c *Client) replaceable(mbx store.ID, n uint32, prev []byte) (bool, []byte, error) {
+func (c *Client) replaceable(mbx store.ID, n uint32, prev []byte) (replace, unlogged bool, old []byte, err error) {
 	if x := c.next; x != nil && x.mailbox == mbx && x.number == n {
-		return x.replace, x.data, nil
+		return x.replace, x.unlogged, x.data, nil
 	}
 	if prev == nil {
-		return false, nil, nil
+		return false, false, nil, nil
 	}
 	data, err := store.ReadFileLimited(c.st.EpochFile(mbx, n), store.MaxRecordFile)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return false, nil, nil
+		return false, false, nil, nil
 	case errors.Is(err, store.ErrTooLarge):
-		return true, nil, nil
+		return true, false, nil, nil
 	case err != nil:
-		return false, nil, err
+		return false, false, nil, err
 	}
 	if data == nil {
 		data = []byte{}
 	}
 	e, err := store.ParseEpoch(mbx, n, data)
-	if err != nil || e.PrevHash != store.EpochHash(prev) {
-		return true, data, nil
+	if err != nil {
+		return true, false, data, nil
 	}
-	return false, nil, nil
+	if e.PrevHash == store.EpochHash(prev) {
+		return false, false, nil, nil
+	}
+	if err := c.logEpoch(mbx, n, data); errors.Is(err, translog.ErrOrder) {
+		return true, true, data, nil
+	}
+	return false, false, nil, nil
 }
 
 // createEpoch creates, signs and writes epoch n with fresh random keys
@@ -209,9 +224,16 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 	if err != nil {
 		return nil, nil, err
 	}
-	replace, old, err := c.replaceable(mbx, n, prev)
+	replace, unlogged, old, err := c.replaceable(mbx, n, prev)
 	if err != nil {
 		return nil, nil, err
+	}
+	// The files of a replacement through the log, by path, so that they
+	// are written again if another member cleared the directory while
+	// store.ReplaceEpoch held the lock (replaceUnlogged).
+	var written map[string][]byte
+	if unlogged {
+		written = map[string][]byte{}
 	}
 	if replace {
 		err = c.st.ClearInvalidEpoch(mbx, n, old)
@@ -261,7 +283,7 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 	}
 	defer keys.Wipe(plain)
 	for _, m := range members {
-		if err := c.createWrap(mbx, n, m, plain); err != nil {
+		if err := c.createWrapNoted(mbx, n, m, plain, written); err != nil {
 			if errors.Is(err, store.ErrExists) {
 				return nil, nil, lostRace(n, err)
 			}
@@ -290,13 +312,19 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 		}
 		return nil, nil, err
 	}
+	if written != nil {
+		written[c.st.FoldersFile(mbx, n)] = sealedFolders
+	}
 	if crash("epoch-folders") {
 		return nil, nil, errCrashed
 	}
 	var data []byte
-	if replace {
+	switch {
+	case unlogged:
+		data, err = c.replaceUnlogged(mbx, n, old, e, written)
+	case replace:
 		data, err = c.st.ReplaceInvalidEpoch(mbx, n, old, e)
-	} else {
+	default:
 		data, err = c.st.WriteEpoch(e)
 	}
 	if err != nil {
@@ -308,8 +336,11 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 	if replace {
 		c.warn("WARNUNG: Die ungültige Epoche %d von %s wurde ersetzt.", n, mbx)
 	}
-	// TODO(phase3-translog): epoch.rec into the log (2.7).
-	if err := c.cfg.Log.AppendEpoch(mbx, n, data); err != nil {
+	// Record first, then the log entry (translog doc.go "Who writes":
+	// epoch n > 1), with the earlier epochs and the signer's user.rec if
+	// they are missing (logEpoch); the pending entry is in state.json
+	// before anything relies on it.
+	if err := c.logEpoch(mbx, n, data); err != nil {
 		return nil, nil, err
 	}
 	// Remembered once it is part of the head (commitHead).
@@ -340,24 +371,99 @@ func (c *Client) sealWrap(mbx store.ID, n uint32, m newMember, plain []byte) ([]
 // createWrap creates members/<id>.wrap or members/recovery.wrap of epoch
 // n for m. An existing wrap is never replaced (store.ErrExists).
 func (c *Client) createWrap(mbx store.ID, n uint32, m newMember, plain []byte) error {
+	return c.createWrapNoted(mbx, n, m, plain, nil)
+}
+
+// createWrapNoted is createWrap that notes the path and content of the
+// wrap in written (when not nil).
+func (c *Client) createWrapNoted(mbx store.ID, n uint32, m newMember, plain []byte, written map[string][]byte) error {
 	data, err := c.sealWrap(mbx, n, m, plain)
 	if err != nil {
 		return err
 	}
-	if m.Kind == store.MemberRecovery {
-		return c.st.CreateRecoveryWrap(mbx, n, data)
-	}
 	p := c.st.WrapFile(mbx, n, m.ID)
+	if m.Kind == store.MemberRecovery {
+		p = c.st.RecoveryWrapFile(mbx, n)
+	}
 	if err := store.MkdirAll(filepath.Dir(p)); err != nil {
 		return err
 	}
-	return store.CreateFileAtomic(p, data)
+	if err := store.CreateFileAtomic(p, data); err != nil {
+		return err
+	}
+	if written != nil {
+		written[p] = data
+	}
+	return nil
+}
+
+// replaceUnlogged replaces the epoch.rec old of epoch n, which decodes
+// and can never be logged, by e (translog doc.go "Unlogged epoch.rec"
+// step 3, task 14): store.ReplaceEpoch takes the mailbox lock itself, so
+// the change releases its lock for it (withoutLock); ReplaceEpoch
+// replaces only while the file is still old and the append of old to the
+// log still fails with ErrOrder (unloggable, which runs under its lock:
+// lock order mailbox, log). Back under the lock, the wraps and
+// folders.gml written for e (written, by path) are written again if
+// another member changed them in between, and mailbox.rec must be
+// unchanged (errRace otherwise, after e is logged: it is valid). It
+// returns the encoding of e.
+func (c *Client) replaceUnlogged(mbx store.ID, n uint32, old []byte, e *store.Epoch, written map[string][]byte) ([]byte, error) {
+	data, err := e.Encode()
+	if err != nil {
+		return nil, err
+	}
+	before, err := store.ReadFileLimited(c.st.MailboxFile(mbx), store.MaxRecordFile)
+	if err != nil {
+		return nil, err
+	}
+	unloggable := func(o []byte) bool { return errors.Is(c.logEpoch(mbx, n, o), translog.ErrOrder) }
+	if err := c.withoutLock(mbx, func() error { return c.st.ReplaceEpoch(mbx, n, old, data, unloggable) }); err != nil {
+		return nil, err
+	}
+	for p, b := range written {
+		if cur, err := store.ReadFileLimited(p, store.MaxMetaFile); err == nil && bytes.Equal(cur, b) {
+			continue
+		}
+		if err := store.MkdirAll(filepath.Dir(p)); err != nil {
+			return nil, err
+		}
+		if err := store.WriteFileAtomic(p, b); err != nil {
+			return nil, err
+		}
+	}
+	after, err := store.ReadFileLimited(c.st.MailboxFile(mbx), store.MaxRecordFile)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(before, after) {
+		if err := c.logEpoch(mbx, n, data); err != nil {
+			return nil, err
+		}
+		return nil, lostRace(n, fmt.Errorf("%w: mailbox.rec changed while epoch %d was replaced", store.ErrExists, n))
+	}
+	return data, nil
 }
 
 // CreateMailbox creates a mailbox with one member, this user (2.4): epoch
 // 1 beginning now, the supply for the next three months, each epoch with
 // folders.gml holding the name and the inbox, and mailbox.rec as the last
 // file.
+//
+// Epoch 1 is the first entry of the mailbox ID in the log, bound to
+// nothing but its own content, so the order is reversed (translog doc.go
+// "Who writes", findings 03c-1, 03d-4, 03d-5): (1) the exact files of
+// step 3 (the wrap for this user, folders.gml, mailbox.rec naming epoch
+// 1 and, last, epoch.rec 1) are written to the client directory
+// (newMailboxDir), never to the data directory; (2) epoch.rec 1 is
+// appended to the log, without any mailbox lock: before its entry the
+// mailbox exists nowhere in the data directory. ErrDuplicate means that
+// somebody else logged the ID first: the copy is removed and the mailbox
+// gets a new ID (at most maxEpochAttempts times). (3) Only then the
+// mailbox lock is taken and the files are written to the data directory
+// (finishMailbox), the copy is removed right after mailbox.rec, and the
+// supply follows under the same lock like any epoch n > 1. A crash after
+// step 2 is completed by the next Open (resumeMailboxes).
 func (c *Client) CreateMailbox(name string) (store.ID, error) {
 	if err := c.writable(); err != nil {
 		return store.ID{}, err
@@ -366,39 +472,373 @@ func (c *Client) CreateMailbox(name string) (store.ID, error) {
 	if name == "" {
 		return store.ID{}, fmt.Errorf("client: empty mailbox name")
 	}
+	if err := c.ready(); err != nil {
+		return store.ID{}, err
+	}
+	for attempt := 1; ; attempt++ {
+		nm, fi, err := c.prepareMailbox(name)
+		if err != nil {
+			return store.ID{}, err
+		}
+		if crash("mailbox-copy") {
+			return store.ID{}, errCrashed
+		}
+		_, err = c.lg.appendRecord(translog.KindEpoch, nm.epoch)
+		if errors.Is(err, translog.ErrDuplicate) && attempt < maxEpochAttempts {
+			// Somebody logged an epoch 1 with this ID first (K2 rule 4):
+			// the ID is his, this mailbox gets another one.
+			if rerr := os.RemoveAll(nm.dir); rerr != nil {
+				return store.ID{}, rerr
+			}
+			c.warn("Hinweis: Die gewählte Postfach-ID ist im Transparenzlog bereits vergeben; eine neue wird gewählt.")
+			continue
+		}
+		if err != nil {
+			return store.ID{}, err
+		}
+		if crash("mailbox-logged") {
+			return store.ID{}, errCrashed
+		}
+		return nm.id, c.finishMailbox(nm, fi)
+	}
+}
+
+// newMailboxesDir is the directory of the first-entry copies of new
+// mailboxes in the client directory (translog doc.go "Who writes").
+const newMailboxesDir = "new-mailboxes"
+
+// newMailbox is the copy of a new mailbox in the client directory: the
+// files of step 3, byte for byte (epoch.rec 1, the wrap for its creator,
+// folders.gml, mailbox.rec naming epoch 1).
+type newMailbox struct {
+	dir                         string
+	id                          store.ID
+	mailbox                     *store.Mailbox
+	e1                          *store.Epoch
+	epoch, wrap, folders, mrecd []byte
+}
+
+const (
+	copyEpoch   = "epoch.rec"
+	copyWrap    = "wrap"
+	copyFolders = "folders.gml"
+	copyMailbox = "mailbox.rec"
+)
+
+// prepareMailbox makes epoch 1 of a new mailbox with fresh IDs and keys
+// and writes the copy of step 1 into the client directory, epoch.rec
+// last. It returns the copy and the folder information of the supply.
+func (c *Client) prepareMailbox(name string) (*newMailbox, *folderInfo, error) {
 	id, err := store.NewID(nil)
 	if err != nil {
-		return store.ID{}, err
+		return nil, nil, err
 	}
 	inbox, err := store.NewID(nil)
 	if err != nil {
-		return store.ID{}, err
+		return nil, nil, err
 	}
-	unlock, err := c.st.LockMailbox(id)
-	if err != nil {
-		return store.ID{}, err
-	}
-	defer unlock()
 	now := c.cfg.Now()
 	fi := &folderInfo{name: name, inbox: inbox, folders: []store.Folder{{ID: inbox, Name: InboxName}}}
-	folders := func() (*folderInfo, error) { return fi, nil }
-	me := []newMember{{Member: store.Member{Kind: store.MemberUser, ID: c.me, Gen: c.ks.Generation}, unwrap: c.ks.Unwrap.PublicKey()}}
-	e1, d1, err := c.createEpoch(id, 1, now.UnixMilli(), store.ReasonRegular, nil, me, nil, folders)
+	content, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return store.ID{}, err
+		return nil, nil, err
 	}
-	head, headData, err := c.supply(id, e1, d1, folders)
+	meta, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return store.ID{}, err
+		return nil, nil, err
 	}
-	if err := c.st.WriteMailbox(&store.Mailbox{ID: id, Epoch: head.Number, Inbox: inbox}); err != nil {
-		return store.ID{}, err
+	ek := &store.EpochKeys{MailboxID: id, Epoch: 1, Content: content, Meta: meta}
+	if _, err := io.ReadFull(rand.Reader, ek.Index[:]); err != nil {
+		return nil, nil, err
+	}
+	defer ek.Zero()
+	me := newMember{Member: store.Member{Kind: store.MemberUser, ID: c.me, Gen: c.ks.Generation}, unwrap: c.ks.Unwrap.PublicKey()}
+	e := &store.Epoch{
+		MailboxID: id, Number: 1, Begin: now.UnixMilli(), Reason: store.ReasonRegular, Suite: envelope.Suite1,
+		ContentPub: content.PublicKey(), MetaPub: meta.PublicKey(),
+		Members:  []store.Member{me.Member},
+		SignerID: c.me, SignerGen: c.ks.Generation,
+	}
+	if err := e.Sign(c.ks.Identity); err != nil {
+		return nil, nil, err
+	}
+	nm := &newMailbox{dir: filepath.Join(c.cfg.Dir, newMailboxesDir, id.String()), id: id, e1: e,
+		mailbox: &store.Mailbox{ID: id, Epoch: 1, Inbox: inbox}}
+	if nm.epoch, err = e.Encode(); err != nil {
+		return nil, nil, err
+	}
+	plain, err := ek.Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	nm.wrap, err = c.sealWrap(id, 1, me, plain)
+	keys.Wipe(plain)
+	if err != nil {
+		return nil, nil, err
+	}
+	fl, err := (&store.FolderList{MailboxID: id, Epoch: 1, Name: fi.name, Folders: fi.folders}).Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	if nm.folders, err = c.sealMeta(e, inbox, fl, 1); err != nil {
+		return nil, nil, err
+	}
+	if nm.mrecd, err = nm.mailbox.Encode(); err != nil {
+		return nil, nil, err
+	}
+	if err := mkdirClient(nm.dir); err != nil {
+		return nil, nil, err
+	}
+	for _, f := range []struct {
+		name string
+		data []byte
+	}{{copyWrap, nm.wrap}, {copyFolders, nm.folders}, {copyMailbox, nm.mrecd}, {copyEpoch, nm.epoch}} {
+		if err := store.WritePrivateFileAtomic(filepath.Join(nm.dir, f.name), f.data); err != nil {
+			return nil, nil, err
+		}
+	}
+	return nm, fi, nil
+}
+
+// errForeignCopy marks a copy in new-mailboxes/ that this client did not
+// make for itself (task 14b point 8): it is removed with a warning and
+// never appended or written to the data directory.
+var errForeignCopy = errors.New("client: copy of a new mailbox not made by this user")
+
+// readNewMailbox reads a copy of step 1 from dir; a copy without
+// epoch.rec is a leftover from before step 2 (ErrNotFound). The copy
+// must be one this user made (errForeignCopy otherwise, task 14b point
+// 8): epoch.rec 1 signed by this user, who is a user member of it, the
+// wrap a wrap of epoch 1 of the mailbox for this user (header kind,
+// mailbox, epoch, file ID and its one recipient), and folders.gml a meta
+// file of epoch 1 of the mailbox with the inbox of mailbox.rec as file
+// ID. The signatures are checked when the mailbox is read.
+func (c *Client) readNewMailbox(dir string) (*newMailbox, error) {
+	nm, err := readNewMailboxFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	foreign := func(what string) error { return fmt.Errorf("%w: %s", errForeignCopy, what) }
+	if nm.e1.SignerID != c.me {
+		return nil, foreign("epoch 1 signed by another user")
+	}
+	if _, ok := nm.e1.Member(c.me); !ok {
+		return nil, foreign("not a user member of epoch 1")
+	}
+	w, err := envelope.Parse(nm.wrap)
+	if err != nil {
+		return nil, foreign("wrap does not parse")
+	}
+	if h := w.Header; h.Kind != envelope.KindWrap || store.ID(h.MailboxID) != nm.id || h.Epoch != 1 || store.ID(h.FileID) != c.me ||
+		len(w.Recipients) != 1 || w.Recipients[0].Type != envelope.RecipientUserUnwrap || store.ID(w.Recipients[0].ID) != c.me {
+		return nil, foreign("not the wrap of epoch 1 for this user")
+	}
+	f, err := envelope.Parse(nm.folders)
+	if err != nil {
+		return nil, foreign("folders.gml does not parse")
+	}
+	if h := f.Header; h.Kind != envelope.KindMeta || store.ID(h.MailboxID) != nm.id || h.Epoch != 1 || store.ID(h.FileID) != nm.mailbox.Inbox {
+		return nil, foreign("folders.gml is not the folder list of epoch 1")
+	}
+	return nm, nil
+}
+
+// readNewMailboxFiles reads the files of a copy and checks that they
+// belong together.
+func readNewMailboxFiles(dir string) (*newMailbox, error) {
+	nm := &newMailbox{dir: dir}
+	var err error
+	if nm.epoch, err = store.ReadFileLimited(filepath.Join(dir, copyEpoch), store.MaxRecordFile); err != nil {
+		return nil, err
+	}
+	if nm.wrap, err = store.ReadFileLimited(filepath.Join(dir, copyWrap), store.MaxWrapFile); err != nil {
+		return nil, err
+	}
+	if nm.folders, err = store.ReadFileLimited(filepath.Join(dir, copyFolders), store.MaxMetaFile); err != nil {
+		return nil, err
+	}
+	if nm.mrecd, err = store.ReadFileLimited(filepath.Join(dir, copyMailbox), store.MaxRecordFile); err != nil {
+		return nil, err
+	}
+	if nm.e1, err = store.DecodeEpoch(nm.epoch); err != nil {
+		return nil, err
+	}
+	if nm.mailbox, err = store.DecodeMailbox(nm.mrecd); err != nil {
+		return nil, err
+	}
+	nm.id = nm.e1.MailboxID
+	if nm.mailbox.ID != nm.id || nm.e1.Number != 1 || nm.mailbox.Epoch != 1 || filepath.Base(dir) != nm.id.String() {
+		return nil, fmt.Errorf("%w: copy of a new mailbox does not belong together", store.ErrRecord)
+	}
+	return nm, nil
+}
+
+// finishMailbox is step 3 of CreateMailbox for the copy nm, whose epoch 1
+// is logged: under the mailbox lock (which creates mailboxes/<id>/) the
+// wrap, folders.gml, epoch.rec 1 and mailbox.rec are written in this
+// order (a file that exists with exactly these bytes counts as written,
+// one with other content is store.ErrExists: somebody with write access
+// to the data directory wrote it), the copy is removed, and with fi (not
+// on resuming) the supply follows under the same lock.
+func (c *Client) finishMailbox(nm *newMailbox, fi *folderInfo) error {
+	id := nm.id
+	if !c.skipLock {
+		unlock, err := c.st.LockMailbox(id)
+		if err != nil {
+			return err
+		}
+		c.mbxUnlock = unlock
+		defer func() {
+			if c.mbxUnlock != nil {
+				c.mbxUnlock()
+			}
+			c.mbxUnlock = nil
+		}()
+	}
+	c.locked = id
+	defer func() { c.locked, c.created = store.ID{}, nil }()
+	if err := store.MkdirAll(c.st.EpochDir(id, 1)); err != nil {
+		return err
+	}
+	for _, f := range []struct {
+		path string
+		data []byte
+		max  int64
+	}{{c.st.WrapFile(id, 1, c.me), nm.wrap, store.MaxWrapFile}, {c.st.FoldersFile(id, 1), nm.folders, store.MaxMetaFile}} {
+		if err := store.MkdirAll(filepath.Dir(f.path)); err != nil {
+			return err
+		}
+		if err := createOrSame(f.path, f.data, f.max); err != nil {
+			return err
+		}
+	}
+	d1, err := c.st.EnsureEpoch(nm.e1)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(d1, nm.epoch) {
+		return fmt.Errorf("%w: epoch 1 of %s", store.ErrExists, id)
+	}
+	if cur, err := store.ReadFileLimited(c.st.MailboxFile(id), store.MaxRecordFile); err == nil {
+		if !bytes.Equal(cur, nm.mrecd) {
+			return fmt.Errorf("%w: mailbox.rec of %s", store.ErrExists, id)
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	} else if err := c.st.WriteMailbox(nm.mailbox); err != nil {
+		return err
+	}
+	if crash("mailbox-written") {
+		return errCrashed
+	}
+	if err := os.RemoveAll(nm.dir); err != nil {
+		return err
 	}
 	ms := c.mailboxState(id)
+	c.remember(ms, []*store.Epoch{nm.e1})
+	if ms.Epoch == 0 {
+		ms.Epoch, ms.EpochHash = 1, hashHex(nm.epoch)
+	}
+	if err := c.save(); err != nil {
+		return err
+	}
+	if fi == nil {
+		return nil
+	}
+	folders := func() (*folderInfo, error) { return fi, nil }
+	head, headData, err := c.supply(id, nm.e1, nm.epoch, folders)
+	if err != nil {
+		return err
+	}
+	if head.Number != 1 {
+		if err := c.st.WriteMailbox(&store.Mailbox{ID: id, Epoch: head.Number, Inbox: nm.mailbox.Inbox}); err != nil {
+			return err
+		}
+	}
 	c.remember(ms, c.created)
 	c.created = nil
 	ms.Epoch, ms.EpochHash = head.Number, hashHex(headData)
-	return id, c.save()
+	return c.save()
+}
+
+// createOrSame creates path with data (exclusive); a file that exists
+// with exactly data counts as written, one with other content is
+// store.ErrExists (store.EnsureEpoch for the other files of step 3).
+func createOrSame(path string, data []byte, max int64) error {
+	err := store.CreateFileAtomic(path, data)
+	if !errors.Is(err, store.ErrExists) {
+		return err
+	}
+	cur, rerr := store.ReadFileLimited(path, max)
+	if rerr == nil && bytes.Equal(cur, data) {
+		return nil
+	}
+	return err
+}
+
+// resumeMailboxes completes every CreateMailbox interrupted after step 1
+// (translog doc.go "Who writes", finding 03d-5): a copy without epoch.rec
+// is a leftover from before step 2 and is removed; a copy with it is
+// appended again (Append is idempotent) and finished (finishMailbox,
+// without the supply, which the next Sync creates). ErrDuplicate means
+// that somebody else logged the ID first: the copy is removed with a
+// warning and nothing is written. Any other failure keeps the copy for
+// the next start and warns.
+func (c *Client) resumeMailboxes() error {
+	if c.rk != nil {
+		return nil
+	}
+	root := filepath.Join(c.cfg.Dir, newMailboxesDir)
+	ents, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, de := range ents {
+		dir := filepath.Join(root, de.Name())
+		nm, err := c.readNewMailbox(dir)
+		if errors.Is(err, store.ErrNotFound) {
+			if _, serr := os.Lstat(filepath.Join(dir, copyEpoch)); errors.Is(serr, os.ErrNotExist) {
+				if err := os.RemoveAll(dir); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if errors.Is(err, errForeignCopy) {
+			c.warn("WARNUNG: Eine Kopie eines neuen Postfachs im Client-Verzeichnis (%s) stammt nicht von diesem Benutzer und wird entfernt.", de.Name())
+			if err := os.RemoveAll(dir); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			c.warn("WARNUNG: Die Kopie eines neuen Postfachs im Client-Verzeichnis ist unvollständig oder ungültig und bleibt liegen.")
+			continue
+		}
+		_, err = c.lg.appendRecord(translog.KindEpoch, nm.epoch)
+		if errors.Is(err, translog.ErrDuplicate) {
+			c.warn("WARNUNG: Das unterbrochen angelegte Postfach %s wurde nicht fertiggestellt: seine ID ist im Transparenzlog bereits vergeben.", nm.id)
+			if err := os.RemoveAll(dir); err != nil {
+				return err
+			}
+			continue
+		}
+		if err == nil {
+			err = c.finishMailbox(nm, nil)
+		}
+		if errors.Is(err, errCrashed) {
+			return err
+		}
+		if err != nil {
+			c.warn("WARNUNG: Das unterbrochen angelegte Postfach %s wird beim nächsten Start fertiggestellt: %s.", nm.id, warnCause(err))
+			continue
+		}
+		c.warn("Hinweis: Das unterbrochen angelegte Postfach %s wurde fertiggestellt; Sync legt den Epochenvorrat an.", nm.id)
+	}
+	return nil
 }
 
 func hashHex(data []byte) string {
@@ -456,8 +896,14 @@ type chain struct {
 	// links is the structural chain checker over epochs (store.Chain).
 	links *store.Chain
 	// next is the epoch.rec after the end of the chain, beyond the head
-	// of mailbox.rec, that was not adopted (adopt only), nil if none.
+	// of mailbox.rec, that was not adopted (adopt only), nil if none; or
+	// the unloggable epoch.rec at the head (unloggableHead).
 	next *nextEpoch
+	// unloggableHead reports (adopt only) that the epoch.rec named by
+	// mailbox.rec can never be logged (task 14b point 3): the chain ends
+	// before it, next describes it, and mutate replaces it by a new epoch
+	// with the same number before the change runs (healHead).
+	unloggableHead bool
 }
 
 // head returns the newest epoch of the verified chain and its encoding.
@@ -517,24 +963,64 @@ func (ch *chain) usable(n uint32) (*store.Epoch, error) {
 
 // userGen returns generation gen of user id from its user.rec, checked
 // against the log, and whether a later generation revoked it (2.2).
+//
+// A foreign user.rec of the data directory that a newer logged one
+// supersedes (ErrSuperseded: rolled back, which would hide a revocation)
+// is not used, with the warning of checkUser; the newest valid user
+// entry of the log takes its place (Lookup(KindUser), task 14b point 9),
+// so that a rolled back user.rec of another member does not break the
+// chain for everybody. The own user.rec is never replaced this way
+// (Open refuses a rolled back one).
 func (c *Client) userGen(id store.ID, gen uint32) (*keys.GenerationCert, bool, error) {
 	u, raw, err := c.st.ReadUser(id)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %v", ErrSigner, err)
 	}
-	// TODO(phase3-translog): signer's user.rec included in the log (2.7).
-	if err := c.cfg.Log.CheckUser(id, raw); err != nil {
-		return nil, false, err
+	// The signer's user.rec is included in the log and not outdated
+	// (2.7, CheckUser: ErrSuperseded warns and is not used).
+	if err := c.checkUser(id, raw); err != nil {
+		if id == c.me || !errors.Is(err, ErrSuperseded) {
+			return nil, false, err
+		}
+		if u, err = c.loggedUser(id); err != nil {
+			return nil, false, err
+		}
 	}
 	g := u.Generation(gen)
 	if g == nil {
 		return nil, false, fmt.Errorf("%w: unknown generation %d", ErrSigner, gen)
 	}
-	// TODO(phase3-translog): generation valid only from its log entry on (2.2 rule 3).
-	if err := c.cfg.Log.CheckGeneration(id, gen); err != nil {
+	// A generation is valid only from its log entry on (2.2 rule 3).
+	if err := c.logged(func(l translog.Log) error { return l.CheckGeneration(id, gen) }); err != nil {
 		return nil, false, err
 	}
 	return g, gen != u.Current().Gen, nil
+}
+
+// loggedUser returns the newest valid user entry of id in the reference
+// tree (Lookup(KindUser)), decoded strictly; it must name id.
+func (c *Client) loggedUser(id store.ID) (*store.User, error) {
+	ents, err := c.lg.log.Lookup(translog.KindUser, id[:])
+	if err != nil {
+		return nil, err
+	}
+	var newest *translog.Entry
+	for i := range ents {
+		if newest == nil || ents[i].Seq > newest.Seq {
+			newest = &ents[i]
+		}
+	}
+	if newest == nil {
+		return nil, fmt.Errorf("%w: user entry of %s", translog.ErrNotInLog, id)
+	}
+	u, err := store.DecodeUser(newest.Content)
+	if err != nil {
+		return nil, err
+	}
+	if u.ID != id {
+		return nil, fmt.Errorf("%w: user entry names another user", translog.ErrMismatch)
+	}
+	return u, nil
 }
 
 // userKey returns the identity key of generation gen of user id, for a
@@ -553,8 +1039,9 @@ func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.Public
 		if logged == nil {
 			return nil, fmt.Errorf("%w: %w: generation %d is revoked", ErrSigner, ErrRevoked, gen)
 		}
-		// TODO(phase3-translog): logged before the revocation (2.2 rule 4).
-		if err := c.cfg.Log.CheckRevokedSignature(id, gen, logged); err != nil {
+		// Logged before the revocation (2.2 rule 4, K2 rule 1 over the
+		// log; checkSignerGen stays as a local bound, TODO(Q13)).
+		if err := c.logged(func(l translog.Log) error { return l.CheckRevokedSignature(id, gen, logged) }); err != nil {
 			return nil, err
 		}
 	}
@@ -580,6 +1067,10 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) { return c.loadChain(i
 // remembered. The remembered head never rises above mailbox.rec, so an
 // interrupted change is a repair for Sync, not a rollback.
 func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
+	// Nothing is processed without a fresh verified tree head (2.3).
+	if err := c.ready(); err != nil {
+		return nil, err
+	}
 	m, err := c.st.ReadMailbox(id)
 	if err != nil {
 		c.warn("WARNUNG: mailbox.rec von %s fehlt oder ist ungültig.", id)
@@ -592,6 +1083,27 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 		c.warn("WARNUNG: mailbox.rec von %s zeigt auf Epoche %d, gesehen wurde bereits Epoche %d.", id, head, ms.Epoch)
 		ch.err = ErrRollback
 		head = ms.Epoch
+	}
+	// The head of mailbox.rec is compared with the newest epoch of the
+	// mailbox in the log (translog doc.go "Tasks" table, checkEpoch, and
+	// Log.CheckEpoch: Lookup(KindEpoch); a lower head is a rollback,
+	// 2.4). Every logged epoch up to it belongs to the chain and must
+	// verify, so that a mailbox.rec that lags behind the log cannot hide
+	// an epoch that had begun; for a reader that is ErrRollback, as for
+	// ingest (ingest.ErrRollback), also after a change interrupted
+	// between its log entries and mailbox.rec. A change (adopt, under
+	// the mailbox lock) adopts those epochs and writes mailbox.rec, which
+	// repairs it (Sync).
+	logged, err := c.newestLoggedEpoch(id)
+	if err != nil {
+		return nil, err
+	}
+	if logged > head {
+		c.warn("WARNUNG: mailbox.rec von %s zeigt auf Epoche %d, das Transparenzlog enthält bereits Epoche %d; die Kette wird bis dahin geprüft.", id, m.Epoch, logged)
+		if !adopt && ch.err == nil {
+			ch.err = ErrRollback
+		}
+		head = logged
 	}
 	links := store.NewChain()
 	ch.links = links
@@ -607,7 +1119,10 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 			// noted for createEpoch (ch.next).
 			e, data, next := c.readBeyond(links, id, n)
 			if next != nil {
-				if !errors.Is(next.cause, store.ErrNotFound) {
+				if errors.Is(next.cause, errEpochContradicts) {
+					c.warnContradicts(id, n)
+					ch.next = next
+				} else if !errors.Is(next.cause, store.ErrNotFound) {
 					c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %s.", n, id, warnCause(next.cause))
 					ch.next = next
 				}
@@ -620,6 +1135,24 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 		e, data, err := c.st.ReadEpoch(id, n)
 		if err == nil {
 			err = c.checkEpoch(links, e, data)
+		}
+		if err != nil && e != nil && n == head && n == m.Epoch && n > ms.Epoch && n > logged && ch.err == nil &&
+			errors.Is(c.epochLogged(e, data), translog.ErrOrder) {
+			// The epoch.rec that mailbox.rec names can never be logged
+			// (translog doc.go "Unlogged epoch.rec" steps 1 and 2, then
+			// Append: ErrOrder; task 14b point 3). Readers report the
+			// fixed cause; a change (adopt, under the mailbox lock)
+			// replaces it by a new epoch with the same number (mutate,
+			// healHead); mailbox.rec is never set back (2.4).
+			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %s.", id, n, warnCause(err))
+			c.warn("WARNUNG: Epoche %d von %s ist nicht loggbar (sie verletzt eine Regel des Transparenzlogs und kann nie eingetragen werden); ein Mitglied behebt das mit share, revoke oder sync.", n, id)
+			if adopt {
+				ch.next = &nextEpoch{mailbox: id, number: n, replace: true, unlogged: true, data: data, cause: err}
+				ch.unloggableHead = true
+			} else {
+				ch.err = fmt.Errorf("%w: epoch %d: %w: %v", store.ErrChain, n, errUnloggableHead, err)
+			}
+			break
 		}
 		if err != nil {
 			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %s.", id, n, warnCause(err))
@@ -693,7 +1226,33 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 			return nil, err
 		}
 	}
+	// The checkpoints of the other members against the own reference
+	// head (2.7 "Abgleich zwischen Clients"): a split view stops here.
+	if err := c.checkCheckpoints(ch); err != nil {
+		return nil, err
+	}
 	return ch, nil
+}
+
+// errUnloggableHead reports that the epoch.rec named by mailbox.rec can
+// never be logged (task 14b point 3); a user member replaces it with
+// share, revoke or sync (healHead).
+var errUnloggableHead = errors.New("client: the head epoch can never be logged; a member repairs it with share, revoke or sync")
+
+// errEpochContradicts marks an epoch.rec that contradicts the log:
+// another epoch with its number is logged (CheckEpoch: ErrMismatch;
+// Append: ErrDuplicate, K2 rule 4). It is never replaced (translog
+// doc.go "Unlogged epoch.rec" step 4).
+var errEpochContradicts = errors.New("client: another epoch with this number is in the log")
+
+// warnContradicts warns about epoch.rec n of mbx beyond the head of
+// mailbox.rec that contradicts the log, with the fixed cause and the
+// remedy, which is the operator's (translog doc.go "Unlogged epoch.rec"
+// step 4, task 14b point 13). An epoch of the chain up to the head that
+// contradicts the log breaks the chain with the usual warning: removing
+// it would not help, the logged content belongs there.
+func (c *Client) warnContradicts(mbx store.ID, n uint32) {
+	c.warn("WARNUNG: Epoche %d von %s widerspricht dem Transparenzlog: dort ist eine andere Epoche %d eingetragen. Sie wird nie ersetzt; das Postfach bleibt blockiert. Abhilfe (Betreiber): die Datei entfernen, nachdem der Logeintrag geprüft wurde.", n, mbx, n)
 }
 
 // remember notes begin and effect of each epoch in ms (the first values
@@ -768,15 +1327,24 @@ func (c *Client) checkEpochRule(ch *chain, e *store.Epoch, received int64) error
 }
 
 // readBeyond reads and verifies epoch n after the end of the chain links,
-// beyond the head of mailbox.rec, with the checks of checkEpoch. If it
-// does not verify, it returns why (a missing file: store.ErrNotFound) and
-// whether it can never become valid (task 06c), for createEpoch: it does
-// not decode or names another mailbox or number (also a file larger than
-// store.MaxRecordFile), it breaks store.Chain.Add against the head, it is
-// signed by a generation older than one the chain already names
-// (checkSignerGen), or the signer's user.rec has no such generation or
-// the signature does not verify with its key. Other failures (reading the
-// file or user.rec, the log) do not prove anything; such a file is kept.
+// beyond the head of mailbox.rec, with the checks of checkEpoch; the
+// caller holds the mailbox lock (loadChain with adopt). If it does not
+// verify, it returns why (a missing file: store.ErrNotFound) and whether
+// it can never become valid, for createEpoch:
+//
+//   - a file that does not decode or names another mailbox or number
+//     (also one larger than store.MaxRecordFile) is replaced by
+//     store.ReplaceInvalidEpoch (task 06c);
+//   - a file that decodes is judged by the log alone (task 14, translog
+//     doc.go "Unlogged epoch.rec"): without a log entry this member
+//     appends it (epochLogged); only when that fails with ErrOrder (the
+//     signer was revoked before, the signature or the chain is wrong, the
+//     signer's user.rec cannot yield the generation) may it be replaced,
+//     by store.ReplaceEpoch (unlogged). ErrDuplicate (another epoch with
+//     this number is logged, K2 rule 4) and every other failure keep it:
+//     it is never replaced.
+//
+// A logged epoch that fails a local check is kept as well.
 func (c *Client) readBeyond(links *store.Chain, id store.ID, n uint32) (*store.Epoch, []byte, *nextEpoch) {
 	x := &nextEpoch{mailbox: id, number: n}
 	data, err := store.ReadFileLimited(c.st.EpochFile(id, n), store.MaxRecordFile)
@@ -787,39 +1355,44 @@ func (c *Client) readBeyond(links *store.Chain, id store.ID, n uint32) (*store.E
 	if data == nil {
 		data = []byte{}
 	}
-	invalid := func(err error) (*store.Epoch, []byte, *nextEpoch) {
+	e, err := store.ParseEpoch(id, n, data)
+	if err != nil {
 		x.cause, x.replace, x.data = err, true, data
 		return nil, nil, x
 	}
-	e, err := store.ParseEpoch(id, n, data)
-	if err != nil {
-		return invalid(err)
+	if err := c.epochLogged(e, data); err != nil {
+		x.cause = err
+		if errors.Is(err, translog.ErrOrder) {
+			x.replace, x.unlogged, x.data = true, true, data
+		}
+		return nil, nil, x
 	}
 	if err := links.Add(e, data); err != nil {
-		return invalid(err)
-	}
-	if err := c.checkSignerGen(links, e); err != nil {
-		return invalid(err)
-	}
-	if u, _, err := c.st.ReadUser(e.SignerID); err == nil && u.Generation(e.SignerGen) == nil {
-		return invalid(fmt.Errorf("%w: unknown generation %d", ErrSigner, e.SignerGen))
-	}
-	pub, err := c.userKey(e.SignerID, e.SignerGen, data)
-	if err != nil {
 		x.cause = err
 		return nil, nil, x
 	}
-	if err := e.VerifySignature(pub); err != nil {
-		return invalid(err)
+	if err := c.checkSignerGen(links, e); err != nil {
+		x.cause = err
+		return nil, nil, x
 	}
-	// TODO(phase3-translog): epoch.rec included in the log (2.7).
-	if err := c.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
+	pub, err := c.userKey(e.SignerID, e.SignerGen, data)
+	if err == nil {
+		err = e.VerifySignature(pub)
+	}
+	if err != nil {
 		x.cause = err
 		return nil, nil, x
 	}
 	return e, data, nil
 }
 
+// checkEpoch checks epoch e of the chain up to the head (data its
+// encoding): store.Chain rules against the epochs before it, the local
+// bound checkSignerGen (TODO(Q13)), the log (epochLogged: CheckEpoch for
+// every epoch of the chain, K2 rule 3 decided by the log order; an
+// unlogged one is appended first), the signer's generation from the log
+// (userKey: CheckUser, CheckGeneration, CheckRevokedSignature) and the
+// signature.
 func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) error {
 	if err := links.Add(e, data); err != nil {
 		return err
@@ -827,15 +1400,14 @@ func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) err
 	if err := c.checkSignerGen(links, e); err != nil {
 		return err
 	}
+	if err := c.epochLogged(e, data); err != nil {
+		return err
+	}
 	pub, err := c.userKey(e.SignerID, e.SignerGen, data)
 	if err != nil {
 		return err
 	}
-	if err := e.VerifySignature(pub); err != nil {
-		return err
-	}
-	// TODO(phase3-translog): epoch.rec included in the log (2.7).
-	return c.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data)
+	return e.VerifySignature(pub)
 }
 
 // checkSignerGen rejects epoch e of the chain links (already added) if
@@ -1046,8 +1618,16 @@ func (c *Client) isUserMember(e *store.Epoch) bool {
 // that a revoked generation signed (rewrapGenerations), and, while the
 // head still names a revoked generation (its own entry as well), creates
 // an epoch generation-revoked that discards the supply (K1 point 4).
-// Then it processes pending/ of the mailbox (Index, 6.2).
+// Then it processes pending/ of the mailbox (Index, 6.2). It refreshes
+// the client log once first (2.7 "bei jedem Sync", task 14b point 12),
+// which also writes the checkpoints that are due.
 func (c *Client) Sync() error {
+	if err := c.writable(); err != nil {
+		return err
+	}
+	if err := c.refreshLog(); err != nil {
+		return err
+	}
 	var first error
 	for _, id := range c.Mailboxes() {
 		if err := c.syncMailbox(id); err != nil && first == nil {
@@ -1311,10 +1891,15 @@ func (c *Client) openUserMetaChecked(ch *chain, data []byte, fileID store.ID, me
 		return nil, false, err
 	}
 	mbx := ch.mailbox.ID
+	// envelope.Open wraps the error of the resolver with %v; its cause
+	// (ErrRevoked above all, for the fixed cause of Q18 in
+	// syncGenerations) is kept here (task 14, as openOwnWrap does).
+	var resolveErr error
 	_, plain, err = envelope.Open(data, envelope.OpenOptions{
 		ExpectedSuite: e.Suite,
 		Key:           envelope.RecipientKey{Type: envelope.RecipientEpochMeta, ID: e.MailboxID, Gen: e.Number, PrivateKey: k.Meta},
-		ResolveSigner: func(ref envelope.SignerRef) (ed25519.PublicKey, error) {
+		ResolveSigner: func(ref envelope.SignerRef) (pub ed25519.PublicKey, err error) {
+			defer func() { resolveErr = err }()
 			if ref.Type != envelope.SignerUser {
 				return nil, ErrSigner
 			}
@@ -1322,7 +1907,7 @@ func (c *Client) openUserMetaChecked(ch *chain, data []byte, fileID store.ID, me
 			if _, ok := e.Member(signer); !ok {
 				return nil, ErrSigner
 			}
-			pub, err := c.userKey(signer, ref.Gen, nil)
+			pub, err = c.userKey(signer, ref.Gen, nil)
 			if !errors.Is(err, ErrRevoked) {
 				return pub, err
 			}
@@ -1335,6 +1920,9 @@ func (c *Client) openUserMetaChecked(ch *chain, data []byte, fileID store.ID, me
 		},
 	})
 	if err != nil {
+		if resolveErr != nil {
+			return nil, false, fmt.Errorf("%w: %w", signerErr(err), resolveErr)
+		}
 		return nil, false, signerErr(err)
 	}
 	return plain, taken, nil

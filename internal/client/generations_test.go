@@ -333,20 +333,20 @@ func TestRecoveryAfterRestoreDeviceLost(t *testing.T) {
 }
 
 // TestDeviceLostContinuesAfterPartial: after device lost ended with
-// ErrPartial, running it again continues step 4 with generation 2 and
-// generation 1 derived from the seed, and creates no generation 3 (task
-// 06f finding 2c), as long as something is left; once the recovery
+// ErrPartial, running it again creates generation 3 (task 14, 06h point
+// 1: every device lost revokes the generation before) and continues step
+// 4 of the marked mailbox in the same run, with the earlier generations
+// derived from the seed, as long as something is left; once the recovery
 // record is confirmed, it completes: recovery.wrap and the epoch
-// generation-revoked, read by the recovery recipient. Only then does
-// device lost create generation 3 again. The words of another seed are
-// refused (ErrSeed) and change nothing.
+// generation-revoked, read by the recovery recipient. The words of
+// another seed are refused (ErrSeed) and change nothing.
 func TestDeviceLostContinuesAfterPartial(t *testing.T) {
 	f := newFixture(t)
 	old, _, words := restoredRecovery(t, f)
 	deviceLostPartial(t, f, 2)
-	w := deviceLostPartial(t, f, 2)
-	if !strings.Contains(strings.Join(w, "\n"), "setzt die Neuausstellung der Dateien der Generation 1 fort") || generations(t, f, f.u) != 2 {
-		t.Fatalf("device lost again created a generation: %d (%q)", generations(t, f, f.u), w)
+	w := deviceLostPartial(t, f, 3)
+	if !strings.Contains(strings.Join(w, "\n"), "vorgemerkte Postfächer") || generations(t, f, f.u) != 3 {
+		t.Fatalf("device lost again: %d generations (%q)", generations(t, f, f.u), w)
 	}
 	other := testenv.New(t).NewUser("other")
 	if _, err := client.DeviceLost(f.env.ClientConfig(f.u.Dir), testenv.Passphrase, other.Words); !errors.Is(err, client.ErrSeed) {
@@ -358,16 +358,16 @@ func TestDeviceLostContinuesAfterPartial(t *testing.T) {
 	}
 	ac.Close()
 	f.env.Warnings.Take()
-	if gen, err := client.DeviceLost(f.env.ClientConfig(f.u.Dir), testenv.Passphrase, f.u.Words); gen != 2 || err != nil {
+	if gen, err := client.DeviceLost(f.env.ClientConfig(f.u.Dir), testenv.Passphrase, f.u.Words); gen != 4 || err != nil {
 		t.Fatalf("device lost after ConfirmRecovery: %d, %v", gen, err)
 	}
 	onlyIDs(t, f.env.Warnings.Take())
-	if generations(t, f, f.u) != 2 {
-		t.Fatal("a generation was created")
+	if generations(t, f, f.u) != 4 {
+		t.Fatal("no generation 4")
 	}
-	recoveryWrapsSignedBy(t, f, f.u, 2)
-	if headGen(t, f, f.u) != 2 {
-		t.Fatal("no epoch for alice's generation 2")
+	recoveryWrapsSignedBy(t, f, f.u, 4)
+	if headGen(t, f, f.u) != 4 {
+		t.Fatal("no epoch for alice's generation 4")
 	}
 	rc, err := client.RecoverRead(f.env.ClientConfig(""), f.mbx, words)
 	if err != nil {
@@ -376,7 +376,7 @@ func TestDeviceLostContinuesAfterPartial(t *testing.T) {
 	readBody(t, f.env, rc, f.mbx, old.ID, "before the loss")
 	rc.Close()
 	f.env.Reopen(f.u)
-	if gen := f.env.DeviceLost(f.u); gen != 3 {
+	if gen := f.env.DeviceLost(f.u); gen != 5 {
 		t.Fatalf("device lost after the completed run: generation %d", gen)
 	}
 }

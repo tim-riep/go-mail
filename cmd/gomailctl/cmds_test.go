@@ -177,8 +177,16 @@ func newCLI(t *testing.T) *cli {
 	}
 	t.Cleanup(func() { in.Close() })
 	t.Setenv("GOMAILCTL_PASSPHRASE", string(testenv.Passphrase))
+	// The pin of the development ceremony, accepted by a test build
+	// (devpin_tagged.go, task 14).
+	t.Setenv("GOMAIL_TEST_DEV_IDENTITY", "1")
 	return &cli{t: t, env: env, in: in, pin: filepath.Join(env.KeyDir, ceremony.PinFile)}
 }
+
+// beforeRefresh is the head publication of the test platform before
+// every Refresh of the client log (testenv AutoHeads, task 14), for the
+// in-process gomailctl (env.beforeRefresh).
+func (c *cli) beforeRefresh() func() { return c.env.ClientConfig("").BeforeRefresh }
 
 // user creates a registered user; its in-process client is closed so
 // that gomailctl can open the client directory.
@@ -222,13 +230,13 @@ type result struct {
 func (c *cli) exec(dir string, stdin io.Reader, stdout io.Writer, args ...string) result {
 	c.t.Helper()
 	if dir != "" {
-		args = append(args, "--data", c.env.Store.Path(""), "--dir", dir, "--platform", c.pin, "--insecure-no-log")
+		args = append(args, "--data", c.env.Store.Path(""), "--dir", dir, "--pin", c.pin)
 	}
 	if stdout == nil {
 		stdout = &syncBuf{}
 	}
 	var errb syncBuf
-	e := &env{stdin: bufio.NewReader(stdin), in: stdin, stdout: stdout, stderr: &errb, now: c.env.Clock.Now}
+	e := &env{stdin: bufio.NewReader(stdin), in: stdin, stdout: stdout, stderr: &errb, now: c.env.Clock.Now, beforeRefresh: c.beforeRefresh()}
 	code := e.run(args)
 	var out string
 	if s, ok := stdout.(interface{ String() string }); ok {
@@ -458,8 +466,8 @@ func keygenKeys(t *testing.T, out *tty, seed, holders bool) func(string) (string
 // keygenRun runs keygen with args on the stand-in terminals out and kb.
 func (c *cli) keygenRun(dir string, out *tty, kb *keyboard, args ...string) result {
 	c.t.Helper()
-	args = append(append([]string{"keygen"}, args...), "--data", c.env.Store.Path(""), "--dir", dir, "--platform", c.pin, "--insecure-no-log")
-	e := &env{stdin: bufio.NewReader(kb), in: kb, stdout: out, stderr: kb.err, now: c.env.Clock.Now}
+	args = append(append([]string{"keygen"}, args...), "--data", c.env.Store.Path(""), "--dir", dir, "--pin", c.pin)
+	e := &env{stdin: bufio.NewReader(kb), in: kb, stdout: out, stderr: kb.err, now: c.env.Clock.Now, beforeRefresh: c.beforeRefresh()}
 	code := e.run(args)
 	return result{code: code, out: out.String(), errOut: kb.err.String()}
 }
