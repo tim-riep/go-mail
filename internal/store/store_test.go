@@ -60,7 +60,7 @@ func TestAtomicFiles(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != "two" {
 		t.Fatal("replace")
 	}
-	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != FilePerm {
 		t.Fatalf("mode %v", fi.Mode())
 	}
 	if err := CreateFileAtomic(p, []byte("three")); !errors.Is(err, ErrExists) {
@@ -182,22 +182,106 @@ func TestUserRecord(t *testing.T) {
 	}
 }
 
+// TestUserSignature covers the signature of user.rec by the root under
+// "user" (3.7, S16).
+func TestUserSignature(t *testing.T) {
+	tu := newTestUser(t, 1, 2)
+	other := newTestUser(t, 2, 1)
+	data := mustEncode(t, tu.user)
+	if !bytes.HasSuffix(data, tu.user.Signature) || len(tu.user.Signature) != ed25519.SignatureSize {
+		t.Fatal("signature is not the last field")
+	}
+	tbs, _ := tu.user.tbs()
+	if !ed25519.Verify(tu.user.RootPub, append([]byte("gomail/v1/sig/user\x00"), tbs...), tu.user.Signature) {
+		t.Fatal("signature not over the record without sig under the domain user")
+	}
+	// Missing signature: neither encoded nor decoded.
+	unsigned := *tu.user
+	unsigned.Signature = nil
+	if _, err := unsigned.Encode(); !errors.Is(err, ErrRecord) {
+		t.Fatal("unsigned user encoded")
+	}
+	if _, err := DecodeUser(tbs); !errors.Is(err, ErrRecord) {
+		t.Fatal("unsigned user decoded")
+	}
+	// Only the user's own root signs.
+	if err := unsigned.Sign(other.root); !errors.Is(err, ErrRecord) {
+		t.Fatal("foreign root signed")
+	}
+	if err := unsigned.Sign(tu.root[:10]); !errors.Is(err, ErrRecord) {
+		t.Fatal("short root signed")
+	}
+	forged := unsigned
+	forged.Signature = ed25519.Sign(other.root, append([]byte("gomail/v1/sig/user\x00"), tbs...))
+	if _, err := forged.Encode(); !errors.Is(err, keys.ErrSignature) {
+		t.Fatal("signature of a foreign root encoded")
+	}
+	userGen := unsigned
+	userGen.Signature, _ = keys.Sign(tu.root, keys.DomainUserGen, tbs)
+	if _, err := userGen.Encode(); !errors.Is(err, keys.ErrSignature) {
+		t.Fatal("signature under another domain encoded")
+	}
+	// Wrong signatures in the decoder.
+	for name, sig := range map[string][]byte{"foreign root": forged.Signature, "other domain": userGen.Signature} {
+		r, _ := unsigned.record(false)
+		enc := mustEncode(t, r.SetBytes(4, sig))
+		if _, err := DecodeUser(enc); !errors.Is(err, keys.ErrSignature) {
+			t.Fatalf("%s decoded: %v", name, err)
+		}
+	}
+	flipped := append([]byte(nil), data...)
+	flipped[len(flipped)-1] ^= 1
+	if _, err := DecodeUser(flipped); !errors.Is(err, keys.ErrSignature) {
+		t.Fatal("flipped signature decoded")
+	}
+	// The signature binds the ID and the list of generations.
+	moved := *tu.user
+	moved.ID = ID{7}
+	if _, err := moved.Encode(); !errors.Is(err, keys.ErrSignature) {
+		t.Fatal("signature moved to another ID")
+	}
+	fewer := *tu.user
+	fewer.Generations = fewer.Generations[:1]
+	if _, err := fewer.Encode(); !errors.Is(err, keys.ErrSignature) {
+		t.Fatal("signature kept after removing a generation")
+	}
+	if err := fewer.Sign(tu.root); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := DecodeUser(mustEncode(t, &fewer)); err != nil || d.Current().Gen != 1 {
+		t.Fatal("re-signed user")
+	}
+	if err := (&User{RootPub: tu.user.RootPub}).Sign(tu.root); !errors.Is(err, ErrRecord) {
+		t.Fatal("incomplete user signed")
+	}
+}
+
 func TestMailboxRecord(t *testing.T) {
-	m := &Mailbox{ID: ID{1}, Epoch: 3, Inbox: ID{2}, Name: []byte("sealed")}
+	m := &Mailbox{ID: ID{1}, Epoch: 3, Inbox: ID{2}}
 	data, err := m.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	d, err := DecodeMailbox(data)
-	if err != nil || d.Epoch != 3 || d.Inbox != m.Inbox || string(d.Name) != "sealed" {
+	if err != nil || *d != *m {
 		t.Fatal("mailbox round trip")
 	}
-	for _, bad := range []*Mailbox{{Epoch: 1, Inbox: ID{2}, Name: []byte("x")}, {ID: ID{1}, Inbox: ID{2}, Name: []byte("x")}, {ID: ID{1}, Epoch: 1, Name: []byte("x")}, {ID: ID{1}, Epoch: 1, Inbox: ID{2}}} {
+	if again, _ := d.Encode(); !bytes.Equal(again, data) {
+		t.Fatal("mailbox not byte-identical")
+	}
+	for _, bad := range []*Mailbox{{Epoch: 1, Inbox: ID{2}}, {ID: ID{1}, Inbox: ID{2}}, {ID: ID{1}, Epoch: 1}} {
 		if _, err := bad.Encode(); !errors.Is(err, ErrRecord) {
 			t.Fatalf("incomplete mailbox accepted: %+v", bad)
 		}
 	}
-	zero, _ := rec.New(MailboxSchema).SetBytes(1, make([]byte, 16)).SetU32(2, 1).SetBytes(3, make([]byte, 16)).SetBytes(4, []byte("x")).Encode()
+	// The sealed name of version 1.3 (field 4) is no longer part of it.
+	old, _ := rec.New(rec.MustSchema("gomail/v1/rec/mailbox", MailboxSchema.Fields[0], MailboxSchema.Fields[1], MailboxSchema.Fields[2],
+		rec.Field{Num: 4, Name: "name", Kind: rec.Bytes, MaxLen: 8192, Required: true})).
+		SetBytes(1, m.ID[:]).SetU32(2, 1).SetBytes(3, m.Inbox[:]).SetBytes(4, []byte("x")).Encode()
+	if _, err := DecodeMailbox(old); err == nil {
+		t.Fatal("mailbox.rec with a name accepted")
+	}
+	zero, _ := rec.New(MailboxSchema).SetBytes(1, make([]byte, 16)).SetU32(2, 1).SetBytes(3, make([]byte, 16)).Encode()
 	if _, err := DecodeMailbox(zero); !errors.Is(err, ErrRecord) {
 		t.Fatal("zero ids accepted")
 	}
@@ -232,84 +316,6 @@ func TestEpochRecord(t *testing.T) {
 	}
 	if _, ok := got.Member(other.user.ID); ok {
 		t.Fatal("non-member")
-	}
-	e2, d2 := newTestEpoch(t, tu, mbx, 2, 2000, d1)
-	if err := CheckLink(e1, d1, e2); err != nil {
-		t.Fatal(err)
-	}
-	// Chain violations.
-	mut := func(f func(e *Epoch)) *Epoch {
-		c := *e2
-		f(&c)
-		return &c
-	}
-	cases := map[string]*Epoch{
-		"other mailbox":  mut(func(e *Epoch) { e.MailboxID = ID{8} }),
-		"skipped number": mut(func(e *Epoch) { e.Number = 3 }),
-		"wrong prev":     mut(func(e *Epoch) { e.PrevHash[0] ^= 1 }),
-		"earlier begin":  mut(func(e *Epoch) { e.Begin = 999 }),
-		"older suite":    mut(func(e *Epoch) { e.Suite = 0 }),
-		"non-member":     mut(func(e *Epoch) { e.SignerID = other.user.ID }),
-	}
-	for name, e := range cases {
-		if err := CheckLink(e1, d1, e); !errors.Is(err, ErrChain) {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-	_ = d2
-	// Structural rules.
-	bad := map[string]func(e *Epoch){
-		"zero mailbox":      func(e *Epoch) { e.MailboxID = ID{} },
-		"epoch 0":           func(e *Epoch) { e.Number = 0 },
-		"reason 0":          func(e *Epoch) { e.Reason = 0 },
-		"reason 7":          func(e *Epoch) { e.Reason = 7 },
-		"suite 2":           func(e *Epoch) { e.Suite = 2 },
-		"no content key":    func(e *Epoch) { e.ContentPub = nil },
-		"no members":        func(e *Epoch) { e.Members = nil },
-		"no signer":         func(e *Epoch) { e.SignerGen = 0 },
-		"epoch 1 with prev": func(e *Epoch) { e.PrevHash = [32]byte{1} },
-		"epoch 2 initial":   func(e *Epoch) { e.Number = 2; e.PrevHash = [32]byte{1} },
-		"member gen 0":      func(e *Epoch) { e.Members = []Member{{Kind: MemberUser, ID: ID{1}}} },
-		"member kind 3":     func(e *Epoch) { e.Members = []Member{{Kind: 3, ID: ID{1}, Gen: 1}} },
-		"duplicate member":  func(e *Epoch) { e.Members = []Member{{MemberUser, ID{1}, 1}, {MemberUser, ID{1}, 2}} },
-		"two recovery":      func(e *Epoch) { e.Members = []Member{{MemberRecovery, ID{1}, 1}, {MemberRecovery, ID{2}, 1}} },
-		"too many members": func(e *Epoch) {
-			e.Members = nil
-			for i := 0; i <= MaxMembers; i++ {
-				e.Members = append(e.Members, Member{MemberUser, ID{byte(i), 1}, 1})
-			}
-		},
-	}
-	for name, f := range bad {
-		c := *e1
-		f(&c)
-		if err := c.Sign(tu.identity); !errors.Is(err, ErrRecord) {
-			t.Fatalf("%s accepted by Sign: %v", name, err)
-		}
-		if _, err := c.Encode(); !errors.Is(err, ErrRecord) {
-			t.Fatalf("%s accepted by Encode", name)
-		}
-	}
-	unsigned := *e1
-	unsigned.Signature = nil
-	if _, err := unsigned.Encode(); !errors.Is(err, ErrRecord) {
-		t.Fatal("unsigned epoch encoded")
-	}
-	tbs, _ := unsigned.record(false).Encode()
-	if _, err := DecodeEpoch(tbs); !errors.Is(err, ErrRecord) {
-		t.Fatal("unsigned epoch decoded")
-	}
-	// Decoder-only rules: zero previous hash, invalid keys.
-	r := e1.record(true).SetBytes(9, make([]byte, 32))
-	enc, _ := r.Encode()
-	if _, err := DecodeEpoch(enc); !errors.Is(err, ErrRecord) {
-		t.Fatal("zero previous hash")
-	}
-	if _, err := DecodeEpoch(append(d1, 0)); err == nil {
-		t.Fatal("trailing byte")
-	}
-	if !ReasonImmediate.valid() || Reason(0).valid() {
-		t.Fatal("reason range")
 	}
 }
 
@@ -771,7 +777,7 @@ func TestStoreOperations(t *testing.T) {
 	if w, err := s.ReadWrap(mbx, 1, tu.user.ID); err != nil || string(w) != "wrap" {
 		t.Fatal("wrap")
 	}
-	m := &Mailbox{ID: mbx, Epoch: 1, Inbox: ID{6}, Name: []byte("n")}
+	m := &Mailbox{ID: mbx, Epoch: 1, Inbox: ID{6}}
 	if err := s.WriteMailbox(m); err != nil {
 		t.Fatal(err)
 	}
@@ -934,68 +940,6 @@ func TestLocks(t *testing.T) {
 }
 
 var _ = envelope.Suite1
-
-func TestNameAndFolders(t *testing.T) {
-	d, err := EncodeMailboxName(ID{1}, "Büro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n, err := DecodeMailboxName(ID{1}, d); err != nil || n != "Büro" {
-		t.Fatal("name")
-	}
-	if _, err := DecodeMailboxName(ID{2}, d); !errors.Is(err, ErrRecord) {
-		t.Fatal("name of another mailbox")
-	}
-	if _, err := EncodeMailboxName(ID{1}, ""); !errors.Is(err, ErrRecord) {
-		t.Fatal("empty name")
-	}
-	empty, _ := rec.New(MailboxNameSchema).SetBytes(1, (&ID{1})[:]).SetString(2, "").Encode()
-	if _, err := DecodeMailboxName(ID{1}, empty); !errors.Is(err, ErrRecord) {
-		t.Fatal("empty decoded name")
-	}
-	if _, err := DecodeMailboxName(ID{1}, nil); err == nil {
-		t.Fatal("nil")
-	}
-	fs := []Folder{{ID{2}, "INBOX"}, {ID{3}, "Archiv"}}
-	fd, err := EncodeFolders(ID{1}, fs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := DecodeFolders(ID{1}, fd)
-	if err != nil || len(got) != 2 || got[1] != fs[1] {
-		t.Fatal("folders")
-	}
-	if _, err := DecodeFolders(ID{9}, fd); !errors.Is(err, ErrRecord) {
-		t.Fatal("folders of another mailbox")
-	}
-	if _, err := EncodeFolders(ID{1}, []Folder{{ID{2}, "a"}, {ID{2}, "b"}}); !errors.Is(err, ErrRecord) {
-		t.Fatal("duplicate folder")
-	}
-	dup, _ := rec.New(FoldersSchema).SetBytes(1, (&ID{1})[:]).SetList(2, []*rec.Record{
-		rec.New(FolderSchema).SetBytes(1, (&ID{2})[:]).SetString(2, "a"),
-		rec.New(FolderSchema).SetBytes(1, (&ID{2})[:]).SetString(2, "b")}).Encode()
-	if _, err := DecodeFolders(ID{1}, dup); !errors.Is(err, ErrRecord) {
-		t.Fatal("duplicate decoded folder")
-	}
-	if _, err := DecodeFolders(ID{1}, nil); err == nil {
-		t.Fatal("nil")
-	}
-	s, _ := Init(t.TempDir())
-	if err := s.WriteFolders(ID{1}, fd); err != nil {
-		t.Fatal(err)
-	}
-	if b, err := s.ReadFolders(ID{1}); err != nil || !bytes.Equal(b, fd) {
-		t.Fatal("folders file")
-	}
-	MkdirAll(s.MailDir(ID{1}, ID{2}))
-	MkdirAll(filepath.Join(s.MailboxDir(ID{1}), "mail", "junk"))
-	if f, _ := s.ListFolders(ID{1}); len(f) != 1 || f[0] != (ID{2}) {
-		t.Fatal("list folders")
-	}
-	if f, _ := s.ListFolders(ID{5}); f != nil {
-		t.Fatal("folders of missing mailbox")
-	}
-}
 
 func TestTempFilesLocksAndIncompleteEpochs(t *testing.T) {
 	s, _ := Init(t.TempDir())

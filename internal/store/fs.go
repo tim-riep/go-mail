@@ -39,9 +39,27 @@ func SyncDir(dir string) error {
 	return err
 }
 
-// MkdirAll creates dir and its missing parents with mode 0700 and syncs
-// every parent whose entry was created, so the new directories survive a
-// crash.
+// Permissions in the data directory (9.1). Server and client run as
+// different operating system users that both belong to the group gomail,
+// so files are 0660 and directories 2770: setgid, so that new entries
+// inherit the group of the directory. The program never sets the group
+// itself; the administrator creates the data directory with group gomail
+// and setgid passes it on. The modes are set with Chmod after creating,
+// because the umask may clear the group bits. Group access is allowed
+// because the data directory holds no private key; key stores and private
+// keys live outside it with PrivateFilePerm.
+const (
+	FilePerm        fs.FileMode = 0o660
+	DirPerm         fs.FileMode = fs.ModeSetgid | 0o770
+	PrivateFilePerm fs.FileMode = 0o600
+)
+
+// modeBits are the bits Chmod sets.
+const modeBits = fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+
+// MkdirAll creates dir and its missing parents with mode DirPerm and
+// syncs every parent whose entry was created, so the new directories
+// survive a crash. Existing directories keep their mode.
 func MkdirAll(dir string) error {
 	dir = filepath.Clean(dir)
 	if fi, err := os.Stat(dir); err == nil {
@@ -56,26 +74,51 @@ func MkdirAll(dir string) error {
 			return err
 		}
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		if !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+	} else if err := os.Chmod(dir, DirPerm); err != nil {
 		return err
 	}
 	return SyncDir(parent)
 }
 
-// tempFile creates a new temporary file next to path.
-func tempFile(path string) (*os.File, error) {
+// chmodDir sets dir to DirPerm unless it has that mode already.
+func chmodDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&modeBits == DirPerm {
+		return nil
+	}
+	return os.Chmod(dir, DirPerm)
+}
+
+// tempFile creates a new temporary file next to path with mode perm.
+func tempFile(path string, perm fs.FileMode) (*os.File, error) {
 	var rnd [8]byte
 	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
 		return nil, err
 	}
 	name := filepath.Join(filepath.Dir(path), tmpPrefix+hex.EncodeToString(rnd[:]))
-	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(name)
+		return nil, err
+	}
+	return f, nil
 }
 
-// writeTemp writes data to a new temporary file next to path, syncs and
-// closes it, and returns its name.
-func writeTemp(path string, data []byte) (string, error) {
-	f, err := tempFile(path)
+// writeTemp writes data to a new temporary file with mode perm next to
+// path, syncs and closes it, and returns its name.
+func writeTemp(path string, data []byte, perm fs.FileMode) (string, error) {
+	f, err := tempFile(path, perm)
 	if err != nil {
 		return "", err
 	}
@@ -94,10 +137,19 @@ func writeTemp(path string, data []byte) (string, error) {
 	return name, nil
 }
 
-// WriteFileAtomic replaces path with data: temporary file, fsync, rename,
-// fsync of the directory. The directory must exist.
-func WriteFileAtomic(path string, data []byte) error {
-	tmp, err := writeTemp(path, data)
+// WriteFileAtomic replaces path in the data directory with data, mode
+// FilePerm: temporary file, fsync, rename, fsync of the directory. The
+// directory must exist.
+func WriteFileAtomic(path string, data []byte) error { return writeAtomic(path, data, FilePerm) }
+
+// WritePrivateFileAtomic is WriteFileAtomic with mode PrivateFilePerm,
+// for files outside the data directory (client directory, keys).
+func WritePrivateFileAtomic(path string, data []byte) error {
+	return writeAtomic(path, data, PrivateFilePerm)
+}
+
+func writeAtomic(path string, data []byte, perm fs.FileMode) error {
+	tmp, err := writeTemp(path, data, perm)
 	if err != nil {
 		return err
 	}
@@ -108,12 +160,20 @@ func WriteFileAtomic(path string, data []byte) error {
 	return SyncDir(filepath.Dir(path))
 }
 
-// CreateFileAtomic creates path with data only if it does not exist yet
-// (ErrExists otherwise). The file appears complete or not at all: it is
-// written to a temporary file and hard-linked to its name, which fails if
-// the name is taken.
-func CreateFileAtomic(path string, data []byte) error {
-	tmp, err := writeTemp(path, data)
+// CreateFileAtomic creates path in the data directory with data and mode
+// FilePerm only if it does not exist yet (ErrExists otherwise). The file
+// appears complete or not at all: it is written to a temporary file and
+// hard-linked to its name, which fails if the name is taken.
+func CreateFileAtomic(path string, data []byte) error { return createAtomic(path, data, FilePerm) }
+
+// CreatePrivateFileAtomic is CreateFileAtomic with mode PrivateFilePerm,
+// for files outside the data directory (private keys of the ceremony).
+func CreatePrivateFileAtomic(path string, data []byte) error {
+	return createAtomic(path, data, PrivateFilePerm)
+}
+
+func createAtomic(path string, data []byte, perm fs.FileMode) error {
+	tmp, err := writeTemp(path, data, perm)
 	if err != nil {
 		return err
 	}

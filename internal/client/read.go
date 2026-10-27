@@ -60,12 +60,13 @@ type Mail struct {
 // checkMeta opens and checks <mail-id>.meta.gml (section 7). It returns
 // the metadata only if every check passed:
 //   - kind meta, mailbox, file ID and folder as named by its location,
-//   - epoch in the verified chain, suite of the epoch,
+//   - epoch in the verified chain and not discarded, suite of the epoch,
 //   - signed by a certified ingest key valid at the time of receipt
 //     (phase 1 accepts only ingest signatures),
 //   - signature over the file and the fields of section 7,
 //   - receipt time equal to the creation time of the file,
-//   - the epoch rule of 2.4: no newer epoch had begun at receipt,
+//   - the epoch rule of 2.4 (checkEpochRule): the epoch had begun at
+//     receipt and no newer epoch that is not discarded had begun,
 //   - the address assignment at receipt in the log,
 //   - version not older than the highest seen.
 func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
@@ -82,9 +83,9 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if h.Kind != envelope.KindMeta || h.MailboxID != mbx || h.FileID != id {
 		return nil, fmt.Errorf("%w: metadata header", ErrMismatch)
 	}
-	e := ch.epoch(h.Epoch)
-	if e == nil {
-		return nil, fmt.Errorf("%w: epoch %d", ErrEpoch, h.Epoch)
+	e, err := ch.usable(h.Epoch)
+	if err != nil {
+		return nil, err
 	}
 	if f.Suite != e.Suite {
 		return nil, envelope.ErrSuite
@@ -100,7 +101,7 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if err != nil {
 		return nil, err
 	}
-	k, err := c.keysFor(e)
+	k, err := c.keysFor(ch, e)
 	if err != nil {
 		return nil, err
 	}
@@ -127,15 +128,8 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if m.Received < ik.validFrom {
 		return nil, fmt.Errorf("%w: ingest key not yet valid at receipt", ErrPlatform)
 	}
-	if e.Begin > m.Received {
-		return nil, fmt.Errorf("%w: epoch %d began after the receipt", ErrStaleEpoch, e.Number)
-	}
-	if nb, ok := c.nextBegin(ch, e.Number); ok && nb <= m.Received {
-		return nil, fmt.Errorf("%w: epoch %d had begun", ErrStaleEpoch, e.Number+1)
-	} else if !ok && ch.err != nil && int(e.Number) == len(ch.epochs) {
-		// The chain is broken right after this epoch and the next one was
-		// never seen: whether the mail is stale cannot be decided (2.4).
-		return nil, fmt.Errorf("%w: the chain ends after epoch %d", ErrEpoch, e.Number)
+	if err := c.checkEpochRule(ch, e, m.Received); err != nil {
+		return nil, err
 	}
 	for _, a := range m.Recipients {
 		// TODO(phase3-translog): address assigned to this mailbox at receipt (2.3).
@@ -193,7 +187,7 @@ func (c *Client) List(mbx, folder store.ID) ([]*Mail, error) {
 	for _, id := range ids {
 		m, err := c.checkMeta(ch, folder, id)
 		if err != nil {
-			c.warn("WARNUNG: Mail %s wird nicht verarbeitet: %v", id, err)
+			c.warnRejected(id, "wird nicht verarbeitet", err)
 			continue
 		}
 		out = append(out, m)
@@ -243,7 +237,7 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 	}
 	m, err := c.checkMeta(ch, folder, id)
 	if err != nil {
-		c.warn("WARNUNG: Mail %s wird nicht geöffnet: %v", id, err)
+		c.warnRejected(id, "wird nicht geöffnet", err)
 		return nil, nil, err
 	}
 	data, err := c.st.ReadMail(mbx, folder, id)
@@ -263,11 +257,14 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 		c.warn("WARNUNG: Kopf der Mail %s passt nicht zu den Metadaten.", id)
 		return nil, nil, ErrMismatch
 	}
-	e := ch.epoch(m.Epoch)
+	e, err := ch.usable(m.Epoch)
+	if err != nil {
+		return nil, nil, err
+	}
 	if f.Suite != e.Suite {
 		return nil, nil, envelope.ErrSuite
 	}
-	k, err := c.keysFor(e)
+	k, err := c.keysFor(ch, e)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -279,29 +276,39 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 	return m, content, nil
 }
 
-var (
-	_ = errors.Is
-	_ ed25519.PublicKey
-)
+// warnRejected warns about a mail that failed a check. A mail for a
+// replaced or discarded epoch is shown as not deliverable, to be requested
+// again (K8). The warning names only the mail ID and the error, never
+// content.
+func (c *Client) warnRejected(id store.ID, what string, err error) {
+	if errors.Is(err, ErrStaleEpoch) || errors.Is(err, ErrDiscardedEpoch) {
+		c.warn("WARNUNG: Mail %s %s: nicht zustellbar, bitte erneut anfordern (%v)", id, what, err)
+		return
+	}
+	c.warn("WARNUNG: Mail %s %s: %v", id, what, err)
+}
 
 // OpenPending opens a term list or marker pending/<n>/<file>.gml (5.2
 // step 3, 5.4): signed by a certified ingest key, kind pending, mailbox,
 // epoch and file ID as named by its location, epoch in the verified
-// chain. Indexing itself (6.2) is phase 5.
+// chain and not discarded, and the epoch rule of 2.4 (checkEpochRule) for
+// its creation time, which the server sets to the receipt of the mails
+// it covers. Indexing itself (6.2) is phase 5.
 func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.Pending, error) {
 	ch, err := c.verifyChain(mbx)
 	if err != nil {
 		return nil, err
 	}
-	e := ch.epoch(epoch)
-	if e == nil {
-		return nil, ErrEpoch
+	e, err := ch.usable(epoch)
+	if err != nil {
+		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
+		return nil, err
 	}
 	data, err := c.st.ReadPending(mbx, epoch, file)
 	if err != nil {
 		return nil, err
 	}
-	k, err := c.keysFor(e)
+	k, err := c.keysFor(ch, e)
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +339,9 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 	}
 	if f.Header.Created < ik.validFrom {
 		return reject(fmt.Errorf("%w: ingest key not yet valid", ErrPlatform))
+	}
+	if err := c.checkEpochRule(ch, e, f.Header.Created); err != nil {
+		return reject(err)
 	}
 	p, err := store.DecodePending(plain)
 	if err != nil {

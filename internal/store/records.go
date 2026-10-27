@@ -3,7 +3,6 @@ package store
 import (
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,7 +23,6 @@ var ErrRecord = errors.New("store: invalid record")
 const (
 	MaxGenerations = 1024 // generations in user.rec
 	MaxMembers     = 64   // members of one epoch
-	MaxNameSize    = 8192 // sealed mailbox name in mailbox.rec
 	MaxRecipients  = 100  // envelope recipients in metadata (5.1)
 	MaxAddressLen  = 320  // one address
 	MaxTextLen     = 4096 // one header value in metadata
@@ -41,408 +39,6 @@ func id16(n uint8, name string, required bool) rec.Field {
 
 func bytes32(n uint8, name string, required bool) rec.Field {
 	return rec.Field{Num: n, Name: name, Kind: rec.Bytes, Size: 32, Required: required}
-}
-
-// ---------------------------------------------------------------- user.rec
-
-// UserSchema is users/<user-id>/user.rec (2.2): the user ID, the public
-// root key and the generation certificates 1..n, each signed by the root.
-// The record itself carries no signature: the table of signature domains
-// in 3.7 has no entry for it (SPEC-ISSUES S16). Its content is protected
-// by the root signatures of the certificates; the binding of user ID and
-// root key is a task of the transparency log (TODO(phase3-translog)).
-var UserSchema = rec.MustSchema("gomail/v1/rec/user",
-	id16(1, "user_id", true),
-	rec.Field{Num: 2, Name: "root_pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
-	rec.Field{Num: 3, Name: "generations", Kind: rec.List, Elem: keys.GenerationCertSchema, MaxCount: MaxGenerations, Required: true},
-)
-
-// User is a decoded and verified user.rec.
-type User struct {
-	ID          ID
-	RootPub     ed25519.PublicKey
-	Generations []*keys.GenerationCert // generations 1..n in order
-}
-
-// Encode returns the canonical encoding after checking the chain.
-func (u *User) Encode() ([]byte, error) {
-	if err := u.check(); err != nil {
-		return nil, err
-	}
-	list := make([]*rec.Record, 0, len(u.Generations))
-	for _, g := range u.Generations {
-		b, err := g.Encode()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrRecord, err)
-		}
-		r, err := rec.Decode(keys.GenerationCertSchema, b)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrRecord, err)
-		}
-		list = append(list, r)
-	}
-	return rec.New(UserSchema).SetBytes(1, u.ID[:]).SetBytes(2, u.RootPub).SetList(3, list).Encode()
-}
-
-func (u *User) check() error {
-	if u.ID.IsZero() {
-		return fmt.Errorf("%w: zero user id", ErrRecord)
-	}
-	if len(u.RootPub) != ed25519.PublicKeySize {
-		return fmt.Errorf("%w: root key length", ErrRecord)
-	}
-	if err := keys.VerifyGenerationChain(u.RootPub, u.Generations); err != nil {
-		return fmt.Errorf("%w: %v", ErrRecord, err)
-	}
-	return nil
-}
-
-// DecodeUser decodes user.rec and verifies the generation chain against
-// the root key in it.
-func DecodeUser(data []byte) (*User, error) {
-	r, err := rec.Decode(UserSchema, data)
-	if err != nil {
-		return nil, err
-	}
-	u := &User{ID: idFromBytes(r.Bytes(1)), RootPub: ed25519.PublicKey(r.Bytes(2))}
-	for _, e := range r.List(3) {
-		b, err := e.Encode()
-		if err != nil {
-			return nil, err
-		}
-		c, err := keys.DecodeGenerationCert(b)
-		if err != nil {
-			return nil, err
-		}
-		u.Generations = append(u.Generations, c)
-	}
-	if err := u.check(); err != nil {
-		return nil, err
-	}
-	return u, nil
-}
-
-// Current returns the newest generation; all older ones are revoked by
-// their successors (2.2).
-func (u *User) Current() *keys.GenerationCert { return u.Generations[len(u.Generations)-1] }
-
-// Generation returns generation gen or nil.
-func (u *User) Generation(gen uint32) *keys.GenerationCert {
-	if gen == 0 || uint64(gen) > uint64(len(u.Generations)) {
-		return nil
-	}
-	return u.Generations[gen-1]
-}
-
-// ------------------------------------------------------------- mailbox.rec
-
-// MailboxSchema is mailboxes/<id>/mailbox.rec (section 4): mailbox ID,
-// the highest epoch number (head of the epoch chain), the ID of the inbox
-// folder the server delivers to, and the mailbox name as a sealed .gml
-// file (kind meta, epoch 1, signed by the creating member). The record is
-// not signed (3.7 has no short name for it); a client detects a reset
-// head with its local state (2.4).
-var MailboxSchema = rec.MustSchema("gomail/v1/rec/mailbox",
-	id16(1, "mailbox_id", true),
-	rec.Field{Num: 2, Name: "epoch", Kind: rec.U32, Required: true},
-	id16(3, "inbox", true),
-	rec.Field{Num: 4, Name: "name", Kind: rec.Bytes, MaxLen: MaxNameSize, Required: true},
-)
-
-// Mailbox is a decoded mailbox.rec.
-type Mailbox struct {
-	ID    ID
-	Epoch uint32 // head of the epoch chain
-	Inbox ID
-	Name  []byte // sealed .gml
-}
-
-// Encode returns the canonical encoding.
-func (m *Mailbox) Encode() ([]byte, error) {
-	if m.ID.IsZero() || m.Inbox.IsZero() || m.Epoch == 0 || len(m.Name) == 0 {
-		return nil, fmt.Errorf("%w: incomplete mailbox", ErrRecord)
-	}
-	return rec.New(MailboxSchema).SetBytes(1, m.ID[:]).SetU32(2, m.Epoch).SetBytes(3, m.Inbox[:]).SetBytes(4, m.Name).Encode()
-}
-
-// DecodeMailbox decodes mailbox.rec.
-func DecodeMailbox(data []byte) (*Mailbox, error) {
-	r, err := rec.Decode(MailboxSchema, data)
-	if err != nil {
-		return nil, err
-	}
-	m := &Mailbox{ID: idFromBytes(r.Bytes(1)), Epoch: r.U32(2), Inbox: idFromBytes(r.Bytes(3)), Name: r.Bytes(4)}
-	if m.ID.IsZero() || m.Inbox.IsZero() || m.Epoch == 0 {
-		return nil, fmt.Errorf("%w: incomplete mailbox", ErrRecord)
-	}
-	return m, nil
-}
-
-// --------------------------------------------------------------- epoch.rec
-
-// Reason is why an epoch began (2.4, 2.6).
-type Reason uint8
-
-const (
-	ReasonInitial       Reason = 1 // first epoch of a mailbox
-	ReasonMonthly       Reason = 2 // regular monthly change, created in advance
-	ReasonMemberRemoved Reason = 3 // a member was removed (2.5)
-	ReasonSubstitution  Reason = 4 // begin or end of a substitution (2.5)
-	ReasonDeleted       Reason = 5 // deletion marker (2.6)
-	ReasonImmediate     Reason = 6 // immediate begin after the supply ran out (2.4)
-)
-
-func (r Reason) valid() bool { return r >= ReasonInitial && r <= ReasonImmediate }
-
-// MemberKind distinguishes users and the recovery recipient (2.4).
-type MemberKind uint8
-
-const (
-	MemberUser     MemberKind = 1
-	MemberRecovery MemberKind = 2
-)
-
-// Member is one entry of the member list of an epoch: a user with the
-// generation its keys are wrapped for, or the recovery recipient.
-type Member struct {
-	Kind MemberKind
-	ID   ID
-	Gen  uint32
-}
-
-// MemberSchema is one element of the member list.
-var MemberSchema = rec.MustSchema("gomail/v1/rec/epoch-member",
-	rec.Field{Num: 1, Name: "kind", Kind: rec.U8, Required: true},
-	id16(2, "id", true),
-	rec.Field{Num: 3, Name: "gen", Kind: rec.U32, Required: true},
-)
-
-// EpochSchema is mailboxes/<id>/epochs/<n>/epoch.rec (2.4): number,
-// begin, reason, suite, public keys, members with generation and the
-// SHA-256 of the previous epoch.rec, signed by the identity of the
-// creating member under the short name "epoch" (3.7). The mailbox ID and
-// the signer are part of the record so that an epoch cannot be moved to
-// another mailbox and the verifier knows the signing key (DECISIONS D49).
-var EpochSchema = rec.MustSchema("gomail/v1/rec/epoch",
-	id16(1, "mailbox_id", true),
-	rec.Field{Num: 2, Name: "number", Kind: rec.U32, Required: true},
-	rec.Field{Num: 3, Name: "begin", Kind: rec.I64, Required: true},
-	rec.Field{Num: 4, Name: "reason", Kind: rec.U8, Required: true},
-	rec.Field{Num: 5, Name: "suite", Kind: rec.U8, Required: true},
-	bytes32(6, "content_pub", true),
-	bytes32(7, "meta_pub", true),
-	rec.Field{Num: 8, Name: "members", Kind: rec.List, Elem: MemberSchema, MaxCount: MaxMembers, Required: true},
-	bytes32(9, "prev_hash", false),
-	id16(10, "signer_id", true),
-	rec.Field{Num: 11, Name: "signer_gen", Kind: rec.U32, Required: true},
-	rec.Field{Num: 12, Name: "sig", Kind: rec.Bytes, Size: ed25519.SignatureSize},
-)
-
-// Epoch is a decoded epoch.rec.
-type Epoch struct {
-	MailboxID  ID
-	Number     uint32
-	Begin      int64 // milliseconds since 1970 UTC
-	Reason     Reason
-	Suite      envelope.Suite
-	ContentPub *ecdh.PublicKey
-	MetaPub    *ecdh.PublicKey
-	Members    []Member
-	PrevHash   [32]byte // zero for epoch 1
-	SignerID   ID
-	SignerGen  uint32
-	Signature  []byte
-}
-
-func (e *Epoch) check() error {
-	switch {
-	case e.MailboxID.IsZero():
-		return fmt.Errorf("%w: zero mailbox id", ErrRecord)
-	case e.Number == 0:
-		return fmt.Errorf("%w: epoch 0", ErrRecord)
-	case !e.Reason.valid():
-		return fmt.Errorf("%w: unknown reason %d", ErrRecord, e.Reason)
-	case e.Suite != envelope.Suite1:
-		return fmt.Errorf("%w: unknown suite %d", ErrRecord, e.Suite)
-	case e.ContentPub == nil || e.MetaPub == nil || e.ContentPub.Curve() != ecdh.X25519() || e.MetaPub.Curve() != ecdh.X25519():
-		return fmt.Errorf("%w: missing public key", ErrRecord)
-	case len(e.Members) == 0 || len(e.Members) > MaxMembers:
-		return fmt.Errorf("%w: %d members", ErrRecord, len(e.Members))
-	case e.SignerID.IsZero() || e.SignerGen == 0:
-		return fmt.Errorf("%w: no signer", ErrRecord)
-	case (e.Number == 1) != (e.PrevHash == [32]byte{}):
-		return fmt.Errorf("%w: epoch 1 has no predecessor, every other epoch has one", ErrRecord)
-	case (e.Number == 1) != (e.Reason == ReasonInitial):
-		return fmt.Errorf("%w: reason initial is for epoch 1 only", ErrRecord)
-	}
-	seen := map[[17]byte]bool{}
-	recovery := 0
-	for _, m := range e.Members {
-		if m.Kind != MemberUser && m.Kind != MemberRecovery || m.ID.IsZero() || m.Gen == 0 {
-			return fmt.Errorf("%w: invalid member", ErrRecord)
-		}
-		var k [17]byte
-		k[0] = byte(m.Kind)
-		copy(k[1:], m.ID[:])
-		if seen[k] {
-			return fmt.Errorf("%w: duplicate member", ErrRecord)
-		}
-		seen[k] = true
-		if m.Kind == MemberRecovery {
-			recovery++
-		}
-	}
-	if recovery > 1 {
-		return fmt.Errorf("%w: more than one recovery recipient", ErrRecord)
-	}
-	return nil
-}
-
-func (e *Epoch) record(withSig bool) *rec.Record {
-	members := make([]*rec.Record, 0, len(e.Members))
-	for _, m := range e.Members {
-		members = append(members, rec.New(MemberSchema).SetU8(1, uint8(m.Kind)).SetBytes(2, m.ID[:]).SetU32(3, m.Gen))
-	}
-	r := rec.New(EpochSchema).
-		SetBytes(1, e.MailboxID[:]).
-		SetU32(2, e.Number).
-		SetI64(3, e.Begin).
-		SetU8(4, uint8(e.Reason)).
-		SetU8(5, uint8(e.Suite)).
-		SetBytes(6, e.ContentPub.Bytes()).
-		SetBytes(7, e.MetaPub.Bytes()).
-		SetList(8, members)
-	if e.Number > 1 {
-		r.SetBytes(9, e.PrevHash[:])
-	}
-	r.SetBytes(10, e.SignerID[:]).SetU32(11, e.SignerGen)
-	if withSig {
-		r.SetBytes(12, e.Signature)
-	}
-	return r
-}
-
-// Sign signs the epoch with the identity key of the signer named in it.
-func (e *Epoch) Sign(identity ed25519.PrivateKey) error {
-	if err := e.check(); err != nil {
-		return err
-	}
-	tbs, err := e.record(false).Encode()
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRecord, err)
-	}
-	sig, err := keys.Sign(identity, keys.DomainEpoch, tbs)
-	if err != nil {
-		return err
-	}
-	e.Signature = sig
-	return nil
-}
-
-// Encode returns the canonical encoding of a signed epoch.
-func (e *Epoch) Encode() ([]byte, error) {
-	if err := e.check(); err != nil {
-		return nil, err
-	}
-	if len(e.Signature) != ed25519.SignatureSize {
-		return nil, fmt.Errorf("%w: epoch is not signed", ErrRecord)
-	}
-	return e.record(true).Encode()
-}
-
-// VerifySignature checks the signature with the identity key of the
-// signer (SignerID, SignerGen); finding that key is the caller's task.
-func (e *Epoch) VerifySignature(pub ed25519.PublicKey) error {
-	tbs, err := e.record(false).Encode()
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRecord, err)
-	}
-	if !keys.Verify(pub, keys.DomainEpoch, tbs, e.Signature) {
-		return fmt.Errorf("%w: epoch %d", keys.ErrSignature, e.Number)
-	}
-	return nil
-}
-
-// DecodeEpoch decodes epoch.rec. The signature must be verified
-// separately.
-func DecodeEpoch(data []byte) (*Epoch, error) {
-	r, err := rec.Decode(EpochSchema, data)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Has(12) {
-		return nil, fmt.Errorf("%w: epoch is not signed", ErrRecord)
-	}
-	e := &Epoch{
-		MailboxID: idFromBytes(r.Bytes(1)),
-		Number:    r.U32(2),
-		Begin:     r.I64(3),
-		Reason:    Reason(r.U8(4)),
-		Suite:     envelope.Suite(r.U8(5)),
-		SignerID:  idFromBytes(r.Bytes(10)),
-		SignerGen: r.U32(11),
-		Signature: r.Bytes(12),
-	}
-	if e.ContentPub, err = ecdh.X25519().NewPublicKey(r.Bytes(6)); err != nil {
-		return nil, fmt.Errorf("%w: content key: %v", ErrRecord, err)
-	}
-	if e.MetaPub, err = ecdh.X25519().NewPublicKey(r.Bytes(7)); err != nil {
-		return nil, fmt.Errorf("%w: meta key: %v", ErrRecord, err)
-	}
-	if r.Has(9) {
-		copy(e.PrevHash[:], r.Bytes(9))
-		if e.PrevHash == [32]byte{} {
-			return nil, fmt.Errorf("%w: zero previous hash", ErrRecord)
-		}
-	}
-	for _, m := range r.List(8) {
-		e.Members = append(e.Members, Member{Kind: MemberKind(m.U8(1)), ID: idFromBytes(m.Bytes(2)), Gen: m.U32(3)})
-	}
-	if err := e.check(); err != nil {
-		return nil, err
-	}
-	return e, nil
-}
-
-// Member returns the user member id, if any.
-func (e *Epoch) Member(id ID) (Member, bool) {
-	for _, m := range e.Members {
-		if m.Kind == MemberUser && m.ID == id {
-			return m, true
-		}
-	}
-	return Member{}, false
-}
-
-// EpochHash is the SHA-256 of an encoded epoch.rec, the link of the chain.
-func EpochHash(data []byte) [32]byte { return sha256.Sum256(data) }
-
-// ErrChain reports a broken epoch chain (2.4).
-var ErrChain = errors.New("store: broken epoch chain")
-
-// CheckLink checks that next follows prev in the chain of one mailbox:
-// same mailbox, number + 1, prev_hash = SHA-256 of prev's encoding, begin
-// not earlier, suite not older (3.5), and next signed by a user who is a
-// member of prev (only members create epochs, 2.4). The signature itself
-// is checked by the caller with the signer's key.
-func CheckLink(prev *Epoch, prevData []byte, next *Epoch) error {
-	switch {
-	case next.MailboxID != prev.MailboxID:
-		return fmt.Errorf("%w: epoch %d belongs to another mailbox", ErrChain, next.Number)
-	case next.Number != prev.Number+1:
-		return fmt.Errorf("%w: epoch %d follows epoch %d", ErrChain, next.Number, prev.Number)
-	case next.PrevHash != EpochHash(prevData):
-		return fmt.Errorf("%w: epoch %d does not name epoch %d", ErrChain, next.Number, prev.Number)
-	case next.Begin < prev.Begin:
-		return fmt.Errorf("%w: epoch %d begins before epoch %d", ErrChain, next.Number, prev.Number)
-	}
-	if err := envelope.CheckSuiteTransition(prev.Suite, next.Suite); err != nil {
-		return fmt.Errorf("%w: %v", ErrChain, err)
-	}
-	if _, ok := prev.Member(next.SignerID); !ok {
-		return fmt.Errorf("%w: epoch %d signed by a non-member", ErrChain, next.Number)
-	}
-	return nil
 }
 
 // ------------------------------------------------------- wrap (epoch keys)
@@ -660,10 +256,28 @@ var MetaSignedSchema = rec.MustSchema("gomail/v1/rec/meta-signed",
 )
 
 // SignedExtra returns the extra fields signed with a metadata file of
-// mailbox mbx and epoch.
+// mailbox mbx and epoch. For consistent metadata (file_id = MailID,
+// created = Received, version = Version) it equals MetaSignedExtra of the
+// header.
 func (m *MailMeta) SignedExtra(mbx ID, epoch uint32) ([]byte, error) {
 	return rec.New(MetaSignedSchema).SetBytes(1, mbx[:]).SetU32(2, epoch).SetBytes(3, m.MailID[:]).
 		SetI64(4, m.Received).SetBytes(5, m.MailHash[:]).SetU32(6, m.Version).Encode()
+}
+
+// MetaSignedExtra builds meta-signed of a metadata file from its clear
+// header alone (section 7): mailbox, epoch, file_id (the mail ID),
+// created (the time of receipt), version, and the SHA-256 of the whole
+// mail file. Every value is in the header or a hash over ciphertext, so
+// the server can check a metadata signature without keys.
+func MetaSignedExtra(h envelope.Header, mailHash [32]byte) ([]byte, error) {
+	if h.Kind != envelope.KindMeta {
+		return nil, fmt.Errorf("%w: meta-signed of a %s file", ErrRecord, h.Kind)
+	}
+	if h.Version == 0 || h.Epoch == 0 || ID(h.MailboxID).IsZero() || ID(h.FileID).IsZero() {
+		return nil, fmt.Errorf("%w: incomplete header for meta-signed", ErrRecord)
+	}
+	return rec.New(MetaSignedSchema).SetBytes(1, h.MailboxID[:]).SetU32(2, h.Epoch).SetBytes(3, h.FileID[:]).
+		SetI64(4, h.Created).SetBytes(5, mailHash[:]).SetU32(6, h.Version).Encode()
 }
 
 // ------------------------------------------------------------ term lists
@@ -1074,93 +688,4 @@ func DecodeAddressAssignment(data []byte) (*AddressAssignment, error) {
 		return nil, err
 	}
 	return a, nil
-}
-
-// ------------------------------------------------------- name and folders
-
-// MaxFolders bounds folders.gml.
-const MaxFolders = 1024
-
-// MailboxNameSchema is the plaintext of the sealed name in mailbox.rec.
-var MailboxNameSchema = rec.MustSchema("gomail/v1/rec/mailbox-name",
-	id16(1, "mailbox_id", true),
-	rec.Field{Num: 2, Name: "name", Kind: rec.String, MaxLen: 256, Required: true},
-)
-
-// EncodeMailboxName encodes the name of mailbox id.
-func EncodeMailboxName(id ID, name string) ([]byte, error) {
-	if id.IsZero() || name == "" {
-		return nil, fmt.Errorf("%w: empty mailbox name", ErrRecord)
-	}
-	return rec.New(MailboxNameSchema).SetBytes(1, id[:]).SetString(2, name).Encode()
-}
-
-// DecodeMailboxName decodes the name and checks that it belongs to id.
-func DecodeMailboxName(id ID, data []byte) (string, error) {
-	r, err := rec.Decode(MailboxNameSchema, data)
-	if err != nil {
-		return "", err
-	}
-	if idFromBytes(r.Bytes(1)) != id {
-		return "", fmt.Errorf("%w: name of another mailbox", ErrRecord)
-	}
-	if r.String(2) == "" {
-		return "", fmt.Errorf("%w: empty mailbox name", ErrRecord)
-	}
-	return r.String(2), nil
-}
-
-// FolderSchema is one entry of folders.gml.
-var FolderSchema = rec.MustSchema("gomail/v1/rec/folder",
-	id16(1, "id", true),
-	rec.Field{Num: 2, Name: "name", Kind: rec.String, MaxLen: 256, Required: true},
-)
-
-// FoldersSchema is the plaintext of folders.gml (section 4: folder names
-// only encrypted, for the meta key of the epoch).
-var FoldersSchema = rec.MustSchema("gomail/v1/rec/folders",
-	id16(1, "mailbox_id", true),
-	rec.Field{Num: 2, Name: "folders", Kind: rec.List, Elem: FolderSchema, MaxCount: MaxFolders, Required: true},
-)
-
-// Folder is one folder.
-type Folder struct {
-	ID   ID
-	Name string
-}
-
-// EncodeFolders encodes the folder list of mailbox id.
-func EncodeFolders(id ID, folders []Folder) ([]byte, error) {
-	list := make([]*rec.Record, 0, len(folders))
-	seen := map[ID]bool{}
-	for _, f := range folders {
-		if f.ID.IsZero() || f.Name == "" || seen[f.ID] {
-			return nil, fmt.Errorf("%w: invalid folder", ErrRecord)
-		}
-		seen[f.ID] = true
-		list = append(list, rec.New(FolderSchema).SetBytes(1, f.ID[:]).SetString(2, f.Name))
-	}
-	return rec.New(FoldersSchema).SetBytes(1, id[:]).SetList(2, list).Encode()
-}
-
-// DecodeFolders decodes folders.gml and checks that it belongs to id.
-func DecodeFolders(id ID, data []byte) ([]Folder, error) {
-	r, err := rec.Decode(FoldersSchema, data)
-	if err != nil {
-		return nil, err
-	}
-	if idFromBytes(r.Bytes(1)) != id {
-		return nil, fmt.Errorf("%w: folders of another mailbox", ErrRecord)
-	}
-	var out []Folder
-	seen := map[ID]bool{}
-	for _, e := range r.List(2) {
-		f := Folder{ID: idFromBytes(e.Bytes(1)), Name: e.String(2)}
-		if f.ID.IsZero() || f.Name == "" || seen[f.ID] {
-			return nil, fmt.Errorf("%w: invalid folder", ErrRecord)
-		}
-		seen[f.ID] = true
-		out = append(out, f)
-	}
-	return out, nil
 }

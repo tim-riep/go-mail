@@ -36,10 +36,18 @@ func monthIndex(t time.Time) int {
 	return t.Year()*12 + int(t.Month()) - 1
 }
 
+// ImmediateLead is how far before its begin the server already uses an
+// epoch with immediate effect (2.4 lead time rule 2): as soon as it sees
+// the epoch under the mailbox lock, even if its begin is up to five
+// minutes in the future by the server's clock. Planned epochs are used
+// only from their begin on.
+const ImmediateLead = 5 * time.Minute
+
 // target is one recipient mailbox of a delivery.
 type target struct {
 	mbx       *store.Mailbox
 	epoch     *store.Epoch
+	headHash  [32]byte // SHA-256 of the head epoch.rec when the epoch was chosen
 	fallback  bool
 	addresses []string
 	mailID    store.ID
@@ -50,48 +58,125 @@ type target struct {
 	mailHash  [32]byte
 }
 
-// chooseEpoch returns the epoch a mail received at t is encrypted for
-// (2.4, DECISIONS D50): the highest epoch whose begin is not after t,
-// out of the chain from epoch 1 to the head of mailbox.rec, which is
-// verified like the client does it (links, signatures by members, log).
-// If that epoch began in an earlier month, the supply of epochs ran out;
-// the server keeps using it and notes that.
-func (in *Ingest) chooseEpoch(mbx *store.Mailbox, t time.Time) (*store.Epoch, bool, error) {
-	ms := t.UnixMilli()
-	var chosen, prev *store.Epoch
-	var prevData []byte
+// verifyChain reads and verifies the epoch chain of a mailbox from epoch
+// 1 to the head of mailbox.rec like the client does it (store.Chain:
+// links, members, discards; signatures by members; log). It returns the
+// chain and the SHA-256 of the head epoch.rec. Epochs beyond the head of
+// mailbox.rec are not used; one that exists is noted in the log (only
+// IDs). The caller holds the mailbox lock (K8).
+func (in *Ingest) verifyChain(mbx *store.Mailbox) (*store.Chain, [32]byte, error) {
+	var head [32]byte
+	links := store.NewChain()
 	for n := uint32(1); n <= mbx.Epoch; n++ {
 		e, data, err := in.st.ReadEpoch(mbx.ID, n)
 		if err != nil {
-			return nil, false, err
+			return nil, head, err
 		}
-		if prev == nil {
-			if _, ok := e.Member(e.SignerID); !ok {
-				return nil, false, fmt.Errorf("%w: epoch 1 signed by a non-member", store.ErrChain)
-			}
-		} else if err := store.CheckLink(prev, prevData, e); err != nil {
-			return nil, false, err
+		if err := links.Add(e, data); err != nil {
+			return nil, head, err
 		}
 		pub, err := in.userKey(e.SignerID, e.SignerGen, data)
 		if err != nil {
-			return nil, false, err
+			return nil, head, err
 		}
 		if err := e.VerifySignature(pub); err != nil {
-			return nil, false, err
+			return nil, head, err
 		}
 		// TODO(phase3-translog): epoch.rec included in the log (2.7).
 		if err := in.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
-			return nil, false, err
+			return nil, head, err
 		}
-		if e.Begin <= ms {
+		head = store.EpochHash(data)
+	}
+	if links.Head() == nil {
+		return nil, head, fmt.Errorf("ingest: no epoch")
+	}
+	if _, err := os.Lstat(in.st.EpochFile(mbx.ID, mbx.Epoch+1)); err == nil {
+		in.log.Info("ingest ignored an epoch beyond the head of mailbox.rec", "mailbox", mbx.ID.String(), "head", mbx.Epoch, "epoch", mbx.Epoch+1)
+	}
+	return links, head, nil
+}
+
+// usableAt reports whether the server may encrypt a mail received at ms
+// (milliseconds) for epoch e (2.4 lead time rules 1 and 2): a planned
+// epoch from its begin on, an epoch with immediate effect from five
+// minutes before its begin on.
+func usableAt(e *store.Epoch, ms int64) bool {
+	if e.Reason.Immediate() {
+		return e.Begin-ImmediateLead.Milliseconds() <= ms
+	}
+	return e.Begin <= ms
+}
+
+// chooseEpoch returns the epoch a mail received at t is encrypted for
+// (2.4, DECISIONS D50, K8): out of the verified chain from epoch 1 to the
+// head of mailbox.rec, the highest epoch that is not discarded and usable
+// at t (usableAt). An immediate epoch whose begin is further in the future
+// is not used, and that is noted in the log. If the chosen epoch began in
+// an earlier month, the supply of epochs ran out; the server keeps using
+// it and notes that. It also returns the SHA-256 of the head epoch.rec.
+// The caller holds the mailbox lock and read mailbox.rec under it (K8).
+func (in *Ingest) chooseEpoch(mbx *store.Mailbox, t time.Time) (*store.Epoch, bool, [32]byte, error) {
+	links, head, err := in.verifyChain(mbx)
+	if err != nil {
+		return nil, false, head, err
+	}
+	ms := t.UnixMilli()
+	var chosen *store.Epoch
+	for n := uint32(1); n <= mbx.Epoch; n++ {
+		if links.Discarded(n) {
+			// 2.4 rule 3: a discarded epoch is never used.
+			continue
+		}
+		e := links.Epoch(n)
+		if usableAt(e, ms) {
 			chosen = e
+		} else if e.Reason.Immediate() {
+			in.log.Info("ingest did not use an immediate epoch that begins after the lead time", "mailbox", mbx.ID.String(), "epoch", n)
 		}
-		prev, prevData = e, data
 	}
 	if chosen == nil {
-		return nil, false, fmt.Errorf("ingest: no epoch has begun")
+		return nil, false, head, fmt.Errorf("ingest: no epoch has begun")
 	}
-	return chosen, monthIndex(time.UnixMilli(chosen.Begin)) < monthIndex(t), nil
+	return chosen, monthIndex(time.UnixMilli(chosen.Begin)) < monthIndex(t), head, nil
+}
+
+// stillValid checks again, under the locks of the commit, that the epoch
+// chosen for target t is still the one to use (K8): mailbox.rec points to
+// the same head with the same epoch.rec, and the chosen epoch is neither
+// discarded nor overtaken by a later epoch usable at the receipt (an
+// immediate one from five minutes before its begin on).
+func (d *delivery) stillValid(t *target) error {
+	in := d.in
+	refuse := func(why string) error {
+		in.log.Info("ingest refused delivery: the epochs changed during the delivery", "session", d.session, "mailbox", t.mbx.ID.String(), "epoch", t.epoch.Number, "reason", why, "status", 451)
+		return smtpd.ErrTemporary
+	}
+	m, err := in.st.ReadMailbox(t.mbx.ID)
+	if err != nil {
+		return refuse("mailbox.rec")
+	}
+	if m.Epoch != t.mbx.Epoch {
+		return refuse("head")
+	}
+	links, head, err := in.verifyChain(m)
+	if err != nil {
+		return refuse("chain")
+	}
+	if head != t.headHash {
+		return refuse("head")
+	}
+	n := t.epoch.Number
+	if links.Discarded(n) || links.Epoch(n) == nil {
+		return refuse("discarded")
+	}
+	ms := d.received.UnixMilli()
+	for k := n + 1; links.Epoch(k) != nil; k++ {
+		if !links.Discarded(k) && usableAt(links.Epoch(k), ms) {
+			return refuse("overtaken")
+		}
+	}
+	return nil
 }
 
 // userKey returns the identity key of generation gen of a user for the
@@ -164,7 +249,7 @@ func (in *Ingest) Begin(s smtpd.Session, from string, rcpts []string) (smtpd.Del
 		return nil, smtpd.ErrTemporary
 	}
 	d := &delivery{in: in, session: s.ID, from: from, received: now, txnDir: filepath.Join(in.st.SpoolDir(), txn.String())}
-	if err := os.Mkdir(d.txnDir, 0o700); err != nil {
+	if err := mkdirSpool(d.txnDir); err != nil {
 		return nil, diskErr(err)
 	}
 	for _, id := range order {
@@ -196,13 +281,37 @@ func diskErr(err error) error {
 	return smtpd.ErrTemporary
 }
 
+// mkdirSpool creates a directory in spool/ and sets DirPerm (9.1)
+// explicitly, because the umask may remove group bits.
+func mkdirSpool(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, store.DirPerm); err != nil {
+		os.Remove(dir)
+		return err
+	}
+	return nil
+}
+
+// open chooses the epoch for mailbox id and opens the encryption writer
+// into spool/. The epoch is chosen under the mailbox lock: mailbox.rec
+// and the epochs are opened and read only after the lock is held, so that
+// over NFS the cache is checked (K8); the lock is released before the
+// data are streamed, and commit checks the choice again.
 func (d *delivery) open(id store.ID, addrs []string) (*target, error) {
 	in := d.in
-	mbx, err := in.st.ReadMailbox(id)
+	unlock, err := in.st.LockMailbox(id)
 	if err != nil {
 		return nil, smtpd.ErrTemporary
 	}
-	e, fallback, err := in.chooseEpoch(mbx, d.received)
+	mbx, err := in.st.ReadMailbox(id)
+	if err != nil {
+		unlock()
+		return nil, smtpd.ErrTemporary
+	}
+	e, fallback, head, err := in.chooseEpoch(mbx, d.received)
+	unlock()
 	if err != nil {
 		return nil, smtpd.ErrTemporary
 	}
@@ -210,9 +319,9 @@ func (d *delivery) open(id store.ID, addrs []string) (*target, error) {
 	if err != nil {
 		return nil, smtpd.ErrTemporary
 	}
-	t := &target{mbx: mbx, epoch: e, fallback: fallback, addresses: addrs, mailID: mailID,
+	t := &target{mbx: mbx, epoch: e, headHash: head, fallback: fallback, addresses: addrs, mailID: mailID,
 		dir: filepath.Join(d.txnDir, id.String()), hash: sha256.New()}
-	if err := os.Mkdir(t.dir, 0o700); err != nil {
+	if err := mkdirSpool(t.dir); err != nil {
 		return nil, diskErr(err)
 	}
 	f, err := os.OpenFile(filepath.Join(t.dir, "mail.gml"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -220,6 +329,12 @@ func (d *delivery) open(id store.ID, addrs []string) (*target, error) {
 		return nil, diskErr(err)
 	}
 	t.file = f
+	// The mail keeps its mode when it is renamed into the mailbox: FilePerm
+	// (9.1), set explicitly because of the umask.
+	if err := f.Chmod(store.FilePerm); err != nil {
+		f.Close()
+		return nil, diskErr(err)
+	}
 	hdr := envelope.Header{Kind: envelope.KindMail, MailboxID: id, Epoch: e.Number, FileID: mailID, Created: d.received.UnixMilli()}
 	rcpt := []envelope.Recipient{{Type: envelope.RecipientEpochContent, ID: id, Gen: e.Number, PublicKey: e.ContentPub}}
 	w, err := envelope.NewWriter(multiWriter{f, t.hash}, hdr, rcpt, nil)
@@ -392,6 +507,15 @@ func (d *delivery) commit() error {
 		return smtpd.ErrTemporary
 	}
 	defer unlock()
+	// K8: the epochs may have changed while the data were received. Under
+	// the locks, before anything is moved into a mailbox, the choice of
+	// every target is checked again; if it no longer holds, the delivery
+	// fails with 451 and the sender retries.
+	for _, t := range d.targets {
+		if err := d.stillValid(t); err != nil {
+			return err
+		}
+	}
 
 	// The journal lists every rename, marker first, then metadata, then
 	// the mail, so that a reader never sees a mail without metadata.
@@ -513,7 +637,7 @@ func (d *delivery) writeMeta(t *target, f *headerFields, parsed bool) error {
 // writeMarker seals the "unprocessed" marker for pending/ (5.2 step 3).
 func (d *delivery) writeMarker(t *target) error {
 	p := &store.Pending{MailboxID: t.mbx.ID, Epoch: t.epoch.Number, Entries: []store.PendingEntry{{MailID: t.mailID, Unprocessed: true}}}
-	data, err := d.in.sealPending(p, t.mailID, t.epoch)
+	data, err := d.in.sealPending(p, t.mailID, t.epoch, d.received.UnixMilli())
 	if err != nil {
 		return smtpd.ErrTemporary
 	}
@@ -527,15 +651,19 @@ func (in *Ingest) ingestSigner(extra []byte) *envelope.Signer {
 	return &envelope.Signer{Type: envelope.SignerIngest, Gen: in.cfg.IngestGen, Key: in.signer, Extra: extra}
 }
 
-// sealPending seals a term list or marker with file ID id.
-func (in *Ingest) sealPending(p *store.Pending, id store.ID, e *store.Epoch) ([]byte, error) {
+// sealPending seals a term list or marker with file ID id. created is the
+// receipt of the (earliest) mail the file covers: the client applies the
+// epoch rule of 2.4 to it, and a term list written after a newer epoch
+// began is still valid for mails received before (TODO(ask): 3.1 does not
+// define created for kind pending; this is the reading the client checks).
+func (in *Ingest) sealPending(p *store.Pending, id store.ID, e *store.Epoch, created int64) ([]byte, error) {
 	plain, err := p.Encode()
 	if err != nil {
 		return nil, err
 	}
 	defer wipe(plain)
 	return envelope.Seal(
-		envelope.Header{Kind: envelope.KindPending, MailboxID: p.MailboxID, Epoch: p.Epoch, FileID: id, Created: in.now().UnixMilli()},
+		envelope.Header{Kind: envelope.KindPending, MailboxID: p.MailboxID, Epoch: p.Epoch, FileID: id, Created: created},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: p.MailboxID, Gen: p.Epoch, PublicKey: e.MetaPub}},
 		plain,
 		&envelope.SealOptions{Signer: in.ingestSigner(nil)},

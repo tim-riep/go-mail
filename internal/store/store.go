@@ -37,14 +37,22 @@ type Store struct {
 // topDirs are created by Init.
 var topDirs = []string{"platform", "users", "invites", "mailboxes", "spool", "work"}
 
-// Init creates the layout of section 4 below root (if missing) and
-// returns the store.
+// Init creates the layout of section 4 below root (if missing), sets the
+// root to DirPerm (9.1) and returns the store. New directories get
+// DirPerm; the group (gomail) is the administrator's choice when creating
+// root and is inherited through setgid.
 func Init(root string) (*Store, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
-	for _, d := range topDirs {
+	if err := MkdirAll(root); err != nil {
+		return nil, err
+	}
+	if err := chmodDir(root); err != nil {
+		return nil, err
+	}
+	for _, d := range append(topDirs, locksDir) {
 		if err := MkdirAll(filepath.Join(root, d)); err != nil {
 			return nil, err
 		}
@@ -353,9 +361,15 @@ func (s *Store) ReadPlatformCert(role keys.Role, gen uint32) (*keys.PlatformCert
 
 // -------------------------------------------------------------- mailboxes
 
-// LockMailbox takes the exclusive lock of a mailbox (a file lock on
-// mailboxes/<id>/lock). Writers of mailbox.rec, epochs, notes and the
-// commit of received mails hold it; there is no global lock.
+// LockMailbox takes the exclusive lock of a mailbox (a POSIX record lock
+// on mailboxes/<id>/lock, see lock_unix.go) and waits for it. Writers of
+// mailbox.rec, epochs, notes and the commit of received mails hold it;
+// there is no global lock.
+//
+// Over NFS a reader must open and read a file such as mailbox.rec only
+// after it holds the lock: taking the lock makes the NFS client check its
+// cache of the files opened afterwards, while a file opened before may
+// still show cached contents (K8).
 func (s *Store) LockMailbox(id ID) (func(), error) {
 	if err := MkdirAll(s.MailboxDir(id)); err != nil {
 		return nil, err
@@ -612,21 +626,25 @@ func (s *Store) ListFolders(id ID) ([]ID, error) {
 	return out, nil
 }
 
-// WriteFolders replaces folders.gml.
-func (s *Store) WriteFolders(id ID, data []byte) error {
-	if err := MkdirAll(s.MailboxDir(id)); err != nil {
+// WriteFolders replaces epochs/<n>/folders.gml atomically: the list of an
+// epoch changes whenever a member changes the folders (section 4).
+func (s *Store) WriteFolders(id ID, n uint32, data []byte) error {
+	if err := MkdirAll(s.EpochDir(id, n)); err != nil {
 		return err
 	}
-	return WriteFileAtomic(s.FoldersFile(id), data)
+	return WriteFileAtomic(s.FoldersFile(id, n), data)
 }
 
-// ReadFolders reads folders.gml.
-func (s *Store) ReadFolders(id ID) ([]byte, error) {
-	return ReadFileLimited(s.FoldersFile(id), MaxMetaFile)
+// ReadFolders reads epochs/<n>/folders.gml.
+func (s *Store) ReadFolders(id ID, n uint32) ([]byte, error) {
+	return ReadFileLimited(s.FoldersFile(id, n), MaxMetaFile)
 }
 
-// FoldersFile is mailboxes/<id>/folders.gml.
-func (s *Store) FoldersFile(id ID) string { return filepath.Join(s.MailboxDir(id), "folders.gml") }
+// FoldersFile is epochs/<n>/folders.gml: name and folder list of the
+// mailbox, sealed for the meta key of epoch n (section 4, S20).
+func (s *Store) FoldersFile(id ID, n uint32) string {
+	return filepath.Join(s.EpochDir(id, n), "folders.gml")
+}
 
 // RemoveIncompleteEpoch deletes epochs/<n>/ if it has no epoch.rec (the
 // leftovers of an interrupted epoch creation: wraps and public keys
@@ -665,6 +683,76 @@ func (s *Store) RemoveTempFiles() error {
 	})
 }
 
-// LockFile takes an exclusive file lock on path without waiting; it
-// fails if another process holds it.
+// LockFile takes an exclusive record lock on path (created with mode
+// FilePerm if missing) without waiting; it fails with ErrLocked if
+// another process or another caller in this process holds it.
 func LockFile(path string) (func(), error) { return tryLockFile(path) }
+
+// ------------------------------------------------------------ role locks
+
+// locksDir holds the lock files of the start check (9.1).
+const locksDir = "locks"
+
+// Role is a program that works on the data directory.
+type Role int
+
+const (
+	RoleServer Role = 1 + iota // gomail-server
+	RoleClient                 // gomailctl
+)
+
+// ErrPeerLock reports that the other side holds no lock that is in force
+// here: it does not run, or locks do not work across the file system
+// (9.1, "Testsperre").
+var ErrPeerLock = errors.New("store: no effective lock of the other side")
+
+func (s *Store) roleLockFile(r Role) (string, error) {
+	switch r {
+	case RoleServer:
+		return s.Path(locksDir, "server"), nil
+	case RoleClient:
+		return s.Path(locksDir, "client"), nil
+	}
+	return "", fmt.Errorf("store: unknown role %d", r)
+}
+
+// HoldRoleLock takes the lock of role on locks/server or locks/client
+// without waiting and keeps it until release is called, for the whole
+// run of the program (9.1). The server lock is exclusive: a second server
+// fails with ErrLocked. The client lock is shared, because several
+// clients of different users may run at the same time; a second client
+// in the same process fails with ErrLocked.
+func (s *Store) HoldRoleLock(role Role) (release func(), err error) {
+	p, err := s.roleLockFile(role)
+	if err != nil {
+		return nil, err
+	}
+	if err := MkdirAll(filepath.Dir(p)); err != nil {
+		return nil, err
+	}
+	return lockPath(p, role == RoleServer, false)
+}
+
+// CheckPeerLock tests the lock of the other side (9.1): it tries to take
+// an exclusive lock on its lock file without waiting. If that succeeds,
+// the other side holds no lock that is in force here, and CheckPeerLock
+// reports ErrPeerLock (also when the lock file does not exist). If the
+// lock is held, it returns nil. Any other failure is returned as it is:
+// it proves nothing (fail closed). The client checks the running server
+// this way; the server at its start only takes its own lock.
+func (s *Store) CheckPeerLock(peer Role) error {
+	p, err := s.roleLockFile(peer)
+	if err != nil {
+		return err
+	}
+	switch err := probeLock(p); {
+	case errors.Is(err, ErrLocked):
+		return nil
+	case err == nil:
+		return fmt.Errorf("%w: %s is not locked", ErrPeerLock, filepath.Base(p))
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w: %s does not exist", ErrPeerLock, filepath.Base(p))
+	default:
+		return err
+	}
+}

@@ -101,6 +101,11 @@ func Keygen(cfg Config, passphrase []byte, p Prompter) (store.ID, error) {
 		return store.ID{}, err
 	}
 	user := &store.User{ID: id, RootPub: root.Public().(ed25519.PublicKey), Generations: []*keys.GenerationCert{cert}}
+	// user.rec is signed by the root here, the only moment the root exists
+	// (2.2, 3.7 "user"); Register publishes the signed file.
+	if err := user.Sign(root); err != nil {
+		return store.ID{}, err
+	}
 	userData, err := user.Encode()
 	if err != nil {
 		return store.ID{}, err
@@ -112,7 +117,7 @@ func Keygen(cfg Config, passphrase []byte, p Prompter) (store.ID, error) {
 	if err := mkdirClient(cfg.Dir); err != nil {
 		return store.ID{}, err
 	}
-	if err := store.WriteFileAtomic(cfg.userPath(), userData); err != nil {
+	if err := store.WritePrivateFileAtomic(cfg.userPath(), userData); err != nil {
 		return store.ID{}, err
 	}
 	if err := keys.WriteKeystoreFile(cfg.keystorePath(), ksData); err != nil {

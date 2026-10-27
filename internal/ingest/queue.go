@@ -38,10 +38,11 @@ type batchKey struct {
 }
 
 type batch struct {
-	metaPub *ecdh.PublicKey
-	entries []store.PendingEntry
-	bytes   int
-	started time.Time
+	metaPub  *ecdh.PublicKey
+	entries  []store.PendingEntry
+	bytes    int
+	started  time.Time
+	received int64 // earliest receipt of its mails, the created time of the term list
 }
 
 // queue is the preprocessing queue with its ephemeral key (5.3).
@@ -266,6 +267,9 @@ func (q *queue) processJobs() {
 			b = &batch{metaPub: j.metaPub, started: q.in.now()}
 			q.batches[k] = b
 		}
+		if r := j.received.UnixMilli(); len(b.entries) == 0 || r < b.received {
+			b.received = r
+		}
 		b.entries = append(b.entries, store.PendingEntry{MailID: j.mail, Terms: terms})
 		b.bytes += size
 		if len(b.entries) >= q.in.cfg.BatchSize {
@@ -325,7 +329,7 @@ func (q *queue) flushLocked(k batchKey) error {
 		return err
 	}
 	p := &store.Pending{MailboxID: k.mailbox, Epoch: k.epoch, Entries: b.entries}
-	data, err := in.sealPending(p, id, &store.Epoch{MetaPub: b.metaPub})
+	data, err := in.sealPending(p, id, &store.Epoch{MetaPub: b.metaPub}, b.received)
 	for i := range b.entries {
 		b.entries[i].Terms = nil
 	}

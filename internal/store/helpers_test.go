@@ -37,6 +37,9 @@ func newTestUser(t testing.TB, b byte, gens int) *testUser {
 		tu.user.Generations = append(tu.user.Generations, c)
 		tu.identity, tu.unwrap = id, uw
 	}
+	if err := tu.user.Sign(root); err != nil {
+		t.Fatal(err)
+	}
 	return tu
 }
 
@@ -53,10 +56,13 @@ func x25519(t testing.TB, b byte) *ecdh.PrivateKey {
 // predecessor (nil for epoch 1).
 func newTestEpoch(t testing.TB, tu *testUser, mbx ID, n uint32, begin int64, prev []byte) (*Epoch, []byte) {
 	t.Helper()
-	reason := ReasonMonthly
-	if n == 1 {
-		reason = ReasonInitial
-	}
+	e := unsignedEpoch(t, tu, mbx, n, begin, ReasonRegular, prev)
+	return signEpoch(t, tu, e)
+}
+
+// unsignedEpoch returns epoch n with tu as its only member and signer.
+func unsignedEpoch(t testing.TB, tu *testUser, mbx ID, n uint32, begin int64, reason Reason, prev []byte) *Epoch {
+	t.Helper()
 	e := &Epoch{
 		MailboxID: mbx, Number: n, Begin: begin, Reason: reason, Suite: envelope.Suite1,
 		ContentPub: x25519(t, byte(n)).PublicKey(), MetaPub: x25519(t, byte(n)+100).PublicKey(),
@@ -66,6 +72,12 @@ func newTestEpoch(t testing.TB, tu *testUser, mbx ID, n uint32, begin int64, pre
 	if prev != nil {
 		e.PrevHash = EpochHash(prev)
 	}
+	return e
+}
+
+// signEpoch signs e with the identity of tu and encodes it.
+func signEpoch(t testing.TB, tu *testUser, e *Epoch) (*Epoch, []byte) {
+	t.Helper()
 	if err := e.Sign(tu.identity); err != nil {
 		t.Fatal(err)
 	}
@@ -74,4 +86,23 @@ func newTestEpoch(t testing.TB, tu *testUser, mbx ID, n uint32, begin int64, pre
 		t.Fatal(err)
 	}
 	return e, data
+}
+
+// ed25519Sign signs tbs as an epoch with the identity of tu, without any
+// structural check.
+func ed25519Sign(tu *testUser, tbs []byte) []byte {
+	sig, err := keys.Sign(tu.identity, keys.DomainEpoch, tbs)
+	if err != nil {
+		panic(err)
+	}
+	return sig
+}
+
+func mustEncode(t testing.TB, r interface{ Encode() ([]byte, error) }) []byte {
+	t.Helper()
+	b, err := r.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

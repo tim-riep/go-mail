@@ -460,11 +460,11 @@ func TestPlatformRecordLayout(t *testing.T) {
 	}
 }
 
-// TestDomainTable pins the short names of 3.7 (version 1.2): exactly the
-// eleven names of the table, unique, ASCII without a slash, and the record
+// TestDomainTable pins the short names of 3.7 (version 1.3): exactly the
+// fourteen names of the table, unique, ASCII without a slash, and the record
 // types of the signed records carry them.
 func TestDomainTable(t *testing.T) {
-	want := []string{"platform-cert", "platform-succ", "user-gen", "epoch", "address", "checkpoint", "mail", "meta", "pending", "wrap", "index"}
+	want := []string{"platform-cert", "platform-succ", "user-gen", "epoch", "address", "checkpoint", "user", "invite", "wrap-accept", "mail", "meta", "pending", "wrap", "index"}
 	if len(domains) != len(want) {
 		t.Fatalf("%d domains, want %d", len(domains), len(want))
 	}

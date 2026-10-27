@@ -53,7 +53,8 @@ func TestBrokenChainWithoutMemory(t *testing.T) {
 	var st map[string]any
 	json.Unmarshal(mustRead(t, sp), &st)
 	mb := st["mailboxes"].(map[string]any)[f.mbx.String()].(map[string]any)
-	mb["begins"] = map[string]any{}
+	mb["epochs"] = map[string]any{}
+	delete(mb, "begins")
 	mb["epoch"] = 1
 	d1 := mustRead(t, f.env.Store.EpochFile(f.mbx, 1))
 	h := sha256.Sum256(d1)

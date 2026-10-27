@@ -38,12 +38,15 @@ var (
 	ErrRollback      = errors.New("client: mailbox.rec points to an older epoch than already seen")
 	ErrEpoch         = errors.New("client: file belongs to an epoch outside the verified chain")
 	ErrStaleEpoch    = errors.New("client: mail encrypted for an epoch after a newer epoch had begun")
-	ErrReplay        = errors.New("client: older metadata version than already seen")
-	ErrMailHash      = errors.New("client: mail file does not match its signed metadata")
-	ErrMismatch      = errors.New("client: file does not match its location or metadata")
-	ErrSigner        = errors.New("client: file not signed by an accepted key")
-	ErrWrap          = errors.New("client: epoch keys not available")
-	ErrNotFound      = errors.New("client: mail not found")
+	// ErrDiscardedEpoch rejects every file of an epoch that a later
+	// immediate epoch discarded (2.4 rule 3, K1 point 3).
+	ErrDiscardedEpoch = errors.New("client: file belongs to a discarded epoch")
+	ErrReplay         = errors.New("client: older metadata version than already seen")
+	ErrMailHash       = errors.New("client: mail file does not match its signed metadata")
+	ErrMismatch       = errors.New("client: file does not match its location or metadata")
+	ErrSigner         = errors.New("client: file not signed by an accepted key")
+	ErrWrap           = errors.New("client: epoch keys not available")
+	ErrNotFound       = errors.New("client: mail not found")
 )
 
 // Config configures a client.
@@ -105,9 +108,23 @@ type mailboxState struct {
 	Epoch     uint32            `json:"epoch"`
 	EpochHash string            `json:"epoch_hash"`
 	Versions  map[string]uint32 `json:"versions"`
-	// Begins holds the begin of every verified epoch, so that the epoch
-	// rule of 2.4 still holds when a later epoch is removed or replaced.
-	Begins map[string]int64 `json:"begins"`
+	// Epochs remembers every verified epoch: its begin and reason (the
+	// first values seen) and whether a later epoch discarded it, so that
+	// the epoch rule of 2.4 still holds when a later epoch is removed or
+	// replaced (DECISIONS D50) and a discarded epoch never becomes valid
+	// again (K1 point 3).
+	Epochs map[string]*epochMemo `json:"epochs"`
+	// Begins is the format before discarded epochs: the begin of every
+	// verified epoch, all of them planned. It is only read, and moved into
+	// Epochs.
+	Begins map[string]int64 `json:"begins,omitempty"`
+}
+
+// epochMemo is what the client remembers of one epoch.
+type epochMemo struct {
+	Begin     int64 `json:"begin"`
+	Immediate bool  `json:"immediate"`
+	Discarded bool  `json:"discarded"`
 }
 
 func loadState(path string) (*state, error) {
@@ -133,7 +150,7 @@ func saveState(path string, s *state) error {
 	if err != nil {
 		return err
 	}
-	return store.WriteFileAtomic(path, data)
+	return store.WritePrivateFileAtomic(path, data)
 }
 
 // Client is an unlocked client.
@@ -264,14 +281,26 @@ func (c *Client) save() error { return saveState(c.cfg.statePath(), c.state) }
 func (c *Client) mailboxState(id store.ID) *mailboxState {
 	ms := c.state.Mailboxes[id.String()]
 	if ms == nil {
-		ms = &mailboxState{Versions: map[string]uint32{}, Begins: map[string]int64{}}
+		ms = &mailboxState{Versions: map[string]uint32{}, Epochs: map[string]*epochMemo{}}
 		c.state.Mailboxes[id.String()] = ms
 	}
 	if ms.Versions == nil {
 		ms.Versions = map[string]uint32{}
 	}
-	if ms.Begins == nil {
-		ms.Begins = map[string]int64{}
+	if ms.Epochs == nil {
+		ms.Epochs = map[string]*epochMemo{}
+	}
+	for k, b := range ms.Begins {
+		if _, ok := ms.Epochs[k]; !ok {
+			ms.Epochs[k] = &epochMemo{Begin: b}
+		}
+	}
+	ms.Begins = nil
+	for k, m := range ms.Epochs {
+		if m == nil {
+			// A damaged entry is dropped; the chain fills it in again.
+			delete(ms.Epochs, k)
+		}
 	}
 	return ms
 }

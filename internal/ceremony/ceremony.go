@@ -99,7 +99,7 @@ func InitDev(dataDir, keyDir string, now time.Time, log translog.Log) (*Result, 
 		"Wer diese Datei hat, kann jeden Plattformschlüssel ableiten.\n\n" +
 		"seed: " + hex.EncodeToString(seed[:]) + "\n" +
 		"words: " + strings.Join(words, " ") + "\n"
-	if err := store.CreateFileAtomic(filepath.Join(keyDir, RootFile), []byte(rootText)); err != nil {
+	if err := store.CreatePrivateFileAtomic(filepath.Join(keyDir, RootFile), []byte(rootText)); err != nil {
 		return nil, err
 	}
 	for _, k := range []struct {
@@ -111,7 +111,7 @@ func InitDev(dataDir, keyDir string, now time.Time, log translog.Log) (*Result, 
 		if err != nil {
 			return nil, err
 		}
-		err = store.CreateFileAtomic(filepath.Join(keyDir, k.name), data)
+		err = store.CreatePrivateFileAtomic(filepath.Join(keyDir, k.name), data)
 		keys.Wipe(data)
 		if err != nil {
 			return nil, err
@@ -123,7 +123,7 @@ func InitDev(dataDir, keyDir string, now time.Time, log translog.Log) (*Result, 
 	if err != nil {
 		return nil, err
 	}
-	if err := store.CreateFileAtomic(filepath.Join(keyDir, PinFile), pinData); err != nil {
+	if err := store.CreatePrivateFileAtomic(filepath.Join(keyDir, PinFile), pinData); err != nil {
 		return nil, err
 	}
 

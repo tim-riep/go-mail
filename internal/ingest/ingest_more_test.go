@@ -187,7 +187,7 @@ func TestSupplyEmptyFallback(t *testing.T) {
 		t.Fatal("note must be removed after the new epoch")
 	}
 	e5, _, err := env.Store.ReadEpoch(mbx, 5)
-	if err != nil || e5.Reason != store.ReasonImmediate || e5.Begin != env.Clock.Now().Add(client.ImmediateDelay).UnixMilli() {
+	if err != nil || e5.Reason != store.ReasonRegular || e5.Begin != env.Clock.Now().Add(client.ImmediateDelay).UnixMilli() {
 		t.Fatalf("immediate epoch %+v %v", e5, err)
 	}
 	m, _ := env.Store.ReadMailbox(mbx)

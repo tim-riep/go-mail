@@ -5,7 +5,10 @@
 package testenv
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/rand"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -13,6 +16,8 @@ import (
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/client"
+	"github.com/tim-riep/go-mail/internal/envelope"
+	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
 )
@@ -185,4 +190,91 @@ func (e *Env) Mailbox(u *User, name string, addrs ...string) store.ID {
 		}
 	}
 	return id
+}
+
+// ImmediateEpoch appends an epoch with immediate effect (2.4) to mailbox
+// mbx, created and signed by its member u like a client would do it:
+// fresh random keys, the wrap for u, folders.gml with name and the inbox
+// of mailbox.rec as the only folder, discards naming every epoch of the
+// chain up to the head of mailbox.rec that is not discarded and begins
+// after begin (2.4 rule 1), epoch.rec in the log and mailbox.rec pointing
+// to the new epoch. u is the only member of the new epoch. It holds the
+// mailbox lock while it writes. Clients do not create such epochs yet;
+// tests use it to check how client and server treat them.
+func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason store.Reason, name string) *store.Epoch {
+	e.T.Helper()
+	fail := func(err error) {
+		e.T.Helper()
+		if err != nil {
+			e.T.Fatal(err)
+		}
+	}
+	unlock, err := e.Store.LockMailbox(mbx)
+	fail(err)
+	defer unlock()
+	m, err := e.Store.ReadMailbox(mbx)
+	fail(err)
+	links := store.NewChain()
+	var headData []byte
+	for n := uint32(1); n <= m.Epoch; n++ {
+		ep, data, err := e.Store.ReadEpoch(mbx, n)
+		fail(err)
+		fail(links.Add(ep, data))
+		headData = data
+	}
+	var discards []uint32
+	for n := uint32(1); n <= m.Epoch; n++ {
+		if !links.Discarded(n) && links.Epoch(n).Begin > begin.UnixMilli() {
+			discards = append(discards, n)
+		}
+	}
+	ksData, err := keys.ReadKeystoreFile(filepath.Join(u.Dir, "keystore"))
+	fail(err)
+	ks, err := keys.OpenKeystore(ksData, Passphrase)
+	keys.Wipe(ksData)
+	fail(err)
+	defer ks.Zero()
+	content, err := ecdh.X25519().GenerateKey(rand.Reader)
+	fail(err)
+	meta, err := ecdh.X25519().GenerateKey(rand.Reader)
+	fail(err)
+	n := m.Epoch + 1
+	ek := &store.EpochKeys{MailboxID: mbx, Epoch: n, Content: content, Meta: meta}
+	_, err = io.ReadFull(rand.Reader, ek.Index[:])
+	fail(err)
+	defer ek.Zero()
+	ep := &store.Epoch{
+		MailboxID: mbx, Number: n, Begin: begin.UnixMilli(), Reason: reason, Suite: envelope.Suite1,
+		ContentPub: content.PublicKey(), MetaPub: meta.PublicKey(),
+		Members:  []store.Member{{Kind: store.MemberUser, ID: u.ID, Gen: ks.Generation}},
+		Discards: discards, PrevHash: store.EpochHash(headData),
+		SignerID: u.ID, SignerGen: ks.Generation,
+	}
+	fail(ep.Sign(ks.Identity))
+	signer := &envelope.Signer{Type: envelope.SignerUser, ID: u.ID, Gen: ks.Generation, Key: ks.Identity}
+	now := e.Clock.Now().UnixMilli()
+	plain, err := ek.Encode()
+	fail(err)
+	wrap, err := envelope.Seal(
+		envelope.Header{Kind: envelope.KindWrap, MailboxID: mbx, Epoch: n, FileID: u.ID, Created: now},
+		[]envelope.Recipient{{Type: envelope.RecipientUserUnwrap, ID: u.ID, Gen: ks.Generation, PublicKey: ks.Unwrap.PublicKey()}},
+		plain, &envelope.SealOptions{Signer: signer})
+	keys.Wipe(plain)
+	fail(err)
+	fail(e.Store.WriteWrap(mbx, n, u.ID, wrap))
+	list, err := (&store.FolderList{MailboxID: mbx, Epoch: n, Name: name, Folders: []store.Folder{{ID: m.Inbox, Name: client.InboxName}}}).Encode()
+	fail(err)
+	folders, err := envelope.Seal(
+		envelope.Header{Kind: envelope.KindMeta, MailboxID: mbx, Epoch: n, FileID: m.Inbox, Created: now, Version: 1},
+		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: mbx, Gen: n, PublicKey: ep.MetaPub}},
+		list, &envelope.SealOptions{Signer: signer})
+	fail(err)
+	fail(e.Store.WriteFolders(mbx, n, folders))
+	data, err := e.Store.WriteEpoch(ep)
+	fail(err)
+	fail(e.Log.AppendEpoch(mbx, n, data))
+	next := *m
+	next.Epoch = n
+	fail(e.Store.WriteMailbox(&next))
+	return ep
 }

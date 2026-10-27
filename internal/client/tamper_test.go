@@ -237,6 +237,7 @@ func TestEpochRecRemovedReplacedAndRollback(t *testing.T) {
 	bob := f.env.NewUser("bob")
 	ep, _ := store.DecodeEpoch(orig2)
 	ep.SignerID, ep.SignerGen = bob.ID, 1
+	ep.Members = append(ep.Members, store.Member{Kind: store.MemberUser, ID: bob.ID, Gen: 1})
 	ks, _ := keys.OpenKeystore(mustRead(t, filepath.Join(bob.Dir, "keystore")), testenv.Passphrase)
 	ep.Sign(ks.Identity)
 	ks.Zero()

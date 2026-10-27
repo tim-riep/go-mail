@@ -29,6 +29,9 @@ const (
 	DomainEpoch              = "epoch"         // epoch.rec, by the identity of the creating member
 	DomainAddress            = "address"       // address assignment, by the admin key
 	DomainCheckpoint         = "checkpoint"    // client note on a tree head, by the user identity
+	DomainUser               = "user"          // user.rec, by the user root
+	DomainInvite             = "invite"        // invitation code with expiry, by the admin key
+	DomainWrapAccept         = "wrap-accept"   // countersignature of a member over its own wrap, by its identity
 	DomainMail               = "mail"          // .gml files (3.4)
 	DomainMeta               = "meta"
 	DomainPending            = "pending"
@@ -39,8 +42,8 @@ const (
 // domains is the table of 3.7.
 var domains = [...]string{
 	DomainPlatformCert, DomainPlatformSuccession, DomainUserGen, DomainEpoch,
-	DomainAddress, DomainCheckpoint, DomainMail, DomainMeta, DomainPending,
-	DomainWrap, DomainIndex,
+	DomainAddress, DomainCheckpoint, DomainUser, DomainInvite, DomainWrapAccept,
+	DomainMail, DomainMeta, DomainPending, DomainWrap, DomainIndex,
 }
 
 // KnownDomain reports whether d is a short name of the table in 3.7.

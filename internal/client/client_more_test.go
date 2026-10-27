@@ -31,7 +31,7 @@ func TestSyncAfterFallbackNote(t *testing.T) {
 		t.Fatal("the fallback must be reported")
 	}
 	e5, _, _ := f.env.Store.ReadEpoch(f.mbx, 5)
-	if e5.Reason != store.ReasonImmediate {
+	if e5.Reason != store.ReasonRegular {
 		t.Fatal("immediate epoch")
 	}
 	// A damaged note is reported and does not stop the supply.
@@ -45,76 +45,106 @@ func TestSyncAfterFallbackNote(t *testing.T) {
 	}
 }
 
+// sealFolders seals a folder list for the meta key of epoch e with the
+// inbox as file ID.
+func sealFolders(e *store.Epoch, epoch uint32, inbox store.ID, plain []byte, signer *envelope.Signer) []byte {
+	var opts *envelope.SealOptions
+	if signer != nil {
+		opts = &envelope.SealOptions{Signer: signer}
+	}
+	data, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: e.MailboxID, Epoch: epoch, FileID: inbox, Created: 1, Version: 1},
+		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: e.MailboxID, Gen: epoch, PublicKey: e.MetaPub}}, plain, opts)
+	return data
+}
+
 func TestNameAndFoldersTampered(t *testing.T) {
 	f := newFixture(t)
-	fd, _ := f.env.Store.ReadFolders(f.mbx)
 	m, _ := f.env.Store.ReadMailbox(f.mbx)
-	// folders.gml in place of the name (other file ID).
-	bad := *m
-	bad.Name = fd
-	f.env.Store.WriteMailbox(&bad)
-	if _, err := f.u.Client.MailboxName(f.mbx); !errors.Is(err, client.ErrMismatch) {
-		t.Fatalf("folders as name: %v", err)
+	// The client reads folders.gml of the newest epoch it is a member of.
+	n := m.Epoch
+	head, _, _ := f.env.Store.ReadEpoch(f.mbx, n)
+	orig, _ := f.env.Store.ReadFolders(f.mbx, n)
+	if name, err := f.u.Client.MailboxName(f.mbx); err != nil || name != "A" {
+		t.Fatalf("name: %q %v", name, err)
 	}
-	// Junk name.
-	bad.Name = []byte("junk")
-	f.env.Store.WriteMailbox(&bad)
-	if _, err := f.u.Client.MailboxName(f.mbx); err == nil {
-		t.Fatal("junk name")
+	// Older lists are not read.
+	os.Remove(f.env.Store.FoldersFile(f.mbx, 1))
+	if _, err := f.u.Client.Folders(f.mbx); err != nil {
+		t.Fatalf("list of an older epoch read: %v", err)
 	}
-	// The name sealed for an epoch outside the chain.
-	e1, _, _ := f.env.Store.ReadEpoch(f.mbx, 1)
-	e9 := *e1
-	e9.Number = 9
-	plain, _ := store.EncodeMailboxName(f.mbx, "x")
-	sealed, _ := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 9, FileID: f.mbx, Version: 1},
-		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 9, PublicKey: e1.MetaPub}}, plain, nil)
-	bad.Name = sealed
-	f.env.Store.WriteMailbox(&bad)
-	if _, err := f.u.Client.MailboxName(f.mbx); !errors.Is(err, client.ErrEpoch) {
-		t.Fatalf("name of epoch 9: %v", err)
+	restore := func() { f.env.Store.WriteFolders(f.mbx, n, orig) }
+	ks, _ := keys.OpenKeystore(mustRead(t, filepath.Join(f.u.Dir, "keystore")), testenv.Passphrase)
+	alice := &envelope.Signer{Type: envelope.SignerUser, ID: f.u.ID, Gen: 1, Key: ks.Identity}
+	plain := func(epoch uint32, folders []store.Folder) []byte {
+		b, err := (&store.FolderList{MailboxID: f.mbx, Epoch: epoch, Name: "x", Folders: folders}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
 	}
-	// Unsigned name for epoch 1: no unsigned meta files.
-	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx, Version: 1},
-		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain, nil)
-	bad.Name = sealed
-	f.env.Store.WriteMailbox(&bad)
-	if _, err := f.u.Client.MailboxName(f.mbx); !errors.Is(err, envelope.ErrUnsigned) {
-		t.Fatalf("unsigned name: %v", err)
-	}
-	// Signed by the ingest key: not a member.
-	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx, Version: 1},
-		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain,
-		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerIngest, Gen: 1, Key: f.env.IngestKey}})
-	bad.Name = sealed
-	f.env.Store.WriteMailbox(&bad)
-	if _, err := f.u.Client.MailboxName(f.mbx); !errors.Is(err, client.ErrSigner) {
-		t.Fatalf("name signed by the server: %v", err)
-	}
-	// Signed by a user who is not a member.
+	inboxOnly := []store.Folder{{ID: m.Inbox, Name: client.InboxName}}
 	bob := f.env.NewUser("bob")
-	ks, _ := keys.OpenKeystore(mustRead(t, filepath.Join(bob.Dir, "keystore")), testenv.Passphrase)
-	sealed, _ = envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: 1, FileID: f.mbx, Version: 1},
-		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: 1, PublicKey: e1.MetaPub}}, plain,
-		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerUser, ID: bob.ID, Gen: 1, Key: ks.Identity}})
-	ks.Zero()
-	bad.Name = sealed
-	f.env.Store.WriteMailbox(&bad)
-	if _, err := f.u.Client.MailboxName(f.mbx); !errors.Is(err, client.ErrSigner) {
-		t.Fatalf("name signed by a non-member: %v", err)
+	bks, _ := keys.OpenKeystore(mustRead(t, filepath.Join(bob.Dir, "keystore")), testenv.Passphrase)
+	defer bks.Zero()
+	defer ks.Zero()
+	prevList, _ := f.env.Store.ReadFolders(f.mbx, n-1)
+	for name, c := range map[string]struct {
+		data []byte
+		want error
+	}{
+		"list of the previous epoch": {prevList, client.ErrMismatch},
+		"junk":                       {[]byte("junk"), envelope.ErrTruncated},
+		"sealed for epoch 9":         {sealFolders(head, 9, m.Inbox, plain(9, inboxOnly), alice), client.ErrMismatch},
+		"unsigned":                   {sealFolders(head, n, m.Inbox, plain(n, inboxOnly), nil), envelope.ErrUnsigned},
+		"signed by the server": {sealFolders(head, n, m.Inbox, plain(n, inboxOnly),
+			&envelope.Signer{Type: envelope.SignerIngest, Gen: 1, Key: f.env.IngestKey}), client.ErrSigner},
+		"signed by a non-member": {sealFolders(head, n, m.Inbox, plain(n, inboxOnly),
+			&envelope.Signer{Type: envelope.SignerUser, ID: bob.ID, Gen: 1, Key: bks.Identity}), client.ErrSigner},
+		"plaintext of another epoch": {sealFolders(head, n, m.Inbox, plain(n-1, inboxOnly), alice), store.ErrRecord},
+		"no inbox":                   {sealFolders(head, n, m.Inbox, plain(n, []store.Folder{{ID: m.Inbox, Name: "Archiv"}}), alice), client.ErrMismatch},
+		"inbox under another id":     {sealFolders(head, n, store.ID{7}, plain(n, inboxOnly), alice), client.ErrMismatch},
+	} {
+		f.env.Store.WriteFolders(f.mbx, n, c.data)
+		if _, err := f.u.Client.MailboxName(f.mbx); !errors.Is(err, c.want) {
+			t.Fatalf("%s: name: %v", name, err)
+		}
+		if _, err := f.u.Client.Folders(f.mbx); !errors.Is(err, c.want) {
+			t.Fatalf("%s: folders: %v", name, err)
+		}
+		restore()
 	}
-	f.env.Store.WriteMailbox(m)
-	// folders.gml missing or replaced.
-	os.Remove(f.env.Store.FoldersFile(f.mbx))
-	if _, err := f.u.Client.Folders(f.mbx); err == nil {
+	// A valid list signed by the member is read.
+	f.env.Store.WriteFolders(f.mbx, n, sealFolders(head, n, m.Inbox, plain(n, inboxOnly), alice))
+	if name, err := f.u.Client.MailboxName(f.mbx); err != nil || name != "x" {
+		t.Fatalf("resealed list: %q %v", name, err)
+	}
+	// folders.gml missing.
+	os.Remove(f.env.Store.FoldersFile(f.mbx, n))
+	if _, err := f.u.Client.Folders(f.mbx); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal("missing folders")
-	}
-	f.env.Store.WriteFolders(f.mbx, m.Name)
-	if _, err := f.u.Client.Folders(f.mbx); err == nil {
-		t.Fatal("name accepted as folders")
 	}
 	if _, err := f.u.Client.List(f.mbx, store.ID{}); err == nil {
 		t.Fatal("list without a valid folders.gml")
+	}
+	if err := f.u.Client.Sync(); err != nil {
+		t.Fatalf("sync without new epochs needs no folders: %v", err)
+	}
+	f.env.Clock.Set(time.Date(2027, 6, 2, 0, 0, 0, 0, time.UTC))
+	if err := f.u.Client.Sync(); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("new epochs without the current folders: %v", err)
+	}
+	restore()
+	if err := f.u.Client.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := f.env.Store.ReadMailbox(f.mbx)
+	if name, err := f.u.Client.MailboxName(f.mbx); err != nil || m2.Epoch <= n || name != "A" {
+		t.Fatalf("name in the new epochs: %q %v", name, err)
+	}
+	for e := n + 1; e <= m2.Epoch; e++ {
+		if _, err := f.env.Store.ReadFolders(f.mbx, e); err != nil {
+			t.Fatalf("epoch %d without folders.gml", e)
+		}
 	}
 	// Without mailbox.rec nothing works.
 	os.Remove(f.env.Store.MailboxFile(f.mbx))
@@ -236,6 +266,7 @@ func TestRevokedGeneration(t *testing.T) {
 	uid := store.ID{42, 42}
 	user := &store.User{ID: uid, RootPub: root.Public().(ed25519.PublicKey), Generations: []*keys.GenerationCert{c1}}
 	write := func(u *store.User, ks *keys.Keystore) {
+		u.Sign(root)
 		data, _ := u.Encode()
 		os.MkdirAll(dir, 0o700)
 		store.WriteFileAtomic(filepath.Join(dir, "user.rec"), data)

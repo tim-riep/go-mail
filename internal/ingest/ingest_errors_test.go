@@ -36,7 +36,7 @@ func TestServerChecksEpochs(t *testing.T) {
 	}
 	// An epoch signed by an unknown generation.
 	e, _, _ := env.Store.ReadEpoch(mbx, 2)
-	e.Number, e.PrevHash, e.Reason, e.SignerGen = 1, [32]byte{}, store.ReasonInitial, 7
+	e.Number, e.PrevHash, e.Reason, e.SignerGen, e.Members[0].Gen = 1, [32]byte{}, store.ReasonRegular, 7, 7
 	e.Begin = testenv.Start.Add(-time.Minute).UnixMilli()
 	enc, _ := e.Encode()
 	os.WriteFile(path, enc, 0o600)
@@ -44,7 +44,7 @@ func TestServerChecksEpochs(t *testing.T) {
 		t.Fatal("epoch of an unknown generation used")
 	}
 	// An epoch whose signer has no user.rec.
-	e.SignerID = store.ID{9}
+	e.SignerID, e.Members[0].ID = store.ID{9}, store.ID{9}
 	enc, _ = e.Encode()
 	os.WriteFile(path, enc, 0o600)
 	if _, err := in.Begin(smtpd.Session{}, "s", []string{"a@example.org"}); !errors.Is(err, smtpd.ErrTemporary) {
