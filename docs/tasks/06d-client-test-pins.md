@@ -1,0 +1,13 @@
+# Auftrag 06d: Testlücken aus der Spezifikationsprüfung von 06 und `Share`-Rückgabe
+
+Branch `worktree-agent-ab80c4ad0e547d4df`, Worktree `/home/user/go-mail/.claude/worktrees/agent-ab80c4ad0e547d4df` (nach 06c). Feste Vorgaben: `/home/user/go-mail/docs/tasks/00-vorgaben.md`. Nur Tests, außer Punkt 7. Die Experimente des Verifizierers liegen unter `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/verify06-spec/verify06_*_test.go` und dürfen als Vorlage übernommen werden (prüfen, anpassen, umbenennen).
+
+1. **Verpackung nur von einem Benutzer-Mitglied signiert:** Test, bei dem eine Verpackung mit den richtigen Schlüsseln, aber von einem registrierten Nichtmitglied bzw. einer Vertretung (Art 3) signiert ist → `ErrWrap`; die Mutation „Nichtmitglied-Prüfung entfernt“ muss den Test brechen.
+2. **Einzelprüfungen der Verpackung getrennt gepinnt:** (a) Kopf einer anderen Epoche mit passenden Schlüsseln → Ablehnung; (b) fremde Schlüssel mit gültiger Mitgliedssignatur → Ablehnung (`Matches`); (c) Verpackung einer widerrufenen Unterzeichnergeneration ohne `.accept` → Ablehnung (Alice Gen 1 teilt mit Bob, Alice rotiert auf Gen 2 über `testenv`; Bob lehnt ab). Je Fall muss genau die eine entfernte Prüfung den Test brechen.
+3. **Kopf der Kette über das Verhalten:** nach Absturz an `epoch-written` (Epoche 5 existiert, `mailbox.rec` = 4) wird eine vom Server für Epoche 4 nach dem Beginn von 5 verschlüsselte Mail angenommen (Epoche 5 gilt für Leser nicht), `FoldersOfEpoch(5)` → `ErrEpoch`; Mutation „`verifyChain` übernimmt jenseits des Kopfs“ muss brechen.
+4. **`mailbox.rec` zuletzt bei sofortigen Epochen:** in `TestCrashShareAndRevoke` nach Absturz an `immediate`/`supply` prüfen, dass `mailbox.rec` unverändert ist; Absturztest für `SetRecovery`/`ClearRecovery` am Punkt `recovery-wraps`.
+5. **Unvollständige `discards` im Client:** sofortige Epoche, die Epoche 4 nicht verwirft → `store.ErrChain`, gültige Vorsilbe bleibt lesbar.
+6. **`Chain`-Regeln aus Client-Sicht:** Mutation „Regel 6 und 7 entfernt“ muss einen Client-Test brechen (Punkt 5 deckt das).
+7. **`Share` meldet Erfolg trotz übersprungener Epochen:** `Share` gibt die Liste der verpackten Epochen zurück (`[]uint32`) und einen Fehler `ErrPartial` (wrapt nichts Geheimes), wenn angeforderte, nicht verworfene Epochen nicht verpackt werden konnten; bereits geschriebene Verpackungen bleiben. Tests anpassen.
+
+Fertig: `gofmt -l .` leer, `go vet ./...`, `go test -race ./internal/client`, `GOARCH=386 go test ./internal/client`; ein Commit `client: pin the wrap and head rules in tests, Share reports wrapped epochs (task 06d)`. Bericht mit Mutationsnachweisen.
