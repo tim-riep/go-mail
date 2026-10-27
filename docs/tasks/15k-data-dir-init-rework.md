@@ -1,0 +1,19 @@
+# Auftrag 15k: Nacharbeit `gomail-server init` und Dev-Pin im Produktionsbuild (Funde der Prüfung von 15h)
+
+Welle 4/5. Sicherheitskritisch. Feste Vorgaben: `docs/tasks/00-vorgaben.md` (gelten wörtlich). Branch `worktree-agent-a2ba3addd966780f4`, Worktree `/home/user/go-mail/.claude/worktrees/agent-a2ba3addd966780f4` (Stand b753589; zuerst `git merge --no-edit claude/quirky-keller-hjsl5i`, nur Doku seither). Auftrag 15h bleibt gültig. Lies `cmd/gomail-server/init.go` vollständig, `main.go` (`readPin`, `openLogSide`, `serve`, `address add`, `log repair`), `internal/ceremony/keydir_unix.go` (`openKeyDir`: Deskriptor-relative Operationen als Vorbild), `internal/store` (`Init`, `ReadFileLimited`). Protokolle des Prüfers: `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/verify15h/logs/` (`serve-devpin-prod.txt`, `toctou-strace.txt`, `manual-init-cases.txt`).
+
+## Fund hoch
+
+1. **Dev-Pin im Produktionsbuild.** `readPin` prüft `pin.Dev` nicht; `serve`, `address add`, `log repair` laufen mit einem Dev-Pin und nur einer Warnung. Umsetzen: in `readPin` (für alle Serverbefehle) `pin.Dev && !ceremony.DevBuild` → Aufruffehler (Exit 2) mit festem Text; im Build mit `gomail_dev` bleibt die Warnung. Tests: Produktionsbuild verweigert `serve`/`address add`/`log repair`/`init` mit Dev-Pin vor jeder Aktion (kein Sperren, kein Öffnen des Logs); Dev-Build startet mit Warnung; `internal/e2e` (`-tags gomail_test` ohne `gomail_dev`): Dev-Pin → Exit 2. Prüfe `cmd/gomailctl`: nach Auftrag 14 lehnt der Client Dev-Pins ohne Testbuild-Schalter ab; falls `cmd/gomailctl` auf diesem Stand noch `--insecure-no-log` hat (14 noch nicht gemergt), nicht anfassen, im Bericht nennen.
+
+## Fund mittel
+
+2. **Wettlauf zwischen Prüfung und Anlegen; Symlinks.** Umsetzen: `--data` darf kein Symlink sein (`Lstat`, Exit 2) und kein Symlink im letzten Element des Elternpfads; die Wurzel wird mit `os.Mkdir` angelegt (nie `MkdirAll`) oder ein vorhandenes leeres Verzeichnis mit `O_NOFOLLOW|O_DIRECTORY` geöffnet; alle weiteren Operationen (`fchmod`, `mkdirat`, `openat` für `witnesses.rec`) relativ zum Deskriptor (`os.Root` oder `syscall`-Varianten wie in `openKeyDir`); Dev/Inode jedes selbst angelegten Verzeichnisses merken; die Rücknahme entfernt nur diese (Identität prüfen) und nie die Wurzel per Pfad, wenn sie nicht selbst angelegt wurde oder ein Link ist; fremde leere Verzeichnisse bleiben. Tests: Symlink `--data` → Exit 2; Elternpfad mit Symlink → Exit 2; Einspritzpunkt zwischen Prüfung und Anlegen (Testseam), der `--data` durch einen Symlink auf ein fremdes Verzeichnis ersetzt → fremdes Verzeichnis unverändert (Rechte, Inhalt), Exit 1/2; Rücknahme lässt fremde leere Verzeichnisse stehen (Vorlage: Prüferläufe).
+
+## Funde niedrig
+
+3. FIFO/Gerät als `--pin` oder `--witnesses`: `Lstat` auf reguläre Datei vor dem Öffnen (oder `O_NONBLOCK`), kein Hängen; `init` beachtet den Kontext (SIGINT beendet).
+4. Fehlertext bei abweichender `--witnesses`-Datei ohne das irreführende `translog: data directory contradicts the log`-Präfix (eigener Fehlerwert wie `errWitnessFile` in `publish`); Ausgabe/RUNBOOK sagen „aus `--witnesses`“, wenn die Bytes von dort stammen.
+5. DECISIONS-Hinweis im Bericht: Symlinks für `--data` bewusst abgelehnt (fail closed), Gruppe `gomail` nur Warnung bei anderem Namen (`TODO(ask)` bleibt).
+
+Fertig: `gofmt -l .` leer, `go vet ./...` (ohne Tags, `-tags gomail_test`, `-tags gomail_dev,gomail_test`, GOOS freebsd/windows/darwin für `cmd/gomail-server`), `go test -race -tags gomail_test ./cmd/gomail-server ./internal/e2e` (`GOMAIL_TEST_MIN_FREE=0.000001` nur e2e), dasselbe mit `-tags gomail_dev,gomail_test`, `GOARCH=386 go test ./cmd/gomail-server`, Vektoren byte-gleich. Ein Commit `gomail-server: dev pins refused outside the dev build, init without symlinks and races (task 15k)`; kein Modellname. Bericht nach `00-vorgaben.md`: je Fund Änderung und Testname.
