@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -55,20 +56,34 @@ type Mail struct {
 	ID    store.ID
 	Epoch uint32
 	Meta  *store.MailMeta
+	// file is the SHA-256 of the metadata file that was checked; a flag
+	// change replaces exactly this file (K4 point 1).
+	file [32]byte
 }
 
 // checkMeta opens and checks <mail-id>.meta.gml (section 7). It returns
 // the metadata only if every check passed:
 //   - kind meta, mailbox, file ID and folder as named by its location,
 //   - epoch in the verified chain and not discarded, suite of the epoch,
-//   - signed by a certified ingest key valid at the time of receipt
-//     (phase 1 accepts only ingest signatures),
-//   - signature over the file and the fields of section 7,
-//   - receipt time equal to the creation time of the file,
+//   - version 1 signed by a certified ingest key valid at the time of
+//     receipt; a later version (a flag change, section 7, K4) signed by a
+//     user member (kind 1) of the epoch with the current generation of
+//     its user.rec (TODO(S13): strictest reading, as for wraps). A user
+//     signature on version 1 and an ingest signature on a later version
+//     are rejected,
+//   - signature over the file and the fields of section 7 (meta-signed),
+//   - receipt time equal to the creation time of the file and version
+//     equal to the header,
 //   - the epoch rule of 2.4 (checkEpochRule): the epoch had begun at
 //     receipt and no newer epoch that is not discarded had begun,
 //   - the address assignment at receipt in the log,
-//   - version not older than the highest seen.
+//   - version not older than the highest seen, and epoch, receipt time
+//     and mail hash equal to those remembered for the mail (the first
+//     version seen).
+//
+// The highest version and the memo are noted in the state in memory
+// only; the caller saves them once with saveSeen before it returns
+// anything that depends on them (task 09, addendum).
 func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	mbx := ch.mailbox.ID
 	data, err := c.st.ReadMeta(mbx, folder, id)
@@ -93,13 +108,30 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if f.Trailer == nil {
 		return nil, fmt.Errorf("%w: metadata without signature", ErrSigner)
 	}
-	if f.Trailer.Signer.Type != envelope.SignerIngest || f.Trailer.Signer.ID != ([16]byte{}) {
-		// User-signed metadata (flag changes, section 7) come with phase 2.
-		return nil, fmt.Errorf("%w: metadata not signed by the ingest key", ErrSigner)
-	}
-	ik, err := c.ingestKeyFor(f.Trailer.Signer.Gen)
-	if err != nil {
-		return nil, err
+	var pub ed25519.PublicKey
+	validFrom, ingest := int64(0), false
+	switch ref := f.Trailer.Signer; {
+	case ref.Type == envelope.SignerIngest && ref.ID == ([16]byte{}):
+		if h.Version != 1 {
+			return nil, fmt.Errorf("%w: ingest signature on metadata version %d", ErrSigner, h.Version)
+		}
+		ik, err := c.ingestKeyFor(ref.Gen)
+		if err != nil {
+			return nil, err
+		}
+		pub, validFrom, ingest = ik.pub, ik.validFrom, true
+	case ref.Type == envelope.SignerUser:
+		if h.Version < 2 {
+			return nil, fmt.Errorf("%w: user signature on metadata version %d", ErrSigner, h.Version)
+		}
+		if _, ok := e.Member(store.ID(ref.ID)); !ok {
+			return nil, fmt.Errorf("%w: metadata signed by a user who is not a user member of epoch %d", ErrSigner, e.Number)
+		}
+		if pub, err = c.userKey(store.ID(ref.ID), ref.Gen, nil); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("%w: metadata signer", ErrSigner)
 	}
 	k, err := c.keysFor(ch, e)
 	if err != nil {
@@ -119,13 +151,13 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := f.VerifySignature(ik.pub, extra); err != nil {
+	if err := f.VerifySignature(pub, extra); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSigner, err)
 	}
 	if m.MailID != id || m.Folder != folder || m.Received != h.Created || m.Version != h.Version {
 		return nil, fmt.Errorf("%w: metadata fields", ErrMismatch)
 	}
-	if m.Received < ik.validFrom {
+	if ingest && m.Received < validFrom {
 		return nil, fmt.Errorf("%w: ingest key not yet valid at receipt", ErrPlatform)
 	}
 	if err := c.checkEpochRule(ch, e, m.Received); err != nil {
@@ -137,16 +169,64 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 			return nil, err
 		}
 	}
-	ms := c.mailboxState(mbx)
-	if seen := ms.Versions[id.String()]; m.Version < seen {
-		return nil, fmt.Errorf("%w: version %d, seen %d", ErrReplay, m.Version, seen)
-	} else if m.Version > seen {
-		ms.Versions[id.String()] = m.Version
-		if err := c.save(); err != nil {
-			return nil, err
-		}
+	if err := c.noteVersion(mbx, e.Number, m); err != nil {
+		return nil, err
 	}
-	return &Mail{ID: id, Epoch: e.Number, Meta: m}, nil
+	return &Mail{ID: id, Epoch: e.Number, Meta: m, file: sha256.Sum256(data)}, nil
+}
+
+// noteVersion applies the rules against replay (section 7) to checked
+// metadata m of epoch n and notes them in the state in memory: the
+// version must not be older than the highest seen, and epoch, receipt
+// time (created) and mail hash must equal those remembered for the mail.
+// A higher version and the first memo set c.dirty; saveSeen writes them.
+func (c *Client) noteVersion(mbx store.ID, n uint32, m *store.MailMeta) error {
+	ms := c.mailboxState(mbx)
+	key := m.MailID.String()
+	seen := ms.Versions[key]
+	if m.Version < seen {
+		return fmt.Errorf("%w: version %d, seen %d", ErrReplay, m.Version, seen)
+	}
+	hash := hex.EncodeToString(m.MailHash[:])
+	if ms.Mails == nil {
+		ms.Mails = map[string]*mailMemo{}
+	}
+	if memo := ms.Mails[key]; memo != nil {
+		if memo.Epoch != 0 && memo.Epoch != n || memo.Received != m.Received || memo.MailHash != hash {
+			return fmt.Errorf("%w: version %d", ErrMetaChanged, m.Version)
+		}
+	} else {
+		ms.Mails[key] = &mailMemo{Epoch: n, Received: m.Received, MailHash: hash}
+		c.dirty = true
+	}
+	if m.Version > seen {
+		ms.Versions[key] = m.Version
+		c.dirty = true
+	}
+	return nil
+}
+
+// saveSeen saves the versions and memos noted since the last save, once
+// per operation (task 09, addendum: List used to write state.json with
+// fsync for every new mail version, so the first List grew with the
+// square of the number of mails).
+//
+// The rule, fail closed: an operation returns nothing that depends on a
+// version it noted before that version is saved; if saving fails, the
+// operation returns only the error. The noted values stay in memory and
+// keep counting as seen (they never decrease, so a replay within the same
+// process is still rejected), and the next successful save writes them
+// with everything else. Nothing that was saved before is ever lost,
+// because state.json is always written as a whole and atomically.
+func (c *Client) saveSeen() error {
+	if !c.dirty {
+		return nil
+	}
+	if err := c.save(); err != nil {
+		return err
+	}
+	c.dirty = false
+	return nil
 }
 
 // List returns the checked metadata of the mails in a folder (the inbox
@@ -192,13 +272,21 @@ func (c *Client) List(mbx, folder store.ID) ([]*Mail, error) {
 		}
 		out = append(out, m)
 	}
+	if err := c.saveSeen(); err != nil {
+		return nil, err
+	}
+	sortMails(out)
+	return out, ch.err
+}
+
+// sortMails sorts by receipt, then by ID.
+func sortMails(out []*Mail) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Meta.Received != out[j].Meta.Received {
 			return out[i].Meta.Received < out[j].Meta.Received
 		}
 		return string(out[i].ID[:]) < string(out[j].ID[:])
 	})
-	return out, ch.err
 }
 
 // findFolder returns the folder holding mail id.
@@ -238,6 +326,9 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 	m, err := c.checkMeta(ch, folder, id)
 	if err != nil {
 		c.warnRejected(id, "wird nicht geöffnet", err)
+		return nil, nil, err
+	}
+	if err := c.saveSeen(); err != nil {
 		return nil, nil, err
 	}
 	data, err := c.st.ReadMail(mbx, folder, id)
@@ -293,7 +384,7 @@ func (c *Client) warnRejected(id store.ID, what string, err error) {
 // epoch and file ID as named by its location, epoch in the verified
 // chain and not discarded, and the epoch rule of 2.4 (checkEpochRule) for
 // its creation time, which the server sets to the receipt of the mails
-// it covers. Indexing itself (6.2) is phase 5.
+// it covers. Index and Search process pending/ with the same checks.
 func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.Pending, error) {
 	ch, err := c.verifyChain(mbx)
 	if err != nil {
@@ -304,6 +395,12 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
 		return nil, err
 	}
+	return c.openPending(ch, e, file)
+}
+
+// openPending is OpenPending for epoch e of the verified chain ch.
+func (c *Client) openPending(ch *chain, e *store.Epoch, file store.ID) (*store.Pending, error) {
+	mbx, epoch := ch.mailbox.ID, e.Number
 	data, err := c.st.ReadPending(mbx, epoch, file)
 	if err != nil {
 		return nil, err

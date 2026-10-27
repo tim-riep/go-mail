@@ -940,11 +940,14 @@ func (c *Client) isUserMember(e *store.Epoch) bool {
 // Sync keeps the epoch supply of every mailbox of this client (2.4): if
 // no epoch has begun in the current month (the server noted a fallback),
 // an epoch with immediate begin is created, then epochs for the next
-// three months. Phase 1 does nothing else in Sync (no term lists).
+// three months. Then it processes pending/ of the mailbox (Index, 6.2).
 func (c *Client) Sync() error {
 	var first error
 	for _, id := range c.Mailboxes() {
 		if err := c.syncMailbox(id); err != nil && first == nil {
+			first = err
+		}
+		if _, err := c.Index(id); err != nil && first == nil {
 			first = err
 		}
 	}

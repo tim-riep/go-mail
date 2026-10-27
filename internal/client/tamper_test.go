@@ -177,10 +177,10 @@ func TestOlderMetadataVersion(t *testing.T) {
 	a := f.deliver(t, "a", "x")
 	inbox := f.inbox(t)
 	v1, _ := f.env.Store.ReadMeta(f.mbx, inbox, a.ID)
-	e, _, _ := f.env.Store.ReadEpoch(f.mbx, 1)
-	// Version 2 (here signed by the ingest key as a stand-in for a flag
-	// change) is seen first.
-	f.writeMeta(t, e, a.ID, inbox, a.Meta.Received, a.Meta.MailHash, 2, f.env.IngestKey, 1)
+	// Version 2 (a flag change, signed by the user) is seen first.
+	if _, err := f.u.Client.SetFlags(f.mbx, a.ID, []string{"seen"}, nil); err != nil {
+		t.Fatal(err)
+	}
 	list, _ := f.u.Client.List(f.mbx, store.ID{})
 	if len(list) != 1 || list[0].Meta.Version != 2 {
 		t.Fatal("version 2 not seen")
@@ -419,8 +419,8 @@ func (f *fixture) deliver2(t *testing.T) {
 	}
 }
 
-// TestMetaHeaderVersionDiffersFromContent: the header says version 2, the
-// encrypted metadata say version 1, and the signature (over the header
+// TestMetaHeaderVersionDiffersFromContent: the header says version 1, the
+// encrypted metadata say version 2, and the signature (over the header
 // values and the extra of the content) is valid. The client must compare
 // the version inside the metadata with the header (section 7) and refuse
 // the mail, with a warning that carries no content.
@@ -436,7 +436,9 @@ func TestMetaHeaderVersionDiffersFromContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	const secret = "version-mismatch-subject"
-	m := &store.MailMeta{Version: 1, MailID: id, Received: ms, MailHash: sha256.Sum256(mail), Size: 1, Folder: inbox,
+	// An ingest signature is accepted only on version 1 (section 7, task
+	// 09), so the header carries 1 and the content 2.
+	m := &store.MailMeta{Version: 2, MailID: id, Received: ms, MailHash: sha256.Sum256(mail), Size: 1, Folder: inbox,
 		Recipients: []string{"a@example.org"}, Subject: secret}
 	plain, err := m.Encode()
 	if err != nil {
@@ -446,7 +448,7 @@ func TestMetaHeaderVersionDiffersFromContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta, err := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: e.Number, FileID: id, Created: ms, Version: 2},
+	meta, err := envelope.Seal(envelope.Header{Kind: envelope.KindMeta, MailboxID: f.mbx, Epoch: e.Number, FileID: id, Created: ms, Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: f.mbx, Gen: e.Number, PublicKey: e.MetaPub}}, plain,
 		&envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerIngest, Gen: 1, Key: f.env.IngestKey, Extra: extra}})
 	if err != nil {

@@ -71,6 +71,16 @@ var (
 	// available. The wraps written stay; the error names only epoch
 	// numbers.
 	ErrPartial = errors.New("client: not every requested epoch was wrapped")
+	// ErrMetaChanged rejects a metadata version whose receipt time
+	// (created) or mail hash differs from the one remembered for the mail:
+	// both stay the same over all versions (section 7, task 09).
+	ErrMetaChanged = errors.New("client: metadata version changes receipt time or mail hash")
+	// ErrConflict reports a flag change that lost the race for the next
+	// metadata version in every attempt (K4 point 2).
+	ErrConflict = errors.New("client: metadata changed concurrently in every attempt")
+	// ErrQuery rejects a search term that is not one of the terms of 5.4.
+	// It never contains the term.
+	ErrQuery = errors.New("client: invalid search term")
 )
 
 // Config configures a client.
@@ -138,6 +148,10 @@ type state struct {
 	UserID     string                   `json:"user_id"`
 	Registered bool                     `json:"registered"`
 	Mailboxes  map[string]*mailboxState `json:"mailboxes"`
+	// Device is the random device ID of this client directory, the first
+	// part of the name of its index segments (6.2, K5). Created by the
+	// first Index.
+	Device string `json:"device,omitempty"`
 }
 
 type mailboxState struct {
@@ -162,6 +176,22 @@ type mailboxState struct {
 	// Folders holds, per epoch, the highest version of folders.gml seen
 	// (section 7 "Gegen Wiedereinspielen", applied to folders.gml).
 	Folders map[string]uint32 `json:"folders,omitempty"`
+	// Mails holds, per mail, the epoch, the receipt time and the SHA-256
+	// of the mail file of the first metadata version seen: every later version
+	// must carry the same (section 7, task 09). Only hashes over
+	// ciphertext and times that stand in clear in the header.
+	Mails map[string]*mailMemo `json:"mails,omitempty"`
+	// IndexSeq holds, per epoch, the next sequence number of this
+	// device's index segments (6.2, K5); it is checked against the
+	// existing files before a segment is created.
+	IndexSeq map[string]uint64 `json:"index_seq,omitempty"`
+}
+
+// mailMemo is what the client remembers of one mail besides its version.
+type mailMemo struct {
+	Epoch    uint32 `json:"epoch"`
+	Received int64  `json:"received"`
+	MailHash string `json:"mail_hash"`
 }
 
 // epochMemo is what the client remembers of one epoch.
@@ -223,6 +253,10 @@ type Client struct {
 	mu        sync.Mutex
 	ingest    map[uint32]ingestKey
 	epochKeys map[epochRef]*store.EpochKeys
+	// dirty is set when a metadata version or mail memo was noted in the
+	// state but not yet saved (checkMeta); saveSeen writes it once per
+	// List, Read, Search, Index or SetFlags.
+	dirty bool
 }
 
 type ingestKey struct {
