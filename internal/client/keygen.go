@@ -45,33 +45,8 @@ func Keygen(cfg Config, passphrase []byte, p Prompter) (store.ID, error) {
 		return store.ID{}, err
 	}
 	defer seed.Zero()
-	words, err := seed.Words()
-	if err != nil {
+	if err := showAndConfirm(seed, p); err != nil {
 		return store.ID{}, err
-	}
-	defer func() {
-		for i := range words {
-			words[i] = ""
-		}
-	}()
-	if err := p.ShowWords(words); err != nil {
-		return store.ID{}, err
-	}
-	positions, err := choosePositions(len(words), ConfirmWords)
-	if err != nil {
-		return store.ID{}, err
-	}
-	for _, pos := range positions {
-		got, err := p.AskWord(pos + 1)
-		if err != nil {
-			return store.ID{}, err
-		}
-		// TODO(S11): the input is compared exactly, without trimming or
-		// case folding, until the normalization of seed word input is
-		// decided (SPEC-ISSUES S11).
-		if subtle.ConstantTimeCompare([]byte(got), []byte(words[pos])) != 1 {
-			return store.ID{}, ErrConfirm
-		}
 	}
 
 	u := keys.DeriveUser(seed)
@@ -127,6 +102,40 @@ func Keygen(cfg Config, passphrase []byte, p Prompter) (store.ID, error) {
 		return store.ID{}, err
 	}
 	return id, nil
+}
+
+// showAndConfirm shows the 24 words of seed through p and asks three
+// randomly chosen ones back (2.2); ErrConfirm if one differs.
+func showAndConfirm(seed *keys.Seed, p Prompter) error {
+	words, err := seed.Words()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := range words {
+			words[i] = ""
+		}
+	}()
+	if err := p.ShowWords(words); err != nil {
+		return err
+	}
+	positions, err := choosePositions(len(words), ConfirmWords)
+	if err != nil {
+		return err
+	}
+	for _, pos := range positions {
+		got, err := p.AskWord(pos + 1)
+		if err != nil {
+			return err
+		}
+		// TODO(S11): the input is compared exactly, without trimming or
+		// case folding, until the normalization of seed word input is
+		// decided (SPEC-ISSUES S11).
+		if subtle.ConstantTimeCompare([]byte(got), []byte(words[pos])) != 1 {
+			return ErrConfirm
+		}
+	}
+	return nil
 }
 
 // choosePositions draws k distinct positions below n from crypto/rand.

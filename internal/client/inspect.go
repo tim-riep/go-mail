@@ -19,7 +19,7 @@ var inspectSchemas = func() map[string]*rec.Schema {
 	m := map[string]*rec.Schema{}
 	for _, s := range []*rec.Schema{
 		store.UserSchema, store.MailboxSchema, store.EpochSchema, store.EpochNoteSchema, store.JournalSchema,
-		store.AddressSchema, store.PlatformPinSchema, store.PlatformKeySchema,
+		store.AddressSchema, store.PlatformPinSchema, store.PlatformKeySchema, store.RecoveryPubSchema,
 		keys.GenerationCertSchema, keys.PlatformCertSchema, keys.PlatformSuccessionSchema,
 	} {
 		m[s.Type] = s

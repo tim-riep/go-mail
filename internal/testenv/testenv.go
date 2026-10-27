@@ -130,6 +130,9 @@ func (p *Echo) ShowWords(w []string) error { p.words = append([]string(nil), w..
 // AskWord returns the word at pos.
 func (p *Echo) AskWord(pos int) (string, error) { return p.words[pos-1], nil }
 
+// Words returns the words shown last (for a recovery seed in tests).
+func (p *Echo) Words() []string { return append([]string(nil), p.words...) }
+
 // Passphrase of test users.
 var Passphrase = []byte("correct horse battery staple")
 
@@ -138,6 +141,9 @@ type User struct {
 	Dir    string
 	ID     store.ID
 	Client *client.Client
+	// Words are the seed words shown at Keygen, kept only by tests so
+	// that Rotate can derive a later generation.
+	Words []string
 }
 
 // NewUser creates, registers and opens a user.
@@ -145,7 +151,8 @@ func (e *Env) NewUser(name string) *User {
 	e.T.Helper()
 	dir := filepath.Join(e.Base, "clients", name)
 	cfg := e.ClientConfig(dir)
-	if _, err := client.Keygen(cfg, Passphrase, &Echo{}); err != nil {
+	echo := &Echo{}
+	if _, err := client.Keygen(cfg, Passphrase, echo); err != nil {
 		e.T.Fatal(err)
 	}
 	code, err := e.Store.CreateInvite(e.Clock.Now().UnixMilli())
@@ -161,7 +168,55 @@ func (e *Env) NewUser(name string) *User {
 		e.T.Fatal(err)
 	}
 	e.T.Cleanup(c.Close)
-	return &User{Dir: dir, ID: id, Client: c}
+	return &User{Dir: dir, ID: id, Client: c, Words: echo.Words()}
+}
+
+// Rotate moves u to its next generation as a lost device would (2.2,
+// "device lost" is task 06b): from u's seed it derives identity and
+// unwrap key of generation current+1, appends their certificate (which
+// revokes the current generation) to user.rec signed by the root, writes
+// user.rec to the data directory and the client directory, the key store
+// with the new generation, appends user.rec to the log and opens the
+// client again. It returns the new generation.
+func (e *Env) Rotate(u *User) uint32 {
+	e.T.Helper()
+	fail := func(err error) {
+		e.T.Helper()
+		if err != nil {
+			e.T.Fatal(err)
+		}
+	}
+	seed, err := keys.SeedFromWords(u.Words)
+	fail(err)
+	defer seed.Zero()
+	d := keys.DeriveUser(seed)
+	defer d.Zero()
+	root, err := d.RootKey()
+	fail(err)
+	defer keys.Wipe(root)
+	user, _, err := e.Store.ReadUser(u.ID)
+	fail(err)
+	gen := user.Current().Gen + 1
+	identity, err := d.IdentityKey(gen)
+	fail(err)
+	unwrap, err := d.UnwrapKey(gen)
+	fail(err)
+	ks := &keys.Keystore{Generation: gen, Identity: identity, Unwrap: unwrap}
+	defer ks.Zero()
+	cert, err := keys.NewGenerationCert(root, gen, identity.Public().(ed25519.PublicKey), unwrap.PublicKey(), e.Clock.Now().UnixMilli())
+	fail(err)
+	user.Generations = append(user.Generations, cert)
+	fail(user.Sign(root))
+	data, err := user.Encode()
+	fail(err)
+	fail(store.WriteFileAtomic(e.Store.UserFile(u.ID), data))
+	fail(store.WritePrivateFileAtomic(filepath.Join(u.Dir, "user.rec"), data))
+	ksData, err := ks.Seal(Passphrase, nil)
+	fail(err)
+	fail(keys.WriteKeystoreFile(filepath.Join(u.Dir, "keystore"), ksData))
+	fail(e.Log.AppendUser(u.ID, data))
+	e.Reopen(u)
+	return gen
 }
 
 // Reopen opens the user's client again (a new process).
@@ -211,6 +266,36 @@ func (e *Env) Mailbox(u *User, name string, addrs ...string) store.ID {
 // tests use it to check how client and server treat them.
 func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason store.Reason, name string) *store.Epoch {
 	e.T.Helper()
+	return e.ForgeEpoch(u, mbx, begin, reason, []store.Member{{Kind: store.MemberUser, ID: u.ID, Gen: 1}}, name)
+}
+
+// Keystore opens the key store of u (the test passphrase). The caller
+// zeroes it.
+func (e *Env) Keystore(u *User) *keys.Keystore {
+	e.T.Helper()
+	ksData, err := keys.ReadKeystoreFile(filepath.Join(u.Dir, "keystore"))
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	ks, err := keys.OpenKeystore(ksData, Passphrase)
+	keys.Wipe(ksData)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	return ks
+}
+
+// ForgeEpoch appends epoch head+1 to mailbox mbx as signer would create
+// it, whether or not the chain rules allow it: begin, reason and the
+// given members (the entry of signer gets its current generation; it is
+// added as a user member if missing, because an epoch.rec names its
+// signer), discards as for ImmediateEpoch when the reason is immediate,
+// fresh keys with a wrap for signer only, folders.gml with name and the
+// inbox, epoch.rec in the log and mailbox.rec pointing to it. It is the
+// tool for forged epochs: an epoch signed by a removed member, a delegate
+// or a recovery recipient listed as a user.
+func (e *Env) ForgeEpoch(signer *User, mbx store.ID, begin time.Time, reason store.Reason, members []store.Member, name string) *store.Epoch {
+	e.T.Helper()
 	fail := func(err error) {
 		e.T.Helper()
 		if err != nil {
@@ -231,17 +316,25 @@ func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason stor
 		headData = data
 	}
 	var discards []uint32
-	for n := uint32(1); n <= m.Epoch; n++ {
-		if !links.Discarded(n) && links.Epoch(n).Begin > begin.UnixMilli() {
-			discards = append(discards, n)
+	if reason.Immediate() {
+		for n := uint32(1); n <= m.Epoch; n++ {
+			if !links.Discarded(n) && links.Epoch(n).Begin > begin.UnixMilli() {
+				discards = append(discards, n)
+			}
 		}
 	}
-	ksData, err := keys.ReadKeystoreFile(filepath.Join(u.Dir, "keystore"))
-	fail(err)
-	ks, err := keys.OpenKeystore(ksData, Passphrase)
-	keys.Wipe(ksData)
-	fail(err)
+	ks := e.Keystore(signer)
 	defer ks.Zero()
+	list := append([]store.Member(nil), members...)
+	found := false
+	for i := range list {
+		if list[i].ID == signer.ID {
+			list[i].Gen, found = ks.Generation, true
+		}
+	}
+	if !found {
+		list = append(list, store.Member{Kind: store.MemberUser, ID: signer.ID, Gen: ks.Generation})
+	}
 	content, err := ecdh.X25519().GenerateKey(rand.Reader)
 	fail(err)
 	meta, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -254,28 +347,28 @@ func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason stor
 	ep := &store.Epoch{
 		MailboxID: mbx, Number: n, Begin: begin.UnixMilli(), Reason: reason, Suite: envelope.Suite1,
 		ContentPub: content.PublicKey(), MetaPub: meta.PublicKey(),
-		Members:  []store.Member{{Kind: store.MemberUser, ID: u.ID, Gen: ks.Generation}},
+		Members:  list,
 		Discards: discards, PrevHash: store.EpochHash(headData),
-		SignerID: u.ID, SignerGen: ks.Generation,
+		SignerID: signer.ID, SignerGen: ks.Generation,
 	}
 	fail(ep.Sign(ks.Identity))
-	signer := &envelope.Signer{Type: envelope.SignerUser, ID: u.ID, Gen: ks.Generation, Key: ks.Identity}
+	sig := &envelope.Signer{Type: envelope.SignerUser, ID: signer.ID, Gen: ks.Generation, Key: ks.Identity}
 	now := e.Clock.Now().UnixMilli()
 	plain, err := ek.Encode()
 	fail(err)
 	wrap, err := envelope.Seal(
-		envelope.Header{Kind: envelope.KindWrap, MailboxID: mbx, Epoch: n, FileID: u.ID, Created: now},
-		[]envelope.Recipient{{Type: envelope.RecipientUserUnwrap, ID: u.ID, Gen: ks.Generation, PublicKey: ks.Unwrap.PublicKey()}},
-		plain, &envelope.SealOptions{Signer: signer})
+		envelope.Header{Kind: envelope.KindWrap, MailboxID: mbx, Epoch: n, FileID: signer.ID, Created: now},
+		[]envelope.Recipient{{Type: envelope.RecipientUserUnwrap, ID: signer.ID, Gen: ks.Generation, PublicKey: ks.Unwrap.PublicKey()}},
+		plain, &envelope.SealOptions{Signer: sig})
 	keys.Wipe(plain)
 	fail(err)
-	fail(e.Store.WriteWrap(mbx, n, u.ID, wrap))
-	list, err := (&store.FolderList{MailboxID: mbx, Epoch: n, Name: name, Folders: []store.Folder{{ID: m.Inbox, Name: client.InboxName}}}).Encode()
+	fail(e.Store.WriteWrap(mbx, n, signer.ID, wrap))
+	fl, err := (&store.FolderList{MailboxID: mbx, Epoch: n, Name: name, Folders: []store.Folder{{ID: m.Inbox, Name: client.InboxName}}}).Encode()
 	fail(err)
 	folders, err := envelope.Seal(
 		envelope.Header{Kind: envelope.KindMeta, MailboxID: mbx, Epoch: n, FileID: m.Inbox, Created: now, Version: 1},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: mbx, Gen: n, PublicKey: ep.MetaPub}},
-		list, &envelope.SealOptions{Signer: signer})
+		fl, &envelope.SealOptions{Signer: sig})
 	fail(err)
 	fail(e.Store.WriteFolders(mbx, n, folders))
 	data, err := e.Store.WriteEpoch(ep)
@@ -285,4 +378,16 @@ func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason stor
 	next.Epoch = n
 	fail(e.Store.WriteMailbox(&next))
 	return ep
+}
+
+// Share shares mailbox mbx of member u with other (2.5), fails the test
+// on an error (also client.ErrPartial) and returns the existing epochs
+// that were wrapped for other.
+func (e *Env) Share(u *User, mbx store.ID, other *User, opts client.ShareOptions) []uint32 {
+	e.T.Helper()
+	wrapped, err := u.Client.Share(mbx, other.ID, opts)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	return wrapped
 }

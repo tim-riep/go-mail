@@ -47,6 +47,30 @@ var (
 	ErrSigner         = errors.New("client: file not signed by an accepted key")
 	ErrWrap           = errors.New("client: epoch keys not available")
 	ErrNotFound       = errors.New("client: mail not found")
+	// ErrNotMember rejects creating an epoch or rewriting folders.gml by
+	// a client that is not a user member (kind 1) of the epochs concerned:
+	// a delegate or a recovery recipient never creates epochs (K2 rule 1)
+	// and never signs folders.gml (section 4, QUESTIONS Q6).
+	ErrNotMember = errors.New("client: only a user member of the mailbox may create epochs or change its folders; a delegate or recovery recipient may not")
+	// ErrReadOnly rejects every change by a client opened with
+	// RecoverRead: the recovery recipient only reads (K3 point 4, Q1).
+	ErrReadOnly = errors.New("client: opened with the recovery key, which only reads")
+	// ErrSelfRevoke rejects revoking oneself: the epoch member-removed
+	// must be signed by a remaining member (K2 rule 2), and the last user
+	// member can never leave.
+	ErrSelfRevoke = errors.New("client: a member cannot revoke itself; another user member must do it, and the last user member never")
+	// ErrRange rejects a share whose period is not a valid range of past
+	// epochs.
+	ErrRange = errors.New("client: invalid period of epochs")
+	// ErrRecovery reports a missing, unconfirmed or mismatching recovery
+	// recipient (K3, Q1).
+	ErrRecovery = errors.New("client: recovery recipient not available")
+	// ErrPartial reports a share that wrapped only some of the requested
+	// existing epochs: an epoch that is not discarded was skipped because
+	// this user is not a user member of it or its keys were not
+	// available. The wraps written stay; the error names only epoch
+	// numbers.
+	ErrPartial = errors.New("client: not every requested epoch was wrapped")
 )
 
 // Config configures a client.
@@ -68,7 +92,27 @@ type Config struct {
 }
 
 func (cfg *Config) check() error {
-	if cfg.Store == nil || cfg.Dir == "" || cfg.Pin == nil || cfg.Log == nil {
+	if cfg.Dir == "" {
+		return fmt.Errorf("client: incomplete configuration")
+	}
+	if err := cfg.checkReader(); err != nil {
+		return err
+	}
+	dir, err := filepath.Abs(cfg.Dir)
+	if err != nil {
+		return err
+	}
+	if rel, err := filepath.Rel(cfg.Store.Root, dir); err == nil && filepath.IsLocal(rel) || dir == cfg.Store.Root {
+		return fmt.Errorf("client: the client directory must not be inside the data directory")
+	}
+	cfg.Dir = dir
+	return nil
+}
+
+// checkReader checks everything but the client directory, which a
+// client opened with RecoverRead does not use.
+func (cfg *Config) checkReader() error {
+	if cfg.Store == nil || cfg.Pin == nil || cfg.Log == nil {
 		return fmt.Errorf("client: incomplete configuration")
 	}
 	if cfg.Pin.Dev && cfg.Log.Verified() {
@@ -80,14 +124,6 @@ func (cfg *Config) check() error {
 	if cfg.Warn == nil {
 		cfg.Warn = func(string) {}
 	}
-	dir, err := filepath.Abs(cfg.Dir)
-	if err != nil {
-		return err
-	}
-	if rel, err := filepath.Rel(cfg.Store.Root, dir); err == nil && filepath.IsLocal(rel) || dir == cfg.Store.Root {
-		return fmt.Errorf("client: the client directory must not be inside the data directory")
-	}
-	cfg.Dir = dir
 	return nil
 }
 
@@ -118,6 +154,14 @@ type mailboxState struct {
 	// verified epoch, all of them planned. It is only read, and moved into
 	// Epochs.
 	Begins map[string]int64 `json:"begins,omitempty"`
+	// Recovery holds, per recovery recipient ID, the SHA-256 (hex) of the
+	// recovery-pub record whose fingerprint the user confirmed on this
+	// device (K3 point 3). Only a confirmed record is used to wrap new
+	// epochs for the recovery recipient. TODO(Q1).
+	Recovery map[string]string `json:"recovery,omitempty"`
+	// Folders holds, per epoch, the highest version of folders.gml seen
+	// (section 7 "Gegen Wiedereinspielen", applied to folders.gml).
+	Folders map[string]uint32 `json:"folders,omitempty"`
 }
 
 // epochMemo is what the client remembers of one epoch.
@@ -162,7 +206,20 @@ type Client struct {
 	me    store.ID
 	state *state
 
-	unlock    func() // releases the lock of the client directory
+	unlock func() // releases the lock of the client directory
+	// rk is set only for a client opened with RecoverRead: it reads with
+	// the recovery key from recovery.wrap, changes nothing and keeps its
+	// state in memory only.
+	rk *recoveryKey
+	// skipLock is set only by tests: the mailbox lock is not taken, to
+	// simulate a lock that is not in force across machines (K2 rule 3).
+	skipLock bool
+	// created holds the epochs written by the running change; they are
+	// remembered in the state once mailbox.rec names them (commitHead).
+	created []*store.Epoch
+	// next is the epoch.rec after the verified chain that the running
+	// change found not adoptable (loadChain with adopt), nil if none.
+	next      *nextEpoch
 	mu        sync.Mutex
 	ingest    map[uint32]ingestKey
 	epochKeys map[epochRef]*store.EpochKeys
@@ -268,6 +325,7 @@ func (c *Client) Close() {
 		c.ks.Zero()
 		c.ks = nil
 	}
+	c.rk = nil
 	if c.unlock != nil {
 		c.unlock()
 		c.unlock = nil
@@ -276,7 +334,21 @@ func (c *Client) Close() {
 
 func (c *Client) warn(format string, args ...any) { c.cfg.Warn(fmt.Sprintf(format, args...)) }
 
-func (c *Client) save() error { return saveState(c.cfg.statePath(), c.state) }
+func (c *Client) save() error {
+	if c.rk != nil {
+		// RecoverRead keeps its state in memory (first contact, 2.7).
+		return nil
+	}
+	return saveState(c.cfg.statePath(), c.state)
+}
+
+// writable rejects changes by a client opened with RecoverRead.
+func (c *Client) writable() error {
+	if c.rk != nil {
+		return ErrReadOnly
+	}
+	return nil
+}
 
 func (c *Client) mailboxState(id store.ID) *mailboxState {
 	ms := c.state.Mailboxes[id.String()]
@@ -289,6 +361,12 @@ func (c *Client) mailboxState(id store.ID) *mailboxState {
 	}
 	if ms.Epochs == nil {
 		ms.Epochs = map[string]*epochMemo{}
+	}
+	if ms.Recovery == nil {
+		ms.Recovery = map[string]string{}
+	}
+	if ms.Folders == nil {
+		ms.Folders = map[string]uint32{}
 	}
 	for k, b := range ms.Begins {
 		if _, ok := ms.Epochs[k]; !ok {

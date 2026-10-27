@@ -988,3 +988,110 @@ func TestTempFilesLocksAndIncompleteEpochs(t *testing.T) {
 		t.Fatal("complete epoch removed")
 	}
 }
+
+// An epoch.rec that can never become valid is replaced only while it is
+// byte-equal to the file the caller judged (task 06c); WriteEpoch stays
+// exclusive.
+func TestReplaceInvalidEpoch(t *testing.T) {
+	s, _ := Init(t.TempDir())
+	tu := newTestUser(t, 1, 1)
+	mbx := ID{4}
+	e1, d1 := newTestEpoch(t, tu, mbx, 1, 1, nil)
+	if _, err := s.WriteEpoch(e1); err != nil {
+		t.Fatal(err)
+	}
+	e2, d2 := newTestEpoch(t, tu, mbx, 2, 2, d1)
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, []byte{}, e2); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing epoch.rec: %v", err)
+	}
+	plant := func(data []byte) {
+		t.Helper()
+		MkdirAll(filepath.Join(s.EpochDir(mbx, 2), "members"))
+		if err := os.WriteFile(s.EpochFile(mbx, 2), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored := func() []byte {
+		t.Helper()
+		b, err := os.ReadFile(s.EpochFile(mbx, 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	junk := []byte("junk")
+	plant(junk)
+	os.WriteFile(s.WrapFile(mbx, 2, tu.user.ID), []byte("w"), 0o600)
+	os.WriteFile(s.FoldersFile(mbx, 2), []byte("f"), 0o600)
+	if _, err := s.WriteEpoch(e2); !errors.Is(err, ErrExists) {
+		t.Fatal("WriteEpoch replaced an epoch.rec")
+	}
+	// Another content than the one judged: nothing is touched.
+	for _, old := range [][]byte{nil, {}, []byte("junk2"), []byte("jun")} {
+		if err := s.ClearInvalidEpoch(mbx, 2, old); !errors.Is(err, ErrExists) {
+			t.Fatalf("clear with %q: %v", old, err)
+		}
+		if _, err := s.ReplaceInvalidEpoch(mbx, 2, old, e2); !errors.Is(err, ErrExists) {
+			t.Fatalf("replace with %q: %v", old, err)
+		}
+	}
+	if !bytes.Equal(stored(), junk) {
+		t.Fatal("epoch.rec changed")
+	}
+	if _, err := os.Stat(s.WrapFile(mbx, 2, tu.user.ID)); err != nil {
+		t.Fatal("wrap removed")
+	}
+	// The replacement must be epoch 2 of this mailbox.
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, junk, e1); !errors.Is(err, ErrRecord) {
+		t.Fatal("epoch 1 written as epoch 2")
+	}
+	if _, err := s.ReplaceInvalidEpoch(ID{5}, 2, junk, e2); !errors.Is(err, ErrRecord) {
+		t.Fatal("epoch of another mailbox written")
+	}
+	if err := s.ClearInvalidEpoch(mbx, 2, junk); err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := os.ReadDir(s.EpochDir(mbx, 2))
+	if len(ents) != 1 || ents[0].Name() != "epoch.rec" || !bytes.Equal(stored(), junk) {
+		t.Fatalf("clear left %v", ents)
+	}
+	data, err := s.ReplaceInvalidEpoch(mbx, 2, junk, e2)
+	if err != nil || !bytes.Equal(data, d2) || !bytes.Equal(stored(), d2) {
+		t.Fatalf("replace: %v", err)
+	}
+	if got, _, err := s.ReadEpoch(mbx, 2); err != nil || got.Number != 2 {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(s.EpochDir(mbx, 2), "content.pub")); err != nil || !bytes.Equal(b, e2.ContentPub.Bytes()) {
+		t.Fatal("content.pub")
+	}
+	// The replacement is replaced no more: its bytes are not the old ones.
+	e2b, _ := newTestEpoch(t, tu, mbx, 2, 3, d1)
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, junk, e2b); !errors.Is(err, ErrExists) || !bytes.Equal(stored(), d2) {
+		t.Fatal("valid epoch replaced")
+	}
+	// An empty file is matched by empty bytes, not by nil.
+	plant(nil)
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, nil, e2); !errors.Is(err, ErrExists) {
+		t.Fatal("empty file taken for an oversized one")
+	}
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, []byte{}, e2); err != nil {
+		t.Fatal(err)
+	}
+	// nil stands for a file larger than MaxRecordFile.
+	big := make([]byte, MaxRecordFile+1)
+	plant(big)
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, big[:MaxRecordFile], e2); !errors.Is(err, ErrExists) {
+		t.Fatal("oversized file matched by its prefix")
+	}
+	if err := s.ClearInvalidEpoch(mbx, 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, nil, e2); err != nil || !bytes.Equal(stored(), d2) {
+		t.Fatalf("oversized: %v", err)
+	}
+	plant(big[:MaxRecordFile])
+	if _, err := s.ReplaceInvalidEpoch(mbx, 2, nil, e2); !errors.Is(err, ErrExists) {
+		t.Fatal("file of MaxRecordFile bytes taken for an oversized one")
+	}
+}

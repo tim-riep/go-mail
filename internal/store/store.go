@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -440,20 +441,112 @@ func (s *Store) WriteEpoch(e *Epoch) ([]byte, error) {
 	if _, err := os.Lstat(s.EpochFile(e.MailboxID, e.Number)); err == nil {
 		return nil, fmt.Errorf("%w: epoch %d", ErrExists, e.Number)
 	}
-	dir := s.EpochDir(e.MailboxID, e.Number)
-	if err := MkdirAll(filepath.Join(dir, "members")); err != nil {
-		return nil, err
-	}
-	// The public key files are copies for readers of section 4; the
-	// signed epoch.rec is authoritative. They are written first so that a
-	// visible epoch.rec always has them.
-	if err := WriteFileAtomic(filepath.Join(dir, "content.pub"), e.ContentPub.Bytes()); err != nil {
-		return nil, err
-	}
-	if err := WriteFileAtomic(filepath.Join(dir, "meta.pub"), e.MetaPub.Bytes()); err != nil {
+	if err := s.writeEpochKeys(e); err != nil {
 		return nil, err
 	}
 	if err := CreateFileAtomic(s.EpochFile(e.MailboxID, e.Number), data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// writeEpochKeys writes content.pub and meta.pub of e. The public key
+// files are copies for readers of section 4; the signed epoch.rec is
+// authoritative. They are written before epoch.rec so that a visible
+// epoch.rec always has them.
+func (s *Store) writeEpochKeys(e *Epoch) error {
+	dir := s.EpochDir(e.MailboxID, e.Number)
+	if err := MkdirAll(filepath.Join(dir, "members")); err != nil {
+		return err
+	}
+	if err := WriteFileAtomic(filepath.Join(dir, "content.pub"), e.ContentPub.Bytes()); err != nil {
+		return err
+	}
+	return WriteFileAtomic(filepath.Join(dir, "meta.pub"), e.MetaPub.Bytes())
+}
+
+// Replacing an epoch.rec that can never become valid (task 06c).
+//
+// Epochs are append-only: WriteEpoch never replaces an epoch.rec. An
+// epoch.rec beyond the head of mailbox.rec that the server never uses and
+// that can never become valid (it does not decode, breaks the chain rules
+// of Chain.Add against the head, or is not signed by its signer according
+// to user.rec) would otherwise block the epoch number for good. The
+// caller, a user member of the head holding the mailbox lock, has found it
+// so; these two functions only make sure that the file is still the one
+// that was judged. old is its content; nil stands for a regular file
+// larger than MaxRecordFile, which can never be decoded. A valid epoch is
+// never passed here: the caller adopts it.
+
+// matchEpochFile reports ErrExists unless epochs/<n>/epoch.rec still is
+// the file described by old.
+func (s *Store) matchEpochFile(id ID, n uint32, old []byte) error {
+	p := s.EpochFile(id, n)
+	if old == nil {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("%w: epoch %d", ErrNotFound, n)
+			}
+			return err
+		}
+		if !fi.Mode().IsRegular() || fi.Size() <= MaxRecordFile {
+			return fmt.Errorf("%w: epoch %d changed", ErrExists, n)
+		}
+		return nil
+	}
+	data, err := ReadFileLimited(p, MaxRecordFile)
+	if errors.Is(err, ErrTooLarge) || err == nil && !bytes.Equal(data, old) {
+		return fmt.Errorf("%w: epoch %d changed", ErrExists, n)
+	}
+	return err
+}
+
+// ClearInvalidEpoch removes every file of epochs/<n>/ except epoch.rec
+// (wraps, folders.gml, public keys and leftovers of an interrupted
+// replacement), if epoch.rec is still the invalid file old (ErrExists
+// otherwise). The caller holds the mailbox lock and writes the files of
+// the replacement next, epoch.rec last with ReplaceInvalidEpoch.
+func (s *Store) ClearInvalidEpoch(id ID, n uint32, old []byte) error {
+	if err := s.matchEpochFile(id, n, old); err != nil {
+		return err
+	}
+	dir := s.EpochDir(id, n)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, ent := range entries {
+		if ent.Name() == "epoch.rec" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, ent.Name())); err != nil {
+			return err
+		}
+	}
+	return SyncDir(dir)
+}
+
+// ReplaceInvalidEpoch replaces epochs/<n>/epoch.rec of mailbox id by e,
+// with content.pub and meta.pub, if the existing epoch.rec is still the
+// invalid file old (ErrExists otherwise; a missing one is ErrNotFound).
+// The comparison and the atomic replacement run under the mailbox lock of
+// the caller. It returns the encoding of e.
+func (s *Store) ReplaceInvalidEpoch(id ID, n uint32, old []byte, e *Epoch) ([]byte, error) {
+	if e == nil || e.MailboxID != id || e.Number != n {
+		return nil, fmt.Errorf("%w: the replacement is not epoch %d of mailbox %s", ErrRecord, n, id)
+	}
+	data, err := e.Encode()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.matchEpochFile(id, n, old); err != nil {
+		return nil, err
+	}
+	if err := s.writeEpochKeys(e); err != nil {
+		return nil, err
+	}
+	if err := WriteFileAtomic(s.EpochFile(id, n), data); err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -467,14 +560,24 @@ func (s *Store) ReadEpoch(id ID, n uint32) (*Epoch, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	e, err := DecodeEpoch(data)
+	e, err := ParseEpoch(id, n, data)
 	if err != nil {
 		return nil, nil, err
 	}
-	if e.MailboxID != id || e.Number != n {
-		return nil, nil, fmt.Errorf("%w: epochs/%d/epoch.rec names mailbox or epoch differently", ErrChain, n)
-	}
 	return e, data, nil
+}
+
+// ParseEpoch decodes data as epochs/<n>/epoch.rec of mailbox id and checks
+// that it names mailbox id and number n, like ReadEpoch.
+func ParseEpoch(id ID, n uint32, data []byte) (*Epoch, error) {
+	e, err := DecodeEpoch(data)
+	if err != nil {
+		return nil, err
+	}
+	if e.MailboxID != id || e.Number != n {
+		return nil, fmt.Errorf("%w: epochs/%d/epoch.rec names mailbox or epoch differently", ErrChain, n)
+	}
+	return e, nil
 }
 
 // WriteWrap writes members/<user>.wrap of epoch n, replacing an older

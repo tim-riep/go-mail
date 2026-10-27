@@ -12,3 +12,22 @@ func (c *Client) FoldersOfEpoch(mbx store.ID, n uint32) (*store.FolderList, erro
 	l, _, err := c.foldersOf(ch, n)
 	return l, err
 }
+
+// SetCrashHook sets the crash hook of the package (see crashHook) until
+// the test ends.
+func SetCrashHook(t interface{ Cleanup(func()) }, f func(point string) bool) {
+	crashHook = f
+	t.Cleanup(func() { crashHook = nil })
+}
+
+// ErrCrashed is the error of a simulated crash.
+var ErrCrashed = errCrashed
+
+// MaxEpochAttempts is the number of attempts of a change that loses the
+// race for an epoch number (K2 rule 3).
+const MaxEpochAttempts = maxEpochAttempts
+
+// WithoutMailboxLock makes c skip the mailbox lock, as if the lock were
+// not in force between two machines, so that a test can let two clients
+// create the same epoch (K2 rule 3).
+func (c *Client) WithoutMailboxLock() { c.skipLock = true }

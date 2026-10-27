@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -54,10 +56,12 @@ func (c *Client) signer() *envelope.Signer {
 }
 
 // sealMeta seals plaintext for the meta key of epoch e, signed by the
-// user (kind meta: mailbox name and folders).
-func (c *Client) sealMeta(e *store.Epoch, fileID store.ID, plain []byte) ([]byte, error) {
+// user (kind meta: mailbox name and folders), with header version
+// version (3.1 field 8). The signature carries no extra fields: the
+// version is in the signed header.
+func (c *Client) sealMeta(e *store.Epoch, fileID store.ID, plain []byte, version uint32) ([]byte, error) {
 	return envelope.Seal(
-		envelope.Header{Kind: envelope.KindMeta, MailboxID: e.MailboxID, Epoch: e.Number, FileID: fileID, Created: c.cfg.Now().UnixMilli(), Version: 1},
+		envelope.Header{Kind: envelope.KindMeta, MailboxID: e.MailboxID, Epoch: e.Number, FileID: fileID, Created: c.cfg.Now().UnixMilli(), Version: version},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: e.MailboxID, Gen: e.Number, PublicKey: e.MetaPub}},
 		plain, &envelope.SealOptions{Signer: c.signer()})
 }
@@ -90,18 +94,134 @@ func (c *Client) currentFolders(ch *chain) folderSource {
 	}
 }
 
+// newMember is a member of a new epoch with the public key its wrap is
+// sealed for: the current unwrap key of a user or delegate from its
+// user.rec, or the unwrap key of the recovery recipient.
+type newMember struct {
+	store.Member
+	unwrap *ecdh.PublicKey
+}
+
+// errRace reports that epoch n could not be written because an epoch.rec
+// with that number exists that is neither adopted nor replaced: another
+// client wrote it first (K2 rule 3), or it is invalid but cannot be
+// replaced (errKept). It wraps store.ErrExists. The change is created
+// again on the basis of the chain as it is then.
+var errRace = errors.New("client: epoch number taken")
+
+// errKept marks an errRace for an epoch.rec that did not verify but is not
+// known to be invalid for good (an error reading it or the signer's
+// user.rec, or the log), so it is not replaced.
+var errKept = errors.New("client: invalid epoch kept")
+
+func lostRace(n uint32, err error) error {
+	return fmt.Errorf("%w: another client created epoch %d first: %w", errRace, n, err)
+}
+
+// taken returns the errRace for an existing epoch.rec n, with the reason
+// why it was neither adopted nor replaced.
+func (c *Client) taken(mbx store.ID, n uint32, err error) error {
+	if x := c.next; x != nil && x.mailbox == mbx && x.number == n && !x.replace {
+		return fmt.Errorf("%w: %w: epoch %d exists, did not verify (%v) and is not replaced: %w", errRace, errKept, n, x.cause, err)
+	}
+	return lostRace(n, err)
+}
+
+// nextEpoch is the epoch.rec after the end of the verified chain, beyond
+// the head of mailbox.rec, that loadChain with adopt did not adopt.
+type nextEpoch struct {
+	mailbox store.ID
+	number  uint32
+	// replace: it can never become valid (task 06c, readBeyond).
+	replace bool
+	// data is its content if replace (nil: larger than
+	// store.MaxRecordFile).
+	data []byte
+	// cause is why it was not adopted.
+	cause error
+}
+
+// replaceable reports whether the epoch.rec of epoch n, which createEpoch
+// is about to create after prev, exists and can never become valid, and
+// returns its content for store.ReplaceInvalidEpoch (nil: larger than
+// store.MaxRecordFile). Only an epoch.rec beyond the head of mailbox.rec
+// is ever replaced (the server never uses it), and only by a user member
+// of the head under the mailbox lock (the callers of createEpoch):
+//
+//   - the epoch.rec after the verified chain that loadChain found invalid
+//     for good (c.next): it does not decode, names another mailbox or
+//     number, breaks store.Chain.Add against the head, or is not signed
+//     by its signer according to user.rec;
+//   - an epoch.rec n after an epoch n-1 that this change wrote (or one of
+//     the chain whose successor was missing): it does not decode, names
+//     another mailbox or number, or does not name prev as its predecessor
+//     (store.Chain.Add rule 3 against the head prev), so it can never
+//     follow the epoch n-1 on disk.
+//
+// An epoch.rec that names prev and decodes may be valid: that is a race
+// (K2 rule 3), never replaced; one that verifies is adopted by loadChain
+// and never reaches createEpoch.
+func (c *Client) replaceable(mbx store.ID, n uint32, prev []byte) (bool, []byte, error) {
+	if x := c.next; x != nil && x.mailbox == mbx && x.number == n {
+		return x.replace, x.data, nil
+	}
+	if prev == nil {
+		return false, nil, nil
+	}
+	data, err := store.ReadFileLimited(c.st.EpochFile(mbx, n), store.MaxRecordFile)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false, nil, nil
+	case errors.Is(err, store.ErrTooLarge):
+		return true, nil, nil
+	case err != nil:
+		return false, nil, err
+	}
+	if data == nil {
+		data = []byte{}
+	}
+	e, err := store.ParseEpoch(mbx, n, data)
+	if err != nil || e.PrevHash != store.EpochHash(prev) {
+		return true, data, nil
+	}
+	return false, nil, nil
+}
+
 // createEpoch creates, signs and writes epoch n with fresh random keys
-// (2.4: random, not derived), the wrap for this user and folders.gml of
-// the epoch. prev is the encoded predecessor (nil for epoch 1). The caller
-// holds the lock.
-func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.Reason, prev []byte, folders folderSource) (*store.Epoch, []byte, error) {
+// (2.4: random, not derived): a wrap for every member and the recovery
+// recipient, folders.gml of the epoch with the current name and folders,
+// then epoch.rec. prev is the encoded predecessor (nil for epoch 1),
+// discards the epochs an immediate epoch discards (2.4 rule 1). The
+// caller holds the lock and has checked that this user is a user member
+// of the predecessor (K2 rule 1).
+//
+// Every file is created exclusively: an existing wrap or folders.gml in
+// the directory of epoch n, or an existing epoch.rec, means that another
+// client is creating epoch n as well, and the result is errRace (K2 rule
+// 3); a file of another client is never replaced. Leftovers of a crashed
+// attempt (files without epoch.rec) are removed first (DECISIONS D57); an
+// existing epoch.rec is never touched, unless it lies beyond the head of
+// mailbox.rec and can never become valid (replaceable): then the other
+// files of its directory are removed first and epoch.rec is replaced as
+// the last file (store.ReplaceInvalidEpoch).
+func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.Reason, prev []byte, members []newMember, discards []uint32, folders folderSource) (*store.Epoch, []byte, error) {
 	fi, err := folders()
 	if err != nil {
 		return nil, nil, err
 	}
-	// Leftovers of a crashed attempt (wrap and public keys without
-	// epoch.rec) are removed; an existing epoch.rec is never touched.
-	if err := c.st.RemoveIncompleteEpoch(mbx, n); err != nil {
+	replace, old, err := c.replaceable(mbx, n, prev)
+	if err != nil {
+		return nil, nil, err
+	}
+	if replace {
+		err = c.st.ClearInvalidEpoch(mbx, n, old)
+	} else {
+		err = c.st.RemoveIncompleteEpoch(mbx, n)
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrExists) {
+			return nil, nil, c.taken(mbx, n, err)
+		}
 		return nil, nil, err
 	}
 	content, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -117,12 +237,14 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 		return nil, nil, err
 	}
 	defer ek.Zero()
+	list := make([]store.Member, 0, len(members))
+	for _, m := range members {
+		list = append(list, m.Member)
+	}
 	e := &store.Epoch{
 		MailboxID: mbx, Number: n, Begin: begin, Reason: reason, Suite: envelope.Suite1,
 		ContentPub: content.PublicKey(), MetaPub: meta.PublicKey(),
-		// Phase 1: mailboxes have exactly one member. The member list is
-		// a list, so further members need no format change.
-		Members:  []store.Member{{Kind: store.MemberUser, ID: c.me, Gen: c.ks.Generation}},
+		Members: list, Discards: discards,
 		SignerID: c.me, SignerGen: c.ks.Generation,
 	}
 	if prev != nil {
@@ -131,46 +253,105 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 	if err := e.Sign(c.ks.Identity); err != nil {
 		return nil, nil, err
 	}
-	// The wrap first: an epoch.rec without a wrap for its member would be
-	// unusable.
+	// The wraps first: an epoch.rec without a wrap for its members would
+	// be unusable.
 	plain, err := ek.Encode()
 	if err != nil {
 		return nil, nil, err
 	}
-	wrap, err := envelope.Seal(
-		envelope.Header{Kind: envelope.KindWrap, MailboxID: mbx, Epoch: n, FileID: c.me, Created: c.cfg.Now().UnixMilli()},
-		[]envelope.Recipient{{Type: envelope.RecipientUserUnwrap, ID: c.me, Gen: c.ks.Generation, PublicKey: c.ks.Unwrap.PublicKey()}},
-		plain, &envelope.SealOptions{Signer: c.signer()})
-	keys.Wipe(plain)
-	if err != nil {
-		return nil, nil, err
+	defer keys.Wipe(plain)
+	for _, m := range members {
+		if err := c.createWrap(mbx, n, m, plain); err != nil {
+			if errors.Is(err, store.ErrExists) {
+				return nil, nil, lostRace(n, err)
+			}
+			return nil, nil, err
+		}
 	}
-	if err := c.st.WriteWrap(mbx, n, c.me, wrap); err != nil {
-		return nil, nil, err
+	if crash("epoch-wraps") {
+		return nil, nil, errCrashed
 	}
 	// folders.gml of this epoch with the current name and folders, also
 	// before epoch.rec (section 4, S20).
-	list, err := (&store.FolderList{MailboxID: mbx, Epoch: n, Name: fi.name, Folders: fi.folders}).Encode()
+	fl, err := (&store.FolderList{MailboxID: mbx, Epoch: n, Name: fi.name, Folders: fi.folders}).Encode()
 	if err != nil {
 		return nil, nil, err
 	}
-	sealedFolders, err := c.sealMeta(e, fi.inbox, list)
+	sealedFolders, err := c.sealMeta(e, fi.inbox, fl, 1)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := c.st.WriteFolders(mbx, n, sealedFolders); err != nil {
+	if err := store.MkdirAll(c.st.EpochDir(mbx, n)); err != nil {
 		return nil, nil, err
 	}
-	data, err := c.st.WriteEpoch(e)
-	if err != nil {
+	if err := store.CreateFileAtomic(c.st.FoldersFile(mbx, n), sealedFolders); err != nil {
+		if errors.Is(err, store.ErrExists) {
+			return nil, nil, lostRace(n, err)
+		}
 		return nil, nil, err
+	}
+	if crash("epoch-folders") {
+		return nil, nil, errCrashed
+	}
+	var data []byte
+	if replace {
+		data, err = c.st.ReplaceInvalidEpoch(mbx, n, old, e)
+	} else {
+		data, err = c.st.WriteEpoch(e)
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrExists) {
+			return nil, nil, c.taken(mbx, n, err)
+		}
+		return nil, nil, err
+	}
+	if replace {
+		c.warn("WARNUNG: Die ungültige Epoche %d von %s wurde ersetzt.", n, mbx)
 	}
 	// TODO(phase3-translog): epoch.rec into the log (2.7).
 	if err := c.cfg.Log.AppendEpoch(mbx, n, data); err != nil {
 		return nil, nil, err
 	}
-	c.mailboxState(mbx).Epochs[fmt.Sprint(n)] = &epochMemo{Begin: begin, Immediate: reason.Immediate()}
+	// Remembered once it is part of the head (commitHead).
+	c.created = append(c.created, e)
+	if crash("epoch-written") {
+		return nil, nil, errCrashed
+	}
 	return e, data, nil
+}
+
+// sealWrap seals the epoch keys plain of epoch n for member m (2.4
+// "Verpackung für Mitglieder", DECISIONS D61): kind wrap, file ID the ID
+// of the recipient, one recipient entry (user-unwrap with the user's
+// generation, or recovery with the recovery ID and generation 1), signed
+// with this user's identity.
+func (c *Client) sealWrap(mbx store.ID, n uint32, m newMember, plain []byte) ([]byte, error) {
+	rt := envelope.RecipientUserUnwrap
+	if m.Kind == store.MemberRecovery {
+		// TODO(Q1): file ID, ID and generation of the recovery entry.
+		rt = envelope.RecipientRecovery
+	}
+	return envelope.Seal(
+		envelope.Header{Kind: envelope.KindWrap, MailboxID: mbx, Epoch: n, FileID: m.ID, Created: c.cfg.Now().UnixMilli()},
+		[]envelope.Recipient{{Type: rt, ID: m.ID, Gen: m.Gen, PublicKey: m.unwrap}},
+		plain, &envelope.SealOptions{Signer: c.signer()})
+}
+
+// createWrap creates members/<id>.wrap or members/recovery.wrap of epoch
+// n for m. An existing wrap is never replaced (store.ErrExists).
+func (c *Client) createWrap(mbx store.ID, n uint32, m newMember, plain []byte) error {
+	data, err := c.sealWrap(mbx, n, m, plain)
+	if err != nil {
+		return err
+	}
+	if m.Kind == store.MemberRecovery {
+		return c.st.CreateRecoveryWrap(mbx, n, data)
+	}
+	p := c.st.WrapFile(mbx, n, m.ID)
+	if err := store.MkdirAll(filepath.Dir(p)); err != nil {
+		return err
+	}
+	return store.CreateFileAtomic(p, data)
 }
 
 // CreateMailbox creates a mailbox with one member, this user (2.4): epoch
@@ -178,6 +359,9 @@ func (c *Client) createEpoch(mbx store.ID, n uint32, begin int64, reason store.R
 // folders.gml holding the name and the inbox, and mailbox.rec as the last
 // file.
 func (c *Client) CreateMailbox(name string) (store.ID, error) {
+	if err := c.writable(); err != nil {
+		return store.ID{}, err
+	}
 	name = strings.TrimSpace(store.CleanText(name, 256))
 	if name == "" {
 		return store.ID{}, fmt.Errorf("client: empty mailbox name")
@@ -198,7 +382,8 @@ func (c *Client) CreateMailbox(name string) (store.ID, error) {
 	now := c.cfg.Now()
 	fi := &folderInfo{name: name, inbox: inbox, folders: []store.Folder{{ID: inbox, Name: InboxName}}}
 	folders := func() (*folderInfo, error) { return fi, nil }
-	e1, d1, err := c.createEpoch(id, 1, now.UnixMilli(), store.ReasonRegular, nil, folders)
+	me := []newMember{{Member: store.Member{Kind: store.MemberUser, ID: c.me, Gen: c.ks.Generation}, unwrap: c.ks.Unwrap.PublicKey()}}
+	e1, d1, err := c.createEpoch(id, 1, now.UnixMilli(), store.ReasonRegular, nil, me, nil, folders)
 	if err != nil {
 		return store.ID{}, err
 	}
@@ -210,6 +395,8 @@ func (c *Client) CreateMailbox(name string) (store.ID, error) {
 		return store.ID{}, err
 	}
 	ms := c.mailboxState(id)
+	c.remember(ms, c.created)
+	c.created = nil
 	ms.Epoch, ms.EpochHash = head.Number, hashHex(headData)
 	return id, c.save()
 }
@@ -220,9 +407,13 @@ func hashHex(data []byte) string {
 }
 
 // supply appends the epochs of the next SupplyMonths months after head
-// and returns the new head (2.4). The caller holds the lock.
+// and returns the new head (2.4). Every new epoch has the members of head,
+// users and delegates with their current generation, and the recovery
+// recipient; after an immediate epoch that is the supply without the
+// removed member (2.4 rule 5). The caller holds the lock.
 func (c *Client) supply(mbx store.ID, head *store.Epoch, headData []byte, folders folderSource) (*store.Epoch, []byte, error) {
 	now := c.cfg.Now()
+	var members []newMember
 	for k := 1; k <= SupplyMonths; k++ {
 		begin := monthStart(now, k)
 		if head.Begin >= begin {
@@ -233,7 +424,13 @@ func (c *Client) supply(mbx store.ID, head *store.Epoch, headData []byte, folder
 		if min := now.Add(ImmediateDelay).UnixMilli(); begin < min {
 			begin = min
 		}
-		e, d, err := c.createEpoch(mbx, head.Number+1, begin, store.ReasonRegular, headData, folders)
+		if members == nil {
+			var err error
+			if members, err = c.resolveMembers(mbx, head.Members); err != nil {
+				return nil, nil, err
+			}
+		}
+		e, d, err := c.createEpoch(mbx, head.Number+1, begin, store.ReasonRegular, headData, members, nil, folders)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -256,6 +453,45 @@ type chain struct {
 	// chain that are not discarded, for the epoch rule of a broken chain
 	// (DECISIONS D50).
 	beyond []*epochMemo
+	// links is the structural chain checker over epochs (store.Chain).
+	links *store.Chain
+	// next is the epoch.rec after the end of the chain, beyond the head
+	// of mailbox.rec, that was not adopted (adopt only), nil if none.
+	next *nextEpoch
+}
+
+// head returns the newest epoch of the verified chain and its encoding.
+func (ch *chain) head() (*store.Epoch, []byte) {
+	if len(ch.epochs) == 0 {
+		return nil, nil
+	}
+	return ch.epochs[len(ch.epochs)-1], ch.data[len(ch.data)-1]
+}
+
+// current returns the epoch in force at now (milliseconds): the newest
+// epoch that is not discarded and has begun; nil if none has.
+func (ch *chain) current(now int64) *store.Epoch {
+	var cur *store.Epoch
+	for _, e := range ch.epochs {
+		if e.Begin <= now && !ch.discarded[e.Number] {
+			cur = e
+		}
+	}
+	return cur
+}
+
+// discardsAfter returns the epochs an immediate epoch beginning at begin
+// must discard (2.4 rule 1): exactly the epochs of the chain that are not
+// yet discarded and begin later, in ascending order. The structural chain
+// decides what is discarded, as store.Chain checks it.
+func (ch *chain) discardsAfter(begin int64) []uint32 {
+	var out []uint32
+	for _, e := range ch.epochs {
+		if !ch.links.Discarded(e.Number) && e.Begin > begin {
+			out = append(out, e.Number)
+		}
+	}
+	return out
 }
 
 func (ch *chain) epoch(n uint32) *store.Epoch {
@@ -323,7 +559,18 @@ func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.Public
 // highest epoch this client has seen, and that epoch unchanged.
 // Warnings are emitted for every violation; the returned chain holds the
 // valid prefix.
-func (c *Client) verifyChain(id store.ID) (*chain, error) {
+func (c *Client) verifyChain(id store.ID) (*chain, error) { return c.loadChain(id, false) }
+
+// loadChain verifies the chain like verifyChain. The head of the chain is
+// mailbox.rec, for the client as for the server (which uses only the
+// epochs up to it): epochs after it are not used and not remembered.
+// With adopt (only under the mailbox lock, before a change or Sync)
+// valid epochs after the head are verified and added as well, as they
+// exist after a crash between writing epochs and mailbox.rec (D57); the
+// caller makes them the head with commitHead, and only then are they
+// remembered. The remembered head never rises above mailbox.rec, so an
+// interrupted change is a repair for Sync, not a rollback.
+func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 	m, err := c.st.ReadMailbox(id)
 	if err != nil {
 		c.warn("WARNUNG: mailbox.rec von %s fehlt oder ist ungültig.", id)
@@ -338,37 +585,54 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 		head = ms.Epoch
 	}
 	links := store.NewChain()
+	ch.links = links
 	for n := uint32(1); ; n++ {
-		e, data, err := c.st.ReadEpoch(id, n)
+		if n > head && !adopt {
+			break
+		}
 		if n > head {
 			// Epochs beyond the head of mailbox.rec exist after a crash
 			// between writing epochs and mailbox.rec (supply, 2.4). They
 			// are adopted if they verify like any other epoch; a missing
-			// or invalid one simply ends the chain.
-			if errors.Is(err, store.ErrNotFound) {
-				break
-			}
-			if err == nil {
-				err = c.checkEpoch(links, e, data)
-			}
-			if err != nil {
-				c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %v", n, id, err)
-				break
-			}
-		} else {
-			if err == nil {
-				err = c.checkEpoch(links, e, data)
-			}
-			if err != nil {
-				c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %v", id, n, err)
-				if ch.err == nil {
-					ch.err = fmt.Errorf("%w: epoch %d: %v", store.ErrChain, n, err)
+			// or invalid one simply ends the chain, and an invalid one is
+			// noted for createEpoch (ch.next).
+			e, data, next := c.readBeyond(links, id, n)
+			if next != nil {
+				if !errors.Is(next.cause, store.ErrNotFound) {
+					c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %v", n, id, next.cause)
+					ch.next = next
 				}
 				break
 			}
+			ch.epochs = append(ch.epochs, e)
+			ch.data = append(ch.data, data)
+			continue
+		}
+		e, data, err := c.st.ReadEpoch(id, n)
+		if err == nil {
+			err = c.checkEpoch(links, e, data)
+		}
+		if err != nil {
+			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %v", id, n, err)
+			if ch.err == nil {
+				ch.err = fmt.Errorf("%w: epoch %d: %v", store.ErrChain, n, err)
+			}
+			break
 		}
 		ch.epochs = append(ch.epochs, e)
 		ch.data = append(ch.data, data)
+	}
+	// links holds only epochs of ch.epochs: an epoch that passed
+	// store.Chain.Add but failed a later check is dropped again, so that
+	// its discards do not count (discardsAfter).
+	if h := links.Head(); h != nil && (len(ch.epochs) == 0 || h != ch.epochs[len(ch.epochs)-1]) {
+		links = store.NewChain()
+		for i, e := range ch.epochs {
+			if err := links.Add(e, ch.data[i]); err != nil {
+				return nil, err
+			}
+		}
+		ch.links = links
 	}
 	// The highest epoch seen must still be the same file.
 	if ms.Epoch > 0 {
@@ -384,25 +648,22 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 			ch.err = fmt.Errorf("%w: epoch %d replaced", store.ErrChain, ms.Epoch)
 		}
 	}
-	// Remember begin and reason of every verified epoch, the first values
-	// seen, and every epoch the verified chain discards. A remembered
-	// discard stays even if the chain no longer shows it.
-	changed := false
+	// Remember begin and reason of every verified epoch up to the head,
+	// the first values seen, and every epoch they discard. A remembered
+	// discard stays even if the chain no longer shows it. Adopted epochs
+	// after the head count for this chain but are remembered only once
+	// they are the head (commitHead).
 	ch.discarded = map[uint32]bool{}
 	for _, e := range ch.epochs {
-		k := fmt.Sprint(e.Number)
-		if _, ok := ms.Epochs[k]; !ok {
-			ms.Epochs[k] = &epochMemo{Begin: e.Begin, Immediate: e.Reason.Immediate()}
-			changed = true
-		}
 		for _, n := range e.Discards {
 			ch.discarded[n] = true
-			if m := ms.Epochs[fmt.Sprint(n)]; m != nil && !m.Discarded {
-				m.Discarded = true
-				changed = true
-			}
 		}
 	}
+	upto := ch.epochs
+	if uint64(len(upto)) > uint64(head) {
+		upto = upto[:head]
+	}
+	changed := c.remember(ms, upto)
 	for k, m := range ms.Epochs {
 		n, err := strconv.ParseUint(k, 10, 32)
 		if err != nil || n == 0 {
@@ -414,8 +675,7 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 			ch.beyond = append(ch.beyond, m)
 		}
 	}
-	if ch.err == nil && len(ch.epochs) > 0 && uint32(len(ch.epochs)) > ms.Epoch {
-		top := len(ch.epochs)
+	if top := min(len(ch.epochs), int(m.Epoch)); ch.err == nil && top > 0 && uint32(top) > ms.Epoch {
 		ms.Epoch, ms.EpochHash = uint32(top), hashHex(ch.data[top-1])
 		changed = true
 	}
@@ -425,6 +685,26 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 		}
 	}
 	return ch, nil
+}
+
+// remember notes begin and effect of each epoch in ms (the first values
+// seen) and marks the epochs they discard. It reports whether ms changed.
+func (c *Client) remember(ms *mailboxState, epochs []*store.Epoch) bool {
+	changed := false
+	for _, e := range epochs {
+		k := fmt.Sprint(e.Number)
+		if _, ok := ms.Epochs[k]; !ok {
+			ms.Epochs[k] = &epochMemo{Begin: e.Begin, Immediate: e.Reason.Immediate()}
+			changed = true
+		}
+		for _, n := range e.Discards {
+			if m := ms.Epochs[fmt.Sprint(n)]; m != nil && !m.Discarded {
+				m.Discarded = true
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // checkEpochRule applies the epoch rule of 2.4 to a file of epoch e
@@ -478,6 +758,55 @@ func (c *Client) checkEpochRule(ch *chain, e *store.Epoch, received int64) error
 	return nil
 }
 
+// readBeyond reads and verifies epoch n after the end of the chain links,
+// beyond the head of mailbox.rec, with the checks of checkEpoch. If it
+// does not verify, it returns why (a missing file: store.ErrNotFound) and
+// whether it can never become valid (task 06c), for createEpoch: it does
+// not decode or names another mailbox or number (also a file larger than
+// store.MaxRecordFile), it breaks store.Chain.Add against the head, or
+// the signer's user.rec has no such generation or the signature does not
+// verify with its key. Other failures (reading the file or user.rec, the
+// log) do not prove anything; such a file is kept.
+func (c *Client) readBeyond(links *store.Chain, id store.ID, n uint32) (*store.Epoch, []byte, *nextEpoch) {
+	x := &nextEpoch{mailbox: id, number: n}
+	data, err := store.ReadFileLimited(c.st.EpochFile(id, n), store.MaxRecordFile)
+	if err != nil {
+		x.cause, x.replace = err, errors.Is(err, store.ErrTooLarge)
+		return nil, nil, x
+	}
+	if data == nil {
+		data = []byte{}
+	}
+	invalid := func(err error) (*store.Epoch, []byte, *nextEpoch) {
+		x.cause, x.replace, x.data = err, true, data
+		return nil, nil, x
+	}
+	e, err := store.ParseEpoch(id, n, data)
+	if err != nil {
+		return invalid(err)
+	}
+	if err := links.Add(e, data); err != nil {
+		return invalid(err)
+	}
+	if u, _, err := c.st.ReadUser(e.SignerID); err == nil && u.Generation(e.SignerGen) == nil {
+		return invalid(fmt.Errorf("%w: unknown generation %d", ErrSigner, e.SignerGen))
+	}
+	pub, err := c.userKey(e.SignerID, e.SignerGen, data)
+	if err != nil {
+		x.cause = err
+		return nil, nil, x
+	}
+	if err := e.VerifySignature(pub); err != nil {
+		return invalid(err)
+	}
+	// TODO(phase3-translog): epoch.rec included in the log (2.7).
+	if err := c.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
+		x.cause = err
+		return nil, nil, x
+	}
+	return e, data, nil
+}
+
 func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) error {
 	if err := links.Add(e, data); err != nil {
 		return err
@@ -494,9 +823,18 @@ func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) err
 }
 
 // keysFor returns the private keys of epoch e of the verified chain ch
-// from this user's wrap (2.4): e not discarded, the wrap signed by a
-// member of the epoch, for this user's current unwrap key, and matching
-// the public keys of the signed epoch.rec.
+// (2.4, DECISIONS D61). A client has access to epoch e if a wrap for it
+// exists (members/<user-id>.wrap, or members/recovery.wrap for a client
+// opened with RecoverRead) that
+//   - is for this client's current unwrap key (or the recovery key),
+//   - names the mailbox, epoch e and the recipient in its header,
+//   - is signed by a user member (kind 1) of e with a valid generation,
+//   - holds keys whose public parts equal those of the signed epoch.rec.
+//
+// Membership of the reader is not required: a delegate for a past period
+// reads with wraps of epochs it is not a member of (2.5). Membership of
+// kind 1 is required only to create epochs and to write folders.gml. A
+// discarded epoch is never used (2.4 rule 3).
 func (c *Client) keysFor(ch *chain, e *store.Epoch) (*store.EpochKeys, error) {
 	if ch.discarded[e.Number] {
 		return nil, fmt.Errorf("%w: epoch %d", ErrDiscardedEpoch, e.Number)
@@ -508,16 +846,13 @@ func (c *Client) keysFor(ch *chain, e *store.Epoch) (*store.EpochKeys, error) {
 	if k != nil {
 		return k, nil
 	}
-	if _, ok := e.Member(c.me); !ok {
-		return nil, fmt.Errorf("%w: not a member of epoch %d", ErrWrap, e.Number)
-	}
-	data, err := c.st.ReadWrap(e.MailboxID, e.Number, c.me)
+	data, key, err := c.readOwnWrap(e.MailboxID, e.Number)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrWrap, err)
 	}
 	f, plain, err := envelope.Open(data, envelope.OpenOptions{
 		ExpectedSuite: e.Suite,
-		Key:           envelope.RecipientKey{Type: envelope.RecipientUserUnwrap, ID: c.me, Gen: c.ks.Generation, PrivateKey: c.ks.Unwrap},
+		Key:           key,
 		ResolveSigner: func(ref envelope.SignerRef) (ed25519.PublicKey, error) {
 			if ref.Type != envelope.SignerUser {
 				return nil, ErrSigner
@@ -534,7 +869,7 @@ func (c *Client) keysFor(ch *chain, e *store.Epoch) (*store.EpochKeys, error) {
 	}
 	defer keys.Wipe(plain)
 	h := f.Header
-	if h.Kind != envelope.KindWrap || h.MailboxID != e.MailboxID || h.Epoch != e.Number || h.FileID != c.me {
+	if h.Kind != envelope.KindWrap || h.MailboxID != e.MailboxID || h.Epoch != e.Number || h.FileID != key.ID {
 		return nil, fmt.Errorf("%w: wrap header does not match its location", ErrMismatch)
 	}
 	k, err = store.DecodeEpochKeys(plain)
@@ -552,6 +887,56 @@ func (c *Client) keysFor(ch *chain, e *store.Epoch) (*store.EpochKeys, error) {
 	return k, nil
 }
 
+// readOwnWrap reads the wrap of epoch n meant for this client and returns
+// it with the key that opens it: members/<me>.wrap for the current
+// generation, or members/recovery.wrap for a client opened with
+// RecoverRead (recipient type 4, TODO(Q1)).
+func (c *Client) readOwnWrap(mbx store.ID, n uint32) ([]byte, envelope.RecipientKey, error) {
+	if c.rk != nil {
+		data, err := c.st.ReadRecoveryWrap(mbx, n)
+		return data, envelope.RecipientKey{Type: envelope.RecipientRecovery, ID: c.rk.id, Gen: store.RecoveryGen, PrivateKey: c.rk.unwrap}, err
+	}
+	data, err := c.st.ReadWrap(mbx, n, c.me)
+	return data, envelope.RecipientKey{Type: envelope.RecipientUserUnwrap, ID: c.me, Gen: c.ks.Generation, PrivateKey: c.ks.Unwrap}, err
+}
+
+// ownWrapExists reports whether a wrap for this client exists in epoch n
+// (without checking it).
+func (c *Client) ownWrapExists(mbx store.ID, n uint32) bool {
+	p := c.st.WrapFile(mbx, n, c.me)
+	if c.rk != nil {
+		p = c.st.RecoveryWrapFile(mbx, n)
+	}
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+// listed reports whether epoch e names this client in its member list,
+// as a user, a delegate or (for RecoverRead) the recovery recipient.
+func (c *Client) listed(e *store.Epoch) bool {
+	for _, m := range e.Members {
+		if c.rk != nil {
+			if m.Kind == store.MemberRecovery && m.ID == c.rk.id {
+				return true
+			}
+		} else if m.Kind != store.MemberRecovery && m.ID == c.me {
+			return true
+		}
+	}
+	return false
+}
+
+// isUserMember reports whether this client is a user member (kind 1) of
+// e, the condition for creating the epoch after e and for writing
+// folders.gml of e (K2 rule 1). A client opened with RecoverRead never is.
+func (c *Client) isUserMember(e *store.Epoch) bool {
+	if c.rk != nil || e == nil {
+		return false
+	}
+	_, ok := e.Member(c.me)
+	return ok
+}
+
 // Sync keeps the epoch supply of every mailbox of this client (2.4): if
 // no epoch has begun in the current month (the server noted a fallback),
 // an epoch with immediate begin is created, then epochs for the next
@@ -567,66 +952,55 @@ func (c *Client) Sync() error {
 }
 
 func (c *Client) syncMailbox(id store.ID) error {
-	unlock, err := c.st.LockMailbox(id)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	ch, err := c.verifyChain(id)
-	if err != nil {
-		return err
-	}
-	if ch.err != nil {
-		// Never extend a chain that did not verify.
-		return ch.err
-	}
-	if len(ch.epochs) == 0 {
-		return fmt.Errorf("%w: no epochs", store.ErrChain)
-	}
-	head, headData := ch.epochs[len(ch.epochs)-1], ch.data[len(ch.data)-1]
-	folders := c.currentFolders(ch)
-	now := c.cfg.Now()
-	note, err := c.st.ReadNote(id)
-	if err != nil {
-		c.warn("WARNUNG: Vermerk des Servers zu %s ist ungültig.", id)
-	}
-	// The epoch in force now is the last one that has begun and is not
-	// discarded.
-	var current *store.Epoch
-	for _, e := range ch.epochs {
-		if e.Begin <= now.UnixMilli() && !ch.discarded[e.Number] {
-			current = e
+	return c.mutate(id, func(ch *chain) error {
+		head, headData := ch.head()
+		if !c.isUserMember(head) {
+			// The supply is created by user members only (K2 rule 1); a
+			// delegate, a former member or a reader of past epochs only
+			// verifies the chain, and repairs mailbox.rec if valid epochs
+			// follow it.
+			if head.Number != ch.mailbox.Epoch {
+				return c.commitHead(ch, head, headData)
+			}
+			return nil
 		}
-	}
-	if current != nil && head == current && monthOf(current.Begin) < monthOf(now.UnixMilli()) {
-		if note != nil {
-			c.warn("Hinweis: Für %s fehlte eine Epoche; der Server hat %d Mails mit Epoche %d angenommen.", id, note.Count, note.Epoch)
+		folders := c.currentFolders(ch)
+		now := c.cfg.Now()
+		note, err := c.st.ReadNote(id)
+		if err != nil {
+			c.warn("WARNUNG: Vermerk des Servers zu %s ist ungültig.", id)
 		}
-		e, d, err := c.createEpoch(id, head.Number+1, now.Add(ImmediateDelay).UnixMilli(), store.ReasonRegular, headData, folders)
+		// The epoch in force now is the last one that has begun and is not
+		// discarded.
+		current := ch.current(now.UnixMilli())
+		if current != nil && head == current && monthOf(current.Begin) < monthOf(now.UnixMilli()) {
+			if note != nil {
+				c.warn("Hinweis: Für %s fehlte eine Epoche; der Server hat %d Mails mit Epoche %d angenommen.", id, note.Count, note.Epoch)
+			}
+			members, err := c.resolveMembers(id, head.Members)
+			if err != nil {
+				return err
+			}
+			e, d, err := c.createEpoch(id, head.Number+1, now.Add(ImmediateDelay).UnixMilli(), store.ReasonRegular, headData, members, nil, folders)
+			if err != nil {
+				return err
+			}
+			head, headData = e, d
+		}
+		head, headData, err = c.supply(id, head, headData, folders)
 		if err != nil {
 			return err
 		}
-		head, headData = e, d
-	}
-	head, headData, err = c.supply(id, head, headData, folders)
-	if err != nil {
-		return err
-	}
-	if head.Number != ch.mailbox.Epoch {
-		m := *ch.mailbox
-		m.Epoch = head.Number
-		if err := c.st.WriteMailbox(&m); err != nil {
+		if err := c.commitHead(ch, head, headData); err != nil {
 			return err
 		}
-	}
-	if note != nil && monthOf(head.Begin) >= monthOf(now.UnixMilli()) {
-		if err := c.st.RemoveNote(id); err != nil {
-			return err
+		if note != nil && monthOf(head.Begin) >= monthOf(now.UnixMilli()) {
+			if err := c.st.RemoveNote(id); err != nil {
+				return err
+			}
 		}
-	}
-	ms := c.mailboxState(id)
-	ms.Epoch, ms.EpochHash = head.Number, hashHex(headData)
-	return c.save()
+		return nil
+	})
 }
 
 // MailboxName decrypts the name of a mailbox from folders.gml of the
@@ -662,14 +1036,18 @@ func (c *Client) folders(ch *chain) ([]store.Folder, error) {
 }
 
 // folderList opens epochs/<n>/folders.gml of the newest epoch of the
-// verified chain that is not discarded and this user is a member of
+// verified chain that is not discarded and this client has access to
 // (section 4: "Ein Client liest die Liste der neuesten Epoche, auf die er
-// Zugriff hat") and returns it with the inbox, its file ID.
+// Zugriff hat") and returns it with the inbox, its file ID. The epoch is
+// the newest one that names this client as a member or holds a wrap for
+// it; if its wrap does not open, the list is not read from an older epoch
+// instead (a deleted or damaged wrap must not roll back the folders).
 func (c *Client) folderList(ch *chain) (*store.FolderList, store.ID, error) {
 	var e *store.Epoch
 	for i := len(ch.epochs) - 1; i >= 0 && e == nil; i-- {
-		if _, ok := ch.epochs[i].Member(c.me); ok && !ch.discarded[ch.epochs[i].Number] {
-			e = ch.epochs[i]
+		x := ch.epochs[i]
+		if !ch.discarded[x.Number] && (c.listed(x) || c.ownWrapExists(ch.mailbox.ID, x.Number)) {
+			e = x
 		}
 	}
 	if e == nil {
@@ -681,40 +1059,72 @@ func (c *Client) folderList(ch *chain) (*store.FolderList, store.ID, error) {
 // foldersOf opens epochs/<n>/folders.gml of epoch n of the verified
 // chain; the folders of a discarded epoch are never read (2.4 rule 3).
 func (c *Client) foldersOf(ch *chain, n uint32) (*store.FolderList, store.ID, error) {
+	l, inbox, _, err := c.foldersAt(ch, n)
+	return l, inbox, err
+}
+
+// foldersAt is foldersOf that also returns the version of the file.
+// folders.gml of an epoch is rewritten whenever a member changes the
+// folders (section 4); each rewrite raises its header version by one, and
+// the client remembers the highest version seen per epoch and rejects an
+// older one (like metadata, section 7 "Gegen Wiedereinspielen"), so the
+// server cannot put back an older list.
+func (c *Client) foldersAt(ch *chain, n uint32) (*store.FolderList, store.ID, uint32, error) {
+	l, inbox, v, err := c.readFolders(ch, n)
+	if err != nil {
+		return nil, store.ID{}, 0, err
+	}
+	ms := c.mailboxState(ch.mailbox.ID)
+	k := fmt.Sprint(n)
+	if seen := ms.Folders[k]; v < seen {
+		c.warn("WARNUNG: folders.gml der Epoche %d von %s ist älter als bereits gesehen und wird nicht verwendet.", n, ch.mailbox.ID)
+		return nil, store.ID{}, 0, fmt.Errorf("%w: folders.gml of epoch %d version %d, seen %d", ErrReplay, n, v, seen)
+	} else if v > seen {
+		ms.Folders[k] = v
+		if err := c.save(); err != nil {
+			return nil, store.ID{}, 0, err
+		}
+	}
+	return l, inbox, v, nil
+}
+
+func (c *Client) readFolders(ch *chain, n uint32) (*store.FolderList, store.ID, uint32, error) {
 	id := ch.mailbox.ID
 	e, err := ch.usable(n)
 	if err != nil {
-		return nil, store.ID{}, err
+		return nil, store.ID{}, 0, err
 	}
 	data, err := c.st.ReadFolders(id, e.Number)
 	if err != nil {
-		return nil, store.ID{}, err
+		return nil, store.ID{}, 0, err
 	}
 	// folders.gml carries the inbox ID as its file ID; the inbox entry is
 	// checked below against the list itself.
 	f, err := envelope.Parse(data)
 	if err != nil {
-		return nil, store.ID{}, err
+		return nil, store.ID{}, 0, err
 	}
 	if f.Header.Epoch != e.Number {
-		return nil, store.ID{}, fmt.Errorf("%w: folders.gml of epoch %d is for epoch %d", ErrMismatch, e.Number, f.Header.Epoch)
+		return nil, store.ID{}, 0, fmt.Errorf("%w: folders.gml of epoch %d is for epoch %d", ErrMismatch, e.Number, f.Header.Epoch)
 	}
 	inbox := store.ID(f.Header.FileID)
 	plain, err := c.openUserMeta(ch, data, inbox)
 	if err != nil {
-		return nil, store.ID{}, err
+		return nil, store.ID{}, 0, err
 	}
 	defer keys.Wipe(plain)
 	l, err := store.DecodeFolders(id, e.Number, plain)
 	if err != nil {
-		return nil, store.ID{}, err
+		return nil, store.ID{}, 0, err
 	}
 	for _, fo := range l.Folders {
 		if fo.Name == InboxName && fo.ID == inbox {
-			return l, inbox, nil
+			// The version is part of the signed header (envelope checks
+			// field 8 is at least 1 for kind meta).
+			return l, inbox, f.Header.Version, nil
 		}
 	}
-	return nil, store.ID{}, fmt.Errorf("%w: folders.gml names no inbox", ErrMismatch)
+	return nil, store.ID{}, 0, fmt.Errorf("%w: folders.gml names no inbox", ErrMismatch)
 }
 
 // inbox returns the inbox from the signed folders.gml (D56). mailbox.rec
