@@ -172,9 +172,9 @@ func TestServeLog(t *testing.T) {
 	defer cancel()
 	addrs := make(chan string, 1)
 	done := make(chan int, 1)
-	var serr bytes.Buffer
+	var sout, serr lockedBuffer
 	go func() {
-		done <- run(ctx2, append(append([]string(nil), base...), "--pin", s.pin, "--log-listen", "127.0.0.1:0"), &out, &serr,
+		done <- run(ctx2, append(append([]string(nil), base...), "--pin", s.pin, "--log-listen", "127.0.0.1:0"), &sout, &serr,
 			func(_, log string) { addrs <- log })
 	}()
 	var logAddr string

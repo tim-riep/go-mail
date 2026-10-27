@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,11 +75,12 @@ func TestCommands(t *testing.T) {
 	// serve starts and stops with the context.
 	ctx2, cancel := context.WithCancel(ctx)
 	done := make(chan int)
+	var sout, serr lockedBuffer
 	go func() {
-		done <- run(ctx2, serve("--data", data, "--listen", "127.0.0.1:0", "--ingest-key", ingestKey), &out, &errb, func(string, string) { cancel() })
+		done <- run(ctx2, serve("--data", data, "--listen", "127.0.0.1:0", "--ingest-key", ingestKey), &sout, &serr, func(string, string) { cancel() })
 	}()
 	if code := <-done; code != 0 {
-		t.Fatalf("serve: %d %s", code, errb.String())
+		t.Fatalf("serve: %d %s", code, serr.String())
 	}
 	// invite create prints a code.
 	out.Reset()
@@ -119,14 +121,34 @@ func (s *logSetup) serveArgs() []string {
 		"--pin", s.pin, "--log-listen", "127.0.0.1:0"}
 }
 
+// lockedBuffer is a bytes.Buffer behind a mutex, for the output of a
+// server that runs in another goroutine: its log side keeps writing
+// through slog (loghttp.(*Server).Tick) while the test reads.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // start runs a server on s until the test ends and returns once it
-// listens.
-func (s *logSetup) start(t *testing.T) *bytes.Buffer {
+// listens. The returned buffer receives the server's log while it runs.
+func (s *logSetup) start(t *testing.T) *lockedBuffer {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
 	done := make(chan int, 1)
-	var out, errb bytes.Buffer
+	var out, errb lockedBuffer
 	go func() {
 		done <- run(ctx, s.serveArgs(), &out, &errb, func(string, string) { close(ready) })
 	}()
