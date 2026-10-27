@@ -17,6 +17,15 @@ func fileGroup(fi fs.FileInfo) (int, bool) {
 	return int(st.Gid), true
 }
 
+// fileOwner returns the user ID of the owner of fi.
+func fileOwner(fi fs.FileInfo) (int, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
 // inGroup reports whether the process belongs to group gid.
 func inGroup(gid int) bool {
 	if os.Getegid() == gid {

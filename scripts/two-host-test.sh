@@ -16,6 +16,17 @@
 # must not exist yet, their directories must (task 16b finding 3).
 # TODO(task-15b): pin and witness of a real ceremony.
 #
+# Production path (task 15h, docs/RUNBOOK.md "Erstinstallation"): a
+# build without the tag gomail_dev has no "gomail-ceremony init --dev".
+# There the real ceremony runs offline, "gomail-server init --data <dir>
+# --pin <pin> [--witnesses <export>/platform/witnesses.rec]" creates the
+# empty data directory (rights 2770, platform/witnesses.rec from the
+# pin, nothing else), "gomail-ceremony publish --from <export> --data
+# <dir> --pin <pin>" writes the certificates into it and its log, and
+# the server starts with that pin. This script keeps the development
+# ceremony of the test build for step b (internal/e2e
+# TestInitProduction runs the production path).
+#
 # Local mode (no NFS, no second machine, no root, no second user):
 #
 #   scripts/two-host-test.sh --local [--bin DIR] [--log-helper FILE] [--out DIR]

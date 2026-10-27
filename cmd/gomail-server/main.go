@@ -1,12 +1,26 @@
 // Command gomail-server is the SMTP server of go-mail (9.2) and the
 // operator of the transparency log (2.7, task 11):
 //
+//	gomail-server init --data <dir> --pin <file> [--witnesses <file>]
 //	gomail-server serve --data <dir> --listen 127.0.0.1:2525 --ingest-key <file>
 //	                    --pin <file> --log-listen 127.0.0.1:<port> [--head-interval 1h]
 //	                    [--require-client-lock]
 //	gomail-server invite create --data <dir>
 //	gomail-server address add <address> --mailbox <id> --data <dir> --admin-key <file> --pin <file>
 //	gomail-server log repair --data <dir> --pin <file>
+//
+// init (task 15h, init.go) creates an empty data directory after
+// section 4 with the rights of 9.1 and platform/witnesses.rec from the
+// pin, and nothing else; "gomail-ceremony publish" then writes the
+// certificates into it and its log, and serve starts on it. It is the
+// only way of a production build to create a data directory. It follows
+// no symbolic link at --data or the last element of its parent and
+// works relative to descriptors (task 15k).
+//
+// A development pin (gomail-ceremony init --dev) is refused by every
+// command of a build without the tag gomail_dev with exit status 2,
+// before any lock or log (readPin, checkDevPin, task 15k); a build with
+// it warns.
 //
 // serve always runs with the transparency log (task 15: there is no
 // switch to run without it; tests use package testenv and
@@ -74,6 +88,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -102,6 +117,7 @@ func main() {
 }
 
 const usage = `Aufruf:
+  gomail-server init --data <dir> --pin <datei> [--witnesses <witnesses.rec>]
   gomail-server serve --data <dir> [--listen 127.0.0.1:2525] --ingest-key <datei>
                       --pin <datei> --log-listen <adresse> [--head-interval 1h]
                       [--hostname <name>] [--isolated-test-network] [--require-client-lock]
@@ -135,6 +151,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, onReady r
 		return 2
 	}
 	switch args[0] {
+	case "init":
+		return initCmd(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return serve(ctx, args[1:], stderr, onReady)
 	case "invite":
@@ -211,7 +229,11 @@ func checkListen(addr string, isolated bool) error {
 // outside the data directory (translog Options.Identities: never from
 // files in the data directory). Pin and data directory are compared with
 // their symbolic links resolved; a pin inside it is a usageError, and
-// the pin is read through its resolved path.
+// the pin is read through its resolved path (readPinFile: a FIFO or a
+// device is refused, never waited for). A development pin is a
+// usageError in a build without the development ceremony (checkDevPin,
+// task 15k finding 1); every server command reads its pin here before it
+// takes a lock or opens the log.
 func readPin(path, root string) (*store.PlatformPin, []translog.Identity, error) {
 	rp, inside, err := outsideData(path, root, "Pin")
 	if err != nil {
@@ -220,15 +242,88 @@ func readPin(path, root string) (*store.PlatformPin, []translog.Identity, error)
 	if inside {
 		return nil, nil, usageError{"der Pin darf nicht im Datenverzeichnis liegen"}
 	}
-	pin, err := store.ReadPlatformPin(rp)
+	pin, err := readPinFile(rp)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Pin: %w", err)
+		return nil, nil, err
+	}
+	if err := checkDevPin(pin); err != nil {
+		return nil, nil, err
 	}
 	ids := make([]translog.Identity, 0, len(pin.Identities))
 	for _, id := range pin.Identities {
 		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: id.Pub})
 	}
 	return pin, ids, nil
+}
+
+// devPinRefused is the message for a development pin in a build without
+// the development ceremony (task 15k finding 1).
+const devPinRefused = "der Pin ist ein Entwicklungs-Pin (gomail-ceremony init --dev); ein Produktionsbuild (ohne Build-Tag gomail_dev) verweigert ihn"
+
+// devPinWarning is printed by a build with the development ceremony when
+// it runs with a development pin.
+const devPinWarning = "WARNUNG: Entwicklungs-Pin (gomail-ceremony init --dev), nur in einem Testbuild; nie mit echten Mails verwenden."
+
+// checkDevPin refuses a development pin (dev = 1) with a usageError
+// unless this build has the development ceremony (ceremony.DevBuild, tag
+// gomail_dev). Such a pin names a platform whose root key was generated
+// in one piece by "gomail-ceremony init --dev"; a production build never
+// serves, assigns addresses or repairs a log under it (fail closed, no
+// warning only).
+func checkDevPin(pin *store.PlatformPin) error {
+	if pin.Dev && !ceremony.DevBuild {
+		return usageError{devPinRefused}
+	}
+	return nil
+}
+
+// readPinFile reads and decodes a pin file (readRegular, store.MaxPinFile).
+func readPinFile(path string) (*store.PlatformPin, error) {
+	data, err := readRegular(path, store.MaxPinFile)
+	if err != nil {
+		return nil, fmt.Errorf("Pin: %w", err)
+	}
+	pin, err := store.DecodePlatformPin(data)
+	if err != nil {
+		return nil, fmt.Errorf("Pin: %w", err)
+	}
+	return pin, nil
+}
+
+// readRegular reads path, which must be a regular file of at most max
+// bytes, as store.ReadFileLimited does, but opens it with O_NONBLOCK
+// (task 15k finding 3): a FIFO or a device given as --pin or --witnesses
+// is refused as not regular after the open, which returns at once, and
+// never blocks the program. The size is checked before anything is
+// allocated.
+func readRegular(path string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", store.ErrNotFound, filepath.Base(path))
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s ist keine reguläre Datei", filepath.Base(path))
+	}
+	if fi.Size() > max {
+		return nil, fmt.Errorf("%w: %s has %d bytes, at most %d", store.ErrTooLarge, filepath.Base(path), fi.Size(), max)
+	}
+	// Read at most max+1 bytes: the file may grow after Stat.
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("%w: %s grew beyond %d bytes", store.ErrTooLarge, filepath.Base(path), max)
+	}
+	return data, nil
 }
 
 // readWitnesses reads platform/witnesses.rec, the server's working copy
@@ -284,6 +379,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	if err != nil {
 		return fail(stderr, err)
 	}
+	// The pin first (task 15k finding 1): a development pin in a
+	// production build stops serve before any check, lock or log.
+	pin, ids, err := readPin(*pinFile, st.Root)
+	if err != nil {
+		return fail(stderr, err)
+	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	if err := checkDataDir(st, logger); err != nil {
 		return fail(stderr, err)
@@ -300,7 +401,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 		return fail(stderr, err)
 	}
 	defer keys.Wipe(key)
-	op, side, signer, err := openLogSide(st, *pinFile, key, *headInterval, logger)
+	op, side, signer, err := openLogSide(st, pin, ids, key, *headInterval, logger)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -380,14 +481,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	}
 }
 
-// openLogSide reads the pin, checks platform/ against it
+// openLogSide checks platform/ against the pin read by readPin
 // (checkPlatformPin), opens the operator log of the pin and the log
-// side of the server (task 11) and returns the log signer of key.
-func openLogSide(st *store.Store, pinFile string, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, note.Signer, error) {
-	pin, ids, err := readPin(pinFile, st.Root)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+// side of the server (task 11) and returns the log signer of key. A
+// development pin reaches it only in a build with the development
+// ceremony, which warns.
+func openLogSide(st *store.Store, pin *store.PlatformPin, ids []translog.Identity, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, note.Signer, error) {
 	if pin.Dev {
 		logger.Warn("development pin (gomail-ceremony init --dev)")
 	}
@@ -466,6 +565,9 @@ func address(args []string, stdout, stderr io.Writer) int {
 	pin, ids, err := readPin(*pinFile, st.Root)
 	if err != nil {
 		return fail(stderr, err)
+	}
+	if pin.Dev {
+		fmt.Fprintln(stderr, devPinWarning)
 	}
 	tl, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin})
 	if err != nil {
@@ -624,6 +726,9 @@ func logCmd(args []string, stdout, stderr io.Writer) int {
 	pin, ids, err := readPin(*pinFile, st.Root)
 	if err != nil {
 		return fail(stderr, err)
+	}
+	if pin.Dev {
+		fmt.Fprintln(stderr, devPinWarning)
 	}
 	// No server may run meanwhile (9.1: the server lock).
 	release, err := st.HoldRoleLock(store.RoleServer)

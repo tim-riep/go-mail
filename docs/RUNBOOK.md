@@ -211,6 +211,69 @@ rm -rf /tmp/gomail-demo
 | `WARNUNG: Mail ... wird nicht verarbeitet` | eine Prüfung aus Abschnitt 7 ist fehlgeschlagen; die Mail wird nicht angezeigt |
 | `452 4.3.1` beim Einliefern | weniger als 10 % freier Platz im Datenverzeichnis |
 
+## Erstinstallation
+
+Der Produktionsweg ohne Entwicklungszeremonie (Auftrag 15h, SPEC-ISSUES S80): Programme ohne Build-Tag `gomail_dev` gebaut (`go build -o <bin>/ ./cmd/...`), Plattform-Root nur in Shamir-Anteilen. Die Abschnitte 1 und 2 oben beschreiben dagegen die Entwicklungszeremonie (`init --dev`, nur im Testbuild). `TestInitProduction` in `internal/e2e` führt diese Folge mit Programmen ohne `gomail_dev` aus (die Zeremonie über die Testseams, ohne Terminal). Platzhalter in spitzen Klammern; keine Beispielwerte übernehmen.
+
+1. **Zeugenschlüssel** (auf dem Zeugenhost, vor der Zeremonie): je Zeuge
+
+   ```
+   gomail-witness keygen --name <zeuge> --key <zeugenschlüssel>
+   ```
+
+   Der private Schlüssel bleibt auf dem Zeugenhost (0600). Die ausgegebene Verifier-Zeile ist öffentlich und geht zur Zeremonie.
+
+2. **Zeremonie offline** (Rechner ohne Netzwerk, Uhr vorher stellen, Standardein- und -ausgabe ein Terminal):
+
+   ```
+   gomail-ceremony init --shares 3-of-5 --out <export> --keys <schlüssel> --origin <origin> \
+       --witness <zeuge>=<verifier-zeile> [--witness ...] --min-witnesses <k>
+   ```
+
+   Die Anteile erscheinen nur auf dem Bildschirm. Ergebnis: `<export>/platform/` (öffentliche Schlüssel, Zertifikate, `witnesses.rec`), `<export>/identity-1.pin` und in `<schlüssel>` die privaten Schlüssel `admin-1.key` und `ingest-1.key` (0600). Danach den Rechner ausschalten.
+
+3. **Pin und Schlüssel verteilen:** `<export>` (nur öffentliche Dateien) und `identity-1.pin` auf den Server-Host, außerhalb des künftigen Datenverzeichnisses; `ingest-1.key` auf den Server-Host (0600, außerhalb des Datenverzeichnisses); `admin-1.key` zum Administrator; `identity-1.pin` auf getrenntem Weg zu jedem Client (`gomailctl --platform`). Die Zeugen behalten ihre privaten Schlüssel; sie bekommen Origin und, nach Schritt 5, den Prüfschlüssel des Logs.
+
+4. **Datenverzeichnis anlegen** (Server-Host, als Benutzer der Gruppe `gomail`):
+
+   ```
+   gomail-server init --data <datenverzeichnis> --pin <pin> --witnesses <export>/platform/witnesses.rec
+   ```
+
+   `init` legt ein leeres Datenverzeichnis nach Abschnitt 4 an (`platform/`, `users/`, `invites/`, `mailboxes/`, `spool/`, `work/`, `locks/`, leeres `log/`; Rechte 2770) und schreibt nur `platform/witnesses.rec` (0660): ohne `--witnesses` aus dem Pin, mit `--witnesses` die Bytes aus `--witnesses` (die Datei muss genau Zeugen und Quorum des Pins enthalten; die Ausgabe nennt die Quelle). Es verweigert: ein vorhandenes, nicht leeres Verzeichnis, ein fehlendes Elternverzeichnis (nur die letzte Stufe wird angelegt), `--data` als symbolischen Link und ein Elternverzeichnis, dessen letzte Stufe ein symbolischer Link ist (den Pfad ohne Link angeben), einen nicht lesbaren oder ungültigen Pin, `--pin` oder `--witnesses`, die keine reguläre Datei sind (etwa eine FIFO), einen Entwicklungs-Pin (im Produktionsbuild) und Rechte oder eine Gruppe, die nicht passen (der Prozess muss der Gruppe des Verzeichnisses angehören; was es dann angelegt hat, entfernt es wieder, und nur das). Wird der Pfad während `init` ersetzt, bricht es ab, ohne Fremdes zu ändern. Die Gruppe wählt der Betreiber: ein leeres Verzeichnis mit der Gruppe `gomail` vorher anlegen, oder ein Elternverzeichnis mit setgid und Gruppe `gomail`.
+
+5. **Veröffentlichen** (Server-Host, Server angehalten):
+
+   ```
+   gomail-ceremony publish --from <export> --data <datenverzeichnis> --pin <pin>
+   ```
+
+   `publish` schreibt Schlüssel und Zertifikate nach `platform/` und trägt die Zertifikate ins Log ein; es legt kein Datenverzeichnis an.
+
+6. **Zeuge** (Zeugenhost): Prüfschlüssel des Logs aus `<datenverzeichnis>/platform/ingest-1.pub` bilden (note-Format `gomail-log+<hash>+<schlüssel>`, wie `scripts/two-host-test.sh` ihn bildet):
+
+   ```
+   pub=<datenverzeichnis>/platform/ingest-1.pub
+   h=$({ printf 'gomail-log\n\001'; cat "$pub"; } | sha256sum | cut -c1-8)
+   k=$({ printf '\001'; cat "$pub"; } | base64 | tr -d '\n')
+   echo "gomail-log+$h+$k"
+   gomail-witness serve --log http://<log-adresse> --log-key <prüfschlüssel> --origin <origin> \
+       --key <zeugenschlüssel> --state <zustandsverzeichnis>
+   ```
+
+   Der Zeuge fragt das Log in Abständen ab und wartet, bis der Server erreichbar ist.
+
+7. **Server:**
+
+   ```
+   gomail-server serve --data <datenverzeichnis> --listen 127.0.0.1:2525 --ingest-key <ingest-1.key> \
+       --pin <pin> --log-listen <log-adresse> [--require-client-lock]
+   ```
+
+   Vor `publish` startet der Server nicht (keine Zertifikate). Mit einem anderen Pin als dem der Zeremonie verweigert er den Start. Einen Entwicklungs-Pin (`init --dev`) verweigern `serve`, `address add` und `log repair` im Produktionsbuild mit Exit-Status 2, bevor sie sperren oder das Log öffnen.
+
+8. **Clients:** Einladung (`gomail-server invite create --data <datenverzeichnis>`), dann auf dem Client `gomailctl keygen` und `gomailctl register --invite <code>` mit `--platform <pin>`, weiter wie in den Abschnitten 3 bis 8.
+
 ## Zwei Maschinen
 
 Der Test nach 9.1 (Abnahme, 10.2) läuft mit `scripts/two-host-test.sh`. Auftrag 19 ergänzt diesen Abschnitt; hier stehen nur Voraussetzungen und Aufrufe.

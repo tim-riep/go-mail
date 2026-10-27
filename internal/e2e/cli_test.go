@@ -42,6 +42,9 @@ func TestMain(m *testing.M) {
 	if binDir != "" {
 		os.RemoveAll(binDir)
 	}
+	if prodDir != "" {
+		os.RemoveAll(prodDir)
+	}
 	os.Exit(code)
 }
 
