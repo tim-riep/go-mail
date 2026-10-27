@@ -14,16 +14,18 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Zahl: 46 neue Punkte, davon 36 klarstellend und 10 offen.
 - Offen: S24 (Q8), S25 (Q8), S27 (Q9), S28 (Q4, Q8), S35 (ohne Frage), S43 (Q1), S44 (Q1), S48 (Q4), S52 (ohne Frage, `TODO(ask)`), S69 (ohne Frage, `TODO(ask)`). Dazu bleibt S23 offen (Q12).
 - Bestehende Punkte: S11 und S13 sind im Client umgesetzt (Auftrag 06b), S23 hängt an Q12; der Stand steht jeweils unten. S22 ist mit Version 1.4 erledigt (Kopffeld 8 `version`, K6); der Server prüft jede eigene Signatur ohne Schlüssel nach dem Schreiben (`ingest.VerifyMeta`, D73). S15 ist teilweise erledigt: 5.1 nennt seit Version 1.3 25 MiB; Header (1.000.000 Byte) und Mindestrate (1.000 Byte/s) bleiben dezimal (D67).
-- Der Stand im Code bezieht sich auf den Arbeitszweig. Wo ein Punkt Auftrag 06b, 09 oder 10 nennt, liegt der Code noch in dessen Worktree und ist nicht zusammengeführt.
-- Zu prüfen: S34 (Quellen und Code widersprechen sich).
+- Der Stand im Code bezieht sich auf den Arbeitszweig. Die hier genannten Aufträge sind dort zusammengeführt: 09 mit Commit dbb667b, 10 mit ef8e408, 06b mit a296a8b.
+- S34 ist geprüft (Nachtrag nach Auftrag 18): Der Code lehnt einen symbolischen Link im letzten Element von `--keys` ab, wie D82 (4) es festhält; der Stand steht unten.
 
 ## Stand Welle 4
 - Grundlage: weiter Version 1.4. Neu sind S70 bis S87 aus den Aufträgen 06b bis 06h, 10 und 15b, 15c und 15d, 16 bis 16c, aus Auftrag 14 (Nachtrag und Pflichtpunkte) sowie aus Q13, Q15, Q18 und Q19.
-- Zahl: 18 neue Punkte, davon 9 klarstellend und 9 offen.
-- Offen: S71 (Q13), S72 (Q15), S73 (Q18), S75 (ohne Frage), S76 (Q19), S77 (ohne Frage, `TODO(ask)`), S80 (ohne Frage), S83 (ohne Frage), S87 (ohne Frage).
+- Zahl: 18 neue Punkte, davon 11 klarstellend und 7 offen. S77 und S80 waren offen; sie sind seit Auftrag 15f bzw. 15h im Code gelöst und bleiben als klarstellende Punkte für 9.2 stehen.
+- Offen: S71 (Q13), S72 (Q15), S73 (Q18), S75 (ohne Frage), S76 (Q19), S83 (ohne Frage), S87 (ohne Frage).
 - Q16 und Q17 sind Haltepunkte zum Ablauf, keine Fragen an die Spezifikation; ihr fachlicher Inhalt steht in S70, S74 und S78.
-- Der Code zu S76, S77, S78 und S86 (Auftrag 15b) liegt noch in dessen Worktree (Commit 11259ef) und ist nicht zusammengeführt.
+- Der Code zu S76, S77, S78 und S86 (Auftrag 15b, 15f, 15g) ist mit Commit 52ec07a im Arbeitszweig. Der Code zu S80 (Auftrag 15h, 15k) kam mit c931a31, der zu S70, S71 und S73 aus Auftrag 14 mit c4e9014.
 - Präzisiert werden S24 (durch S76), S32 (S78), S56 (S79), S65 (S82 bis S84) und S67 (S86); dort steht jeweils ein Verweis.
+- Nachtrag nach Auftrag 18: Neu sind S88 bis S92 aus D85, D86, D88 und Q11. Zahl: 5 neue Punkte, davon 2 klarstellend und 3 offen. Offen: S88 (ohne Frage), S89 (ohne Frage), S90 (Q11).
+- Zusammen seit Welle 4: 23 Punkte (S70 bis S92), davon 13 klarstellend und 10 offen.
 
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
@@ -107,7 +109,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
   3. Jedes Wort muss danach exakt in der Liste stehen. Abkürzungen auf die ersten vier Buchstaben (in BIP-39 eindeutig) werden **nicht** angenommen: eine Abkürzung wäre ein zweiter Weg zum selben Seed und eine weitere Fehlerquelle, und die Wörter werden ohnehin selten getippt.
   4. Ein unbekanntes Wort wird mit seiner Position gemeldet, ohne es auszugeben; die Prüfsumme deckt vertauschte oder falsche, aber gültige Wörter.
   Damit akzeptiert `keygen` etwa " Abandon " für "abandon", aber nie ein anderes Wort. Kein Format ändert sich.
-- Stand M1: Version 1.3 übernimmt den Vorschlag (2.2 „Eingabe von Wörtern“). Im Client umgesetzt in Auftrag 06b (`client.normalizeWords`, `oneWord`, `normalizeList`, verwendet in `keygen`, `DeviceLost` und `Restore`); `keys` und `shamir` bleiben strikt. Auftrag 10 bringt dieselbe Regel als Paket `internal/words`, das die Funktionen des Clients ersetzen soll.
+- Stand M1: Version 1.3 übernimmt den Vorschlag (2.2 „Eingabe von Wörtern“). Im Client umgesetzt in Auftrag 06b (`client.normalizeWords`, `oneWord`, `normalizeList`, verwendet in `keygen`, `DeviceLost` und `Restore`); `keys` und `shamir` bleiben strikt. Seit Auftrag 14 (Commit c4e9014) rufen `oneWord` und `normalizeList` des Clients das Paket `internal/words` aus Auftrag 10 auf; `normalizeWords` gibt es nicht mehr.
 
 ## S12 Suite 2 ändert die Größen im Empfängerteil
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 senkt die Höchstzahl der Empfänger auf 4; vier Einträge der Suite 2 (je etwa 1,2 KiB) passen in die 16 KiB. Die Feldgrößen je Suite sind erst beim Einführen von Suite 2 festzulegen.
@@ -129,6 +131,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
   4. In 2.2 Punkt 4 und in Abschnitt 7 sollte diese Trennung ausdrücklich stehen.
   Kein Format ändert sich; Phase 2 baut damit `device lost`, Phase 3 die Log-Prüfung.
 - Stand M1: Version 1.3 übernimmt den Vorschlag (2.2 Punkt 4). Umgesetzt in Auftrag 06b: Gegensignatur der eigenen Verpackung (`client.writeAccept`, `checkAccept`, Datensatz `wrap-accept`) und Neuausstellung bei `device lost` (`client.DeviceLost`). Für Metadaten mit Benutzersignatur und für Indexsegmente gilt noch die strengste Lesart (`TODO(S13)` in `client/read.go` und `client/index.go`, Auftrag 09); Auftrag 09b überträgt die Regel aus 06b, sonst fallen nach `device lost` Mails aus `List`.
+- Stand nach Auftrag 18: Auftrag 09b wurde beim Planen der Welle 4 übersehen. Er wurde erst nach Auftrag 14 gestartet und läuft (`docs/ORCHESTRATION.md`, Verlauf 18). Bis dahin gilt die strengste Lesart: `TODO(S13)` in `internal/client/read.go` (`checkMeta`, Metadaten ab Version 2) und in `internal/client/index.go` (`readSegment`). Nach `device lost` fallen deshalb Mails mit eigener Benutzersignatur aus `List`.
 
 ## S14 Signaturdomäne der Plattformdatensätze verdoppelt das Präfix
 - Erledigt in Phase 1, Schritt 0 (Commit d8d7afa): Version 1.2 legt in 3.7 Kurznamen für alle Signaturen fest; `keys` ist umgestellt, Vektoren neu erzeugt (DECISIONS D47).
@@ -213,7 +216,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: klarstellend.
 - Stelle: 2.3 „Für einen neuen Ingest-Schlüssel … neue Zeremonie“; 2.4 „Vorlauf und Uhren“ Regel 4.
 - Problem: Gilt die neue Generation ab der Zeremonie, gehen Mails verloren, die der Server zwischen Zeremonie und Umschalten noch mit dem alten Schlüssel signiert (die Clients lehnen sie nach S25 ab).
-- Stand M1: `gomail-ceremony ingest-rotate --valid-from` setzt den geplanten Umschaltzeitpunkt; ein Zeitpunkt in der Vergangenheit wird abgelehnt (`ceremony.checkValidFrom`, Auftrag 10). Auf dem Arbeitszweig steht dazu noch `TODO(ask)` an `ceremony.IngestRotate`.
+- Stand M1: `gomail-ceremony ingest-rotate --valid-from` setzt den geplanten Umschaltzeitpunkt; ein Zeitpunkt in der Vergangenheit wird abgelehnt (`ceremony.checkValidFrom`, Auftrag 10). Seit Auftrag 15b (Commit 52ec07a) steht dazu kein `TODO(ask)` mehr im Code.
 - Vorschlag: In 2.3 festhalten, dass `valid_from` des neuen Zertifikats der geplante Umschaltzeitpunkt ist und nie in der Vergangenheit liegt.
 
 ## S27 Zeitliche Bindung von Adresszuordnungen
@@ -267,10 +270,11 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Vorschlag: Die Grenze in 2.3 nennen; die Zeremonie läuft ohnehin auf einem Rechner, der danach ausgeschaltet wird (Schritt 5).
 
 ## S34 Schlüsselverzeichnis als symbolischer Link
-- Art: klarstellend, **zu prüfen**.
+- Art: klarstellend.
 - Stelle: 2.3 „Zeremonie“; 9.2 `gomail-ceremony` (die Option `--keys` nennt die Spezifikation nicht).
 - Problem: Nicht festgelegt ist, wie die Zeremonie das Verzeichnis für private Schlüssel prüft.
-- Stand M1: Laut Prüfung von 10b wird `--keys` als Link aufgelöst und das Ziel geprüft (0700, eigener Benutzer, `O_NOFOLLOW` beim Öffnen); Q14 nennt dasselbe Verhalten als offenen Hinweis. Der Code in Auftrag 10 (Stand 10d) lehnt dagegen einen Link im letzten Element ab (`ceremony.checkKeyFiles` mit `Lstat`, `openKeyDir` mit `O_NOFOLLOW`). Welche Aussage gilt, ist zu prüfen.
+- Stand M1: Laut Prüfung von 10b wird `--keys` als Link aufgelöst und das Ziel geprüft (0700, eigener Benutzer, `O_NOFOLLOW` beim Öffnen); Q14 nennt dasselbe Verhalten als offenen Hinweis. Der Code in Auftrag 10 (Stand 10d) lehnt dagegen einen Link im letzten Element ab (`ceremony.checkKeyFiles` mit `Lstat`, `openKeyDir` mit `O_NOFOLLOW`).
+- Stand nach Auftrag 18 (geprüft): Der Code gilt. Ein symbolischer Link im letzten Element von `--keys` wird abgelehnt, bevor der Pfad aufgelöst und bevor ein Anteil gezeigt wird (`ErrKeyDir`). Geprüft wird an drei Stellen: beim Start mit `Lstat` (`ceremony.checkDirs`), bei der Vorprüfung (`checkKeyFiles` mit `Lstat` und `checkKeyDirInfo`) und beim Schreiben (`openKeyDir` mit `O_DIRECTORY|O_NOFOLLOW`, danach `SameFile` gegen das geöffnete `os.Root`). Links in früheren Elementen des Pfads werden aufgelöst. So legt es D82 (4) fest; die Antwort zu Q14 verlangte die Ablehnung für Runde 10e. Die gegenteilige Aussage der Prüfung von 10b ist damit überholt. Tests: `TestKeyDirMode` und `TestKeyDirSwap` in `internal/ceremony/keydir_test.go`.
 - Vorschlag: In 9.2 festhalten: `--keys` ist ein eigenes Verzeichnis mit 0700 des ausführenden Benutzers, kein symbolischer Link.
 
 ## S35 Verwerfen bereits begonnener Epochen
@@ -503,7 +507,8 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: klarstellend.
 - Stelle: 2.3 „Zeremonie“ (offline, ohne Netzwerk); 9.2 (`init`, `ingest-rotate`, `reshare`).
 - Problem: Die Zeremonie läuft offline und kann das Log nicht schreiben; ein Wechsel der Identität (2.3) hat keinen Befehl.
-- Stand M1: Zusätzlich `succeed` (Nachfolge, `--compromised` für den Kompromissfall, bis zur Aufhebung von `TODO(task-07)` gesperrt) und `publish` (bringt den Export ins Datenverzeichnis und ins Log); Optionen `--out`, `--keys`, `--origin`, `--witness`, `--min-witnesses`, `--pin`, `--gen`, `--valid-from`, bei `publish` `--from`, `--data`, `--pin` (`cmd/gomail-ceremony`, D72 (11), Auftrag 10). Gedeckt durch M1-Kriterium C.
+- Stand M1: Zusätzlich `succeed` (Nachfolge, `--compromised` für den Kompromissfall) und `publish` (bringt den Export ins Datenverzeichnis und ins Log); Optionen `--out`, `--keys`, `--origin`, `--witness`, `--min-witnesses`, `--pin`, `--gen`, `--valid-from`, bei `publish` `--from`, `--data`, `--pin` (`cmd/gomail-ceremony`, D72 (11), Auftrag 10). Gedeckt durch M1-Kriterium C.
+- Stand nach Auftrag 18: `--compromised` ist wegen Q19 gesperrt, nicht wegen `TODO(task-07)`. Die Kommandozeile verweigert den Schalter als Nutzungsfehler, `ceremony.Succeed` mit `ErrCompromised`, jeweils vor jeder Ausgabe (`TODO(Q19)`, D85 (6), Commit 52ec07a). `publish` hat zusätzlich `--replace-witnesses` (S77).
 - Vorschlag: Die Befehle und Optionen in 9.2 aufnehmen.
 - Siehe S86 (Form von `--witness`) und S77 (Zeugenwechsel über `succeed`).
 
@@ -522,10 +527,10 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Vorschlag: Entscheiden, ob die Entwicklungszeremonie einen eigenen Zeugen erzeugt oder Zeugen wie `init` verlangt.
 
 ## S70 `device lost` erzeugt immer eine neue Generation
-- Art: klarstellend (Q16, D84).
+- Art: klarstellend (Q16, D84, D88 (7)).
 - Stelle: 2.2 „Generationen“ Punkt 2; 2.2 „Was der Benutzer selbst tun muss“ (`gomailctl device lost`, „erzeugt eine neue Generation“); 9.2.
 - Problem: Offen ist, was ein zweiter Aufruf bewirkt, wenn der erste die Neuausstellung nicht in allen Postfächern abgeschlossen hat. Auftrag 06b hat dafür einen Modus „nur fortsetzen“ gebaut: keine neue Generation, solange ein Postfach vorgemerkt ist, mit `ForceNewGeneration` als Ausweg. Die Angreifer-Prüfung von 06h zeigt, dass ein gepflanztes Postfach (Strohmann mit `member-added` ohne Verpackung) oder eine gebrochene fremde Kette den Befehl so dauerhaft festhält; die verlorene Generation wird dann nie widerrufen.
-- Stand Welle 4: Auf dem Arbeitszweig gilt noch der Fortsetzungsmodus (`client.DeviceLost`, `DeviceLostOptions.ForceNewGeneration` mit `TODO(ask)`). Auftrag 14 (Pflichtpunkt 1) baut die Lesart von 2.2: Jeder Aufruf erzeugt die nächste Generation; vorgemerkte Postfächer werden im selben Lauf fortgesetzt; scheitern sie weiter, bleibt die Marke und der Befehl endet mit `ErrPartial`; eine Marke in einem Postfach, in dem der Benutzer laut Kopf kein Benutzer-Mitglied ist, blockiert nichts.
+- Stand nach Auftrag 18: Der Fortsetzungsmodus ist mit Auftrag 14 entfallen (D88 (7), Commit c4e9014). `ForceNewGeneration` und `DeviceLostOptions` gibt es im Client nicht mehr. Jeder Aufruf von `client.DeviceLost` erzeugt die nächste Generation. Vorgemerkte Postfächer werden im selben Lauf mit der neuen Generation fortgesetzt. Scheitern sie weiter, bleibt die Marke und der Befehl endet mit `ErrPartial`. Fehlt `mailbox.rec`, bleibt eine bestehende Marke stehen, und der Befehl endet ebenfalls mit `ErrPartial`. Eine Marke hält den Benutzer nie davon ab, eine Generation zu widerrufen; ein Strohmann-Postfach macht nur das Ergebnis wieder zu `ErrPartial`. Ein Kommentar in `cmd/gomailctl/commands.go` nennt noch `device lost --force-new-generation` mit `TODO(ask)`; er ist überholt.
 - Vorschlag: In 2.2 Punkt 2 festhalten: „Jeder Aufruf von `device lost` erzeugt eine neue Generation. Nicht abgeschlossene Neuausstellungen früherer Aufrufe setzt der Client im selben Lauf und bei jedem `sync` mit der neuen Generation fort.“
 
 ## S71 Generation eines Unterzeichners sinkt in der Kette nicht
@@ -567,21 +572,22 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: offen (Q19).
 - Stelle: 2.3 „Wechsel der Identität“ (im Kompromissfall gilt der Vorgänger ab dem Logeintrag der Nachfolge als ungültig); 2.7; K8; Q8.
 - Problem: Kein Datensatz und kein Feld macht eine Generation der Plattformidentität ab einem Logeintrag ungültig: `platform-succ` hat kein Kennzeichen „kompromittiert“, der Pin hat kein Feld 7 (S24), `translog` kennt keine solche Regel. Wirksam ist nur die Zeitgrenze; ein Dieb mit dem alten Schlüssel kann bis dahin rückdatierte Zertifikate loggen lassen. Außerdem sagt 2.3 nicht, dass Admin- und Ingest-Zertifikate der kompromittierten Generation unter der neuen neu ausgestellt werden müssen, was neue Admin- und Ingest-Generationen verlangt (eine Admin-Rotation gibt es nicht, Q8 (d)).
-- Stand Welle 4: `gomail-ceremony succeed --compromised` schreibt den neuen Pin mit verlängerter Identitätsliste und `identity-<g>.pub`, aber keine Nachfolge-Signatur des Vorgängers; zwei `TODO(ask)` an `ceremony.Succeed` (Auftrag 15b, Worktree, Commit 11259ef, nicht zusammengeführt). Bis zur Antwort gilt die Betriebsregel aus Q19: nach `succeed --compromised` sofort `ingest-rotate` unter der neuen Identität.
+- Stand nach Auftrag 18: `gomail-ceremony succeed --compromised` ist gesperrt (D85 (6), Commit 52ec07a). Die Kommandozeile verweigert den Schalter als Nutzungsfehler, `ceremony.Succeed` mit `ErrCompromised`, jeweils bevor etwas gezeigt, gelesen oder geschrieben wird (`TODO(Q19)`). Der Bibliothekscode aus Auftrag 15b bleibt unerreichbar erhalten; er schreibt keine Nachfolge-Signatur des Vorgängers. Der Pflichttest aus 10.1 liegt als übersprungener Test vor (`TestVerifyCompromisedIdentityStillIssues`).
+- Die frühere Betriebsregel aus Q19 („nach `succeed --compromised` sofort `ingest-rotate`“) gilt nicht. Der Nachtrag zu Q19 zeigt, dass sie nicht genügt: Der Besitzer des kompromittierten Schlüssels kann weiter Ingest- und Admin-Zertifikate ausstellen, die `publish`, Log und Clients annehmen. Bis zur Antwort auf Q19 gibt es deshalb keinen Weg für den Kompromissfall.
 - Vorschlag: Wie Q19: ein Logeintrag `revocation-<g>.rec`, von der neuen Identität signiert, der alle danach geloggten Einträge der Generation g ungültig macht; dazu in 2.3 die Neuausstellung der Admin- und Ingest-Zertifikate festlegen.
 
 ## S77 Geänderte Zeugen erreichen `witnesses.rec` nicht
-- Art: offen (keine Frage in `QUESTIONS.md`, `TODO(ask)`).
+- Art: klarstellend (im Code gelöst, D85 (2)); bis Auftrag 15f offen.
 - Stelle: 2.7 „Zeugen“; 4 (`witnesses.rec`); 9.2 (`gomail-ceremony succeed`, `publish`).
 - Problem: `succeed --witness` und `--min-witnesses` ändern Zeugen und Quorum im neuen Pin. `publish` vergleicht `witnesses.rec` des Datenverzeichnisses mit dem Pin und verweigert bei einer Abweichung, damit die Arbeitskopie nie still ersetzt wird (S49). Ein gewollter Wechsel der Zeugen hat damit keinen Weg in ein bestehendes Datenverzeichnis.
-- Stand Welle 4: Strengste Lesart: `publish` verweigert mit `ErrMismatch`, der Betreiber entscheidet (`ceremony.checkWitnessFile`, `TODO(ask)`; Auftrag 15b, Worktree, nicht zusammengeführt).
-- Vorschlag: Ein Schalter von `publish`, der `witnesses.rec` nach Bestätigung durch die Liste des Pins ersetzt (oder ein eigener Befehl des Servers); in 9.2 aufnehmen.
+- Stand nach Auftrag 18: Gebaut mit Auftrag 15f (D85 (2), Commit 52ec07a). `gomail-ceremony publish --replace-witnesses` ersetzt `platform/witnesses.rec` durch Zeugen und Quorum des Pins. Ersetzt wird nur auf diesen Schalter, atomar, unter der Serversperre und erst nach allen übrigen Prüfungen (`ceremony.Publish`, `PublishOptions.ReplaceWitnesses`). Ohne den Schalter verweigert `publish` eine Abweichung weiter und nennt den Schalter in der Meldung. Die `witnesses.rec` des Exports muss auch mit dem Schalter der des Pins gleichen. Ein `TODO(ask)` steht dazu nicht mehr im Code.
+- Vorschlag: Den Schalter `publish --replace-witnesses` in 9.2 aufnehmen.
 
 ## S78 Terminalregeln: getrennte Terminals, Signale nach dem Commit
 - Art: klarstellend (Q17, D82); präzisiert S32.
 - Stelle: 2.3 „Zeremonie“; 9.2 `gomail-ceremony`.
 - Problem: S32 verlangt Terminals für stdin und stdout, sagt aber nicht, ob es dasselbe sein muss und was ein Signal nach dem Schreiben der Ergebnisse bedeutet. Die letzte Prüfung von 10e (Q17) zeigte: Bei getrennten Terminals hält ein XOFF auf stdout Ausgabe und Signalhandler an; ein Signal zwischen Commit und Programmende beendet den Prozess mit Exit 130, obwohl Export und Schlüssel vollständig vorliegen.
-- Stand Welle 4: stdin und stdout dürfen verschiedene Terminals sein; die Software-Flusssteuerung (`IXON`/`IXOFF`/`IXANY`) ist auf beiden aus und wird danach wiederhergestellt; nach dem Commit werden Abbruchsignale bis zum Ende angenommen und verworfen. Exit 0 heißt vollständiger Export, Exit 130 heißt nichts geschrieben, nie ein Teilzustand (`CommitGuard`, D82 (2) und (3); Pflichtpunkte 0a–0c von Auftrag 15b, Worktree, nicht zusammengeführt).
+- Stand Welle 4: stdin und stdout dürfen verschiedene Terminals sein; die Software-Flusssteuerung (`IXON`/`IXOFF`/`IXANY`) ist auf beiden aus und wird danach wiederhergestellt; nach dem Commit werden Abbruchsignale bis zum Ende angenommen und verworfen. Exit 0 heißt vollständiger Export, Exit 130 heißt nichts geschrieben, nie ein Teilzustand (`CommitGuard`, D82 (2) und (3), D85 (4); Pflichtpunkte 0a–0c von Auftrag 15b, Commit 52ec07a).
 - Vorschlag: Bei den Terminalregeln in 2.3 (S32) ergänzen: Flusssteuerung auf allen beteiligten Terminals aus; Exit 0 nur bei vollständigem Ergebnis, Exit 130 nur ohne geschriebene Dateien; ein Signal nach dem Commit ändert das Ergebnis nicht.
 
 ## S79 `created` bei Dateiart `pending`
@@ -592,11 +598,11 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Vorschlag: In 3.1 Feld 7 ergänzen: „Bei Art `pending` die früheste Empfangszeit der erfassten Mails.“
 
 ## S80 Anlegen des Datenverzeichnisses
-- Art: offen (keine Frage in `QUESTIONS.md`).
+- Art: klarstellend (im Code gelöst, D87); bis Auftrag 15h offen.
 - Stelle: 4 (Aufbau des Datenverzeichnisses); 9.1 (Rechte 2770/0660); 9.2.
 - Problem: Kein Befehl in 9.2 legt das Datenverzeichnis an. Gebaut legt nur die Entwicklungszeremonie `gomail-ceremony init --dev` die Struktur nach Abschnitt 4 an (`store.Init`); `gomail-ceremony publish` und alle Befehle von `gomail-server` verlangen ein schon angelegtes Verzeichnis (`store.Open`). Auftrag 16 ging von einem `gomail-server init` aus, das es nicht gibt; der Zwei-Maschinen-Test nutzt deshalb die Entwicklungszeremonie.
-- Stand Welle 4: Mit Auftrag 15b wird `init --dev` nur noch mit dem Build-Tag `gomail_dev` übersetzt (Worktree, nicht zusammengeführt); ein Produktionsbuild hätte dann keinen Weg, ein Datenverzeichnis anzulegen.
-- Vorschlag: Einen Befehl festlegen, etwa `gomail-server init --data <verzeichnis>` (Struktur nach 4 einschließlich `locks/`, Rechte 2770, die Gruppe wählt der Betreiber), oder `publish` legt ein fehlendes Verzeichnis an; in 9.2 aufnehmen.
+- Stand nach Auftrag 18: Gelöst mit Auftrag 15h und 15k (D87, Commit c931a31). `gomail-server init --data <verzeichnis> --pin <pin> [--witnesses <datei>]` ist der einzige Weg, ein Datenverzeichnis anzulegen. Der Befehl legt nur die letzte Pfadstufe an oder nimmt ein leeres Verzeichnis, setzt 2770/0660 und schreibt nur `platform/witnesses.rec`. `publish` schreibt weiter nur in ein vorhandenes Verzeichnis. `init --dev` der Zeremonie gibt es nur im Build mit `gomail_dev` (D85 (3), Commit 52ec07a). Heißt die Gruppe nicht `gomail`, warnt `init` nur (`TODO(ask)` in `cmd/gomail-server/init.go`).
+- Vorschlag: `gomail-server init --data <verzeichnis> --pin <pin> [--witnesses <datei>]` in 9.2 aufnehmen und in 4 festhalten, dass nur dieser Befehl das Datenverzeichnis anlegt.
 
 ## S81 Unbekannter freier Platz
 - Art: klarstellend.
@@ -637,7 +643,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: klarstellend; präzisiert S67.
 - Stelle: 9.2 `gomail-ceremony` (die Option fehlt dort, siehe S67); 2.7 „Zeugen“ (Format `note`).
 - Problem: Offen ist, in welcher Form ein Zeuge bei `init` und `succeed` angegeben wird. Auftrag 15b sah `name=<öffentlicher Schlüssel hex>` vor; ein bloßer Schlüssel hat keine Prüfsumme gegen Tippfehler und keine Bindung an den Namen.
-- Stand Welle 4: `--witness <name>=<verifier-zeile>`, wiederholbar, mit der Zeile, die `gomail-witness keygen` ausgibt (`<name>+<hash>+<base64>` nach `note`); der Name muss dem der Zeile gleichen, der Hash wird nachgerechnet, höchstens 256 Byte (`parseWitness` in `cmd/gomail-ceremony`; Auftrag 15b, Worktree, nicht zusammengeführt).
+- Stand Welle 4: `--witness <name>=<verifier-zeile>`, wiederholbar, mit der Zeile, die `gomail-witness keygen` ausgibt (`<name>+<hash>+<base64>` nach `note`); der Name muss dem der Zeile gleichen, der Hash wird nachgerechnet, höchstens 256 Byte (`parseWitness` in `cmd/gomail-ceremony`; Auftrag 15b, Commit 52ec07a).
 - Vorschlag: In 9.2 die Form `--witness <name>=<verifier-zeile>` festlegen.
 
 ## S87 Adressen in Kommandozeilen
@@ -646,3 +652,38 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: 9.2 legt die Adresse als Argument fest. Argumente sind auf der Server-Maschine für jeden lokalen Benutzer über `/proc/<pid>/cmdline` lesbar, auch für Benutzer außerhalb der Gruppe `gomail`, die `addresses.json` nicht lesen dürfen. Dasselbe gilt für Absender und Empfänger in der Kommandozeile von `curl` im Zwei-Maschinen-Test.
 - Stand Welle 4: Argumentform wie in 9.2; Hinweis für AUDIT (D83). Auftrag 14 (Nachtrag) stellt `address add` nur dann auf stdin um, wenn 9.2 die Argumentform nicht festlegt, sonst `TODO(ask)`.
 - Vorschlag: Entscheiden, ob `address add` die Adresse von stdin liest, oder die Grenze in 8 festhalten (Adressen sind für Benutzer der Server-Maschine sichtbar).
+
+## S88 Vermerk eines kolludierenden Mitglieds sperrt einen Mit-Benutzer
+- Art: offen (keine Frage in `QUESTIONS.md`; in D88 als Restrisiko für AUDIT und SPEC-ISSUES vermerkt).
+- Stelle: 2.7 „Abgleich zwischen Clients“; 8.
+- Problem: Ein Vermerk (`gomail/v1/rec/checkpoint`) nennt Größe, Wurzel und Zeit eines Baumkopfs. Signiert ist er nur vom Mitglied, das ihn schreibt; an einen signierten Kopf des Logs ist er nicht gebunden. Ein gültiges Benutzer-Mitglied kann deshalb einen Vermerk frei erfinden, der dem Kopf eines Mit-Benutzers widerspricht. Dessen Client hält das für eine geteilte Sicht des Servers und stellt die Verarbeitung des Postfachs ein. Der Vermerk bleibt liegen und wird bei jeder Operation erneut geprüft; die Sperre ist dauerhaft. 2.7 verlangt Erkennung, nicht Verfügbarkeit. Ob ein Mitglied andere Mitglieder auf diese Weise sperren darf, sagt die Spezifikation nicht.
+- Stand nach Auftrag 18: Ein Vermerk, der dem eigenen Kopf widerspricht (`translog.ErrConsistency`), ergibt eine Warnung und `ErrLog`; die Verarbeitung des Postfachs endet (`client.checkCheckpoints` in `internal/client/logcheck.go`, D88 (5)). Ein solcher Vermerk wird nicht als gesehen gemerkt.
+- Vorschlag: Entscheiden, ob 2.7 die Grenze festhält (ein kolludierendes Mitglied kann Mit-Benutzer sperren; der Abgleich dient nur der Erkennung). Alternative: Ein Vermerk trägt den vom Server signierten Kopf selbst. Dann kann nur ein Server, der zwei widersprüchliche Köpfe signiert hat, einen Widerspruch auslösen, und ein erfundener Vermerk wird als ungültig ignoriert.
+
+## S89 Nicht loggbare Epoche 1
+- Art: offen (keine Frage in `QUESTIONS.md`; in D88 als Restrisiko für AUDIT und SPEC-ISSUES vermerkt).
+- Stelle: 2.4; K2 Regel 4; `internal/translog/doc.go` „Unlogged epoch.rec“.
+- Problem: Eine `epoch.rec`, die nie ins Log kommen kann (`Append` meldet `ErrOrder`), ersetzt ein Benutzer-Mitglied am Kopf durch eine Reparatur-Epoche gleicher Nummer. Die Reparatur-Epoche übernimmt die Mitglieder der Vorgängerin n-1. Für Epoche 1 gibt es keine Vorgängerin und damit keine geprüfte Mitgliederliste; niemand kann sie ersetzen. Ein Postfach, dessen `epoch.rec` 1 nicht loggbar ist, bleibt deshalb dauerhaft unbrauchbar. Herbeiführen kann das nur, wer in das Datenverzeichnis schreiben kann (DoS durch Schreibzugriff). Die Spezifikation sagt nicht, was dann gilt.
+- Stand nach Auftrag 18: Eine Änderung endet mit `store.ErrChain` („no epochs“), bevor die Reparatur (`client.healHead`) läuft (`internal/client/members.go`). Leser brechen die Kette mit einer Warnung ab. Nennt `mailbox.rec` Epoche 1, nennt die Warnung „share, revoke oder sync“ als Abhilfe, obwohl diese für Epoche 1 nicht greift (`client.loadChain`). Regulär angelegte Postfächer sind nicht betroffen: `CreateMailbox` loggt Epoche 1, bevor eine Datei ins Datenverzeichnis kommt (D88 (3)).
+- Vorschlag: In 2.4 festhalten, dass ein Postfach ohne geloggte Epoche 1 nicht existiert. Clients übernehmen es nicht und melden es mit der Abhilfe des Betreibers (Verzeichnis nach Prüfung des Logs entfernen), statt eine Reparatur anzubieten.
+
+## S90 `file_id` eines Indexsegments
+- Art: offen (Q11).
+- Stelle: 3.1 Feld 4 („`file_id` gleich der ID im Dateinamen“); 4 (`index/<n>/<device-id>-<lfd>.gml`); 6.2; K5.
+- Problem: Der Dateiname eines Segments besteht aus Gerätekennung und Laufnummer. `file_id` im signierten Kopf trägt nur die Gerätekennung. Ein gültiges Segment, das der Server auf eine andere Laufnummer desselben Geräts kopiert, nimmt der Client still an. Falschtreffer oder ein Leck folgen daraus nicht, weil Treffer je Marke vereinigt werden. Der Server kann aber die Zahl der Segmente aufblähen und das Zusammenfassen ab 16 Segmenten (`client.MergeThreshold`) früher auslösen. Eine Kopie auf ein anderes Gerät wird erkannt.
+- Stand nach Auftrag 18: `file_id` ist die Gerätekennung (D79 (1)); `client.readSegment` prüft nur sie (`TODO(ask)` in `internal/client/index.go`). Auftrag 09b soll nach Q11 nur eine Warnung bei doppelten Laufnummern ergänzen.
+- Vorschlag: Wie Q11: `file_id` eines Segments bindet den vollständigen Basisnamen `<device-id>-<lfd>`, und der Client lehnt Segmente ab, deren `file_id` nicht dem Dateinamen entspricht. Alternativ die heutige Lesart in 3.1 und 6.2 festschreiben.
+
+## S91 Nachfolgekette der Plattformidentität beim Veröffentlichen
+- Art: klarstellend (D85 (2) und Ergänzung aus 15g).
+- Stelle: 2.3 „Wechsel der Identität“; 4 (`platform/`); 9.2 (`gomail-ceremony publish`, siehe S67).
+- Problem: 2.3 sagt nicht, in welcher Reihenfolge Nachfolgen ins Log kommen. Offen ist auch, was `publish` mit einer Datei tut, deren Vorgängerin fehlt. Ohne Regel könnte ein Client mit älterem Pin der Kette nicht folgen.
+- Stand nach Auftrag 18: Eine Nachfolge `identity-<g>.succ` mit g ≥ 3 setzt `identity-<g-1>.succ` im Export, in `platform/` oder im Log voraus, sonst `ErrPrerequisite`. Dasselbe gilt für `identity-<g>.pub` und für Zertifikate, die eine Identitätsgeneration ≥ 2 ausgestellt hat. Eine Datei, die nur in `platform/` liegt, gilt nie als geloggt: `publish` prüft sie gegen den Pin und loggt benötigte Nachfolgen vor dem Nachfolger nach. Ein Zertifikat `<rolle>-<g>.cert` mit g > 1 verlangt `<rolle>-<g-1>.cert` im Export oder in `platform/` (`ceremony.Publish`, `internal/ceremony/publish.go`; Commit 52ec07a).
+- Vorschlag: In 2.3 festhalten: „Nachfolgen werden lückenlos in aufsteigender Generation geloggt. Jede Datei, die eine Identitätsgeneration g ≥ 2 voraussetzt, braucht die Nachfolge g im Log.“ Die Regel in 9.2 bei `publish` nennen.
+
+## S92 Befehle `restore` und `flag` von `gomailctl`
+- Art: klarstellend (D86 (1); `TODO(ask)` im Code).
+- Stelle: 9.2 (`gomailctl`); 2.2 „Wiederherstellung“; 2.7 „Neue Geräte und Wiederherstellung“; 7; K4.
+- Problem: Die Spezifikation beschreibt die Wiederherstellung aus Seed oder Anteilen und das Ändern von Flags. 9.2 nennt aber für keines von beiden einen Befehl.
+- Stand nach Auftrag 18: `gomailctl restore [--shares <k>]` richtet ein leeres Client-Verzeichnis aus 24 Wörtern oder k Anteilen mit neuer Passphrase ein. `gomailctl flag <postfach-id> <mail-id> [--set a,b] [--clear c]` setzt und löscht Flags (Namen siehe S63). Namen und Optionen folgen Auftrag 13 (`TODO(ask)` in `cmd/gomailctl/cmd_devicelost.go` und `cmd/gomailctl/cmd_search.go`; Commit 4748ac7).
+- Vorschlag: Beide Befehle mit diesen Namen und Optionen in 9.2 aufnehmen, wie S67, S68 und S85 für die übrigen Programme.
