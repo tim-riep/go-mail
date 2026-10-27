@@ -15,3 +15,9 @@ Welle 4. Feste Vorgaben: `docs/tasks/00-vorgaben.md` (gelten wörtlich). Basis: 
 `cmd/gomailctl/**`, `internal/testenv/testenv.go` (Prompter-Attrappe). Nicht: `internal/client` (außer eine fehlende exportierte Hilfsfunktion, dann `TODO(task-13)` im Bericht nennen), andere Pakete.
 
 Fertig: `gofmt -l .` leer, `go vet ./...`, `go test -race ./cmd/gomailctl ./internal/e2e`, `GOARCH=386 go test ./cmd/gomailctl`, Abdeckung `cmd/gomailctl` ≥ 85 %. Ein Commit `gomailctl: share, revoke, device lost, restore, keygen --shares, search and flags (task 13)`; kein Modellname. Bericht nach `00-vorgaben.md` mit der Liste der Befehle und Flags, die 9.2 nennt und die du gebaut hast, und derer, die du nicht gebaut hast, mit Grund.
+
+## Nachtrag (nach 06h, 10, 15, 16)
+- Basis: Arbeitsbranch nach dem Merge von 06b (der Orchestrator nennt den Commit). `internal/words` (aus Paket 10) ersetzt `internal/client/words.go`, falls 15b das noch nicht getan hat: dann hier (Tokenobergrenze vor der Normalisierung beibehalten, Gleichheitstest gegen die `shamir`-Vektoren).
+- `share` ist der Befehl, den `scripts/two-host-test.sh` und `TestRunbook` als `TODO(ask)` vermissen (dort „mailbox share“ genannt): nach dem Bau Schritt d des Skripts (`internal/e2e/twohost_test.go`, `scripts/two-host-test.sh`) um das Teilen mit dem zweiten Benutzer ergänzen (Lesen gelingt danach), `TODO(ask)` dort entfernen.
+- `--insecure-no-log` in `gomailctl` bleibt bis Auftrag 14 (dort entfernt); hier nicht anfassen.
+- Optional, nur wenn 9.2 es deckt oder als Testschalter unter Build-Tag `gomail_test`: ein Befehl, der `locks/client` hält, bis stdin geschlossen wird (für `serve --require-client-lock` im Zwei-Maschinen-Test); sonst `TODO(ask)` im Bericht.
