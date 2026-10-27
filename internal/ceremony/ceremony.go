@@ -1,13 +1,23 @@
-// Package ceremony implements "gomail-ceremony init --dev" (2.3): a
-// platform root without Shamir for development. It derives identity,
-// admin and ingest keys of generation 1, certifies admin and ingest with
-// the identity, writes the public parts into the data directory and the
+// Package ceremony implements gomail-ceremony (2.3): the real ceremony
+// with a Shamir-split platform root (api.go: Init, IngestRotate, Reshare,
+// Succeed, Publish) and the development ceremony InitDev.
+//
+// InitDev ("gomail-ceremony init --dev") creates a platform root without
+// Shamir for development and tests. It derives identity, admin and
+// ingest keys of generation 1, certifies admin and ingest with the
+// identity, writes the public parts into the data directory and the
 // private keys into a separate key directory, which must not be inside
 // the data directory. The root is written as a file that is clearly
 // marked insecure. The pin it writes for clients carries the development
 // flag, the origin DevOrigin, the witnesses and the identity list (pin
 // fields 4 to 6 and 8, translog doc.go "Pin"); clients accept it only
-// with --insecure-no-log.
+// with --insecure-no-log (later only with
+// client.Config.AllowDevIdentity, task 14).
+//
+// plan9 and js/wasm are not supported targets: commit needs
+// syscall.Rename (rename(2) replaces an empty export directory), which
+// the syscall package of plan9 lacks, and gomail-ceremony needs
+// syscall.SIGHUP, which js/wasm lacks (task 10e finding 6).
 package ceremony
 
 import (
@@ -50,15 +60,22 @@ const (
 	DevWitnessName = "gomail-dev-witness"
 )
 
-// ErrKeyDir reports a key directory inside the data directory or one
-// that already holds keys.
+// ErrKeyDir reports a key directory inside the data directory, one that
+// already holds keys, or (real ceremony) one that is not a directory of
+// mode 0700 owned by the current user or was replaced by a symbolic link.
 var ErrKeyDir = errors.New("ceremony: unusable key directory")
 
-// Result names what InitDev wrote.
+// Result names what InitDev, Init or Succeed wrote.
 type Result struct {
-	KeyDir      string
+	KeyDir      string // empty for Succeed
 	IdentityPub ed25519.PublicKey
 	Pin         *store.PlatformPin
+	// Out is the export directory (Init, Succeed).
+	Out string
+	// Identities is the identity list of the pin (pin field 8, translog
+	// doc.go "Pin"); nil for InitDev. TODO(task-07): it moves into Pin
+	// once store.PlatformPin has field 8.
+	Identities []translog.Identity
 }
 
 func inside(dir, root string) bool {
