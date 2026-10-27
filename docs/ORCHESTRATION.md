@@ -48,7 +48,7 @@ Reihenfolge beim Zusammenführen: 01, 02, 03. Integrationsprüfung der Welle dan
 | 07 | `translog`: Umsetzung mit `tlog` | Einträge, Baum, Beweise, signierte Köpfe, Vermerke, Aktualität; `Unverified` nach `translogtest` | 02, 03 |
 | 08 | `gomail-witness` | Zeugendienst nach 2.7 mit `note`, Konsistenzprüfung, nie zwei Köpfe gleicher Größe | 03 |
 
-Reihenfolge: 05, 06, 07, 08.
+Reihenfolge: 05, 06, 07, 08. Abweichung: 05 und 06 hängen nur von 01 und 02 ab und wurden nach deren Zusammenführung gestartet, noch während 03 in der letzten Nacharbeitsrunde war; die Integrationsprüfung der Welle 1 läuft nach der Zusammenführung von 03 und vor 07/08. 06b (`device lost`, `wrap-accept`, Übernahme, S11, `keygen --shares`, Wiederherstellung) folgt nach 06 in Welle 3.
 
 ### Welle 3: Suche, Zeremonie, Server-Seite des Logs, Messumgebung
 
