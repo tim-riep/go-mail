@@ -25,6 +25,19 @@ Phase 1 ist abgeschlossen (Commit 41ba4cb, danach nur Dokumente): Postfächer mi
 
 Werkzeuge: Go 1.26.10 über `GOTOOLCHAIN`, 4 Kerne, 15 GiB. `golang.org/x/mod` ist erreichbar (v0.42.0, wird in `go.mod` festgeschrieben, sobald das erste Paket es braucht). Eine zweite Maschine mit NFSv4 steht in dieser Umgebung nicht zur Verfügung; der Test nach 9.1 wird als `scripts/two-host-test.sh` vorbereitet (M1 dann bedingt, siehe Auftrag).
 
+### M1-Kriterien A–F
+
+Aus dem Orchestrierungsauftrag; Aufträge 18 bis 20 verweisen hierauf.
+
+- **A:** Phase 2 vollständig (Abschnitte 2.2, 2.4, 2.5, 6, 7 und 9 der Version 1.4).
+- **B:** Transparenzlog auf `golang.org/x/mod/sumdb/tlog`, `gomail-witness`, Vermerke im Client, 24-Stunden-Grenze, alle `TODO(phase3-translog)` aufgelöst, `--insecure-no-log` entfernt.
+- **C:** Zeremonie mit `init --shares 3-of-5`, `ingest-rotate`, `reshare` und Probe-Rekonstruktion; `--dev` nur für Tests.
+- **D:** `docs/MEASUREMENTS.md`, reproduzierbar.
+- **E:** Abnahme nach 10.2: alle Pflichttests aus 10.1 grün; `go vet`, `-race` und `GOARCH=386` grün; jedes Fuzz-Ziel 10 Minuten; Abdeckung ≥ 85 % je Paket unter `internal/`, ≥ 90 % für `rec`, `keys`, `shamir`, `envelope`, `translog`. Zwei-Maschinen-Test über NFSv4; ohne zweite Maschine ist nur `scripts/two-host-test.sh` vorbereitet und M1 „bedingt erreicht“.
+- **F:** `docs/HANDOFF.md`, `docs/AUDIT.md`, `docs/RUNBOOK.md` mit `TestRunbook` (Zeremonie, Zeuge, drei Benutzer).
+
+Nicht in M1: Löschen von Epochen, Volltextsuche, QR, TLS und Missbrauchsschutz, Padmé, Hardware-Schlüssel, IMAP, Oberflächen über die Kommandozeile hinaus.
+
 ## 2. Arbeitspakete und Wellen
 
 Regeln: höchstens vier Umsetzer und sechs Subagenten gleichzeitig; jedes Paket nennt die Dateien, die es ändern darf; Pakete einer Welle werden in der angegebenen Reihenfolge zusammengeführt; nach jeder Zusammenführung laufen `go vet ./...`, `go test -race ./...`, `GOARCH=386 go test ./...`. Sicherheitskritische Pakete (Schlüssel, Signaturen, Formate, Epochen, Log, Prüfregeln im Client) bekommen zwei Verifizierer (Spezifikation und Angreifer, Modell `fable`), alle anderen einen (`opus`).
@@ -73,7 +86,7 @@ Reihenfolge: 05, 06, 07, 08. Abweichung: 05 und 06 hängen nur von 01 und 02 ab 
 | Nr. | Paket | Umfang | hängt ab von |
 |---|---|---|---|
 | 17 | `docs/MEASUREMENTS.md` | Messungen mit Befehlen und Hardware | 12, 14, 15 |
-| 18 | `docs/AUDIT.md` | Prüfpaket nach Abschnitt F | 14, 15 |
+| 18 | `docs/AUDIT.md` | Prüfpaket nach M1-Kriterium F | 14, 15 |
 | 19 | `docs/RUNBOOK.md`, `TestRunbook` | Zeremonie, Zeuge, drei Benutzer | 13, 15 |
 | 20 | Abnahme | `docs/HANDOFF.md`, Abdeckung, Fuzzing je 10 Minuten (führt der Orchestrator aus), Abschlussbericht | alle |
 
@@ -114,3 +127,6 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - **13 `gomailctl`-Befehle** (`share`, `revoke`, `device lost`, `restore`, `keygen --shares`, `search`, `flag`; Terminalregeln für Seed und Wörter). Verifikation: vier Runden (13: 2 hoch; 13b: 1 mittel; 13c: 1 mittel; 13d: 1 mittel ohne Sicherheitsfolge → 13e, Q21). Volllauf gofmt/vet/race/386 (mit Tags) grün (ein zeitabhängiger Test, in 13e behoben). Commit 4748ac7, D86.
 - Modellwechsel (Anweisung des Auftraggebers nach Erreichen des Fable-Kontingents): ab hier laufen auch Spezifikations- und Angreifer-Prüfungen sicherheitskritischer Pakete auf opus statt fable (Abweichung von Abschnitt 3 der Orchestrierungsvorgabe). Die abgebrochene Prüfung von 15l wird mit opus wiederholt.
 - **14 Client am Transparenzlog** (alle `TODO(phase3-translog)` außer `translogtest` aufgelöst, Vermerke, 24-h-Regel, erste Einträge, nicht loggbare Epochen, `--insecure-no-log` entfernt; Pflichtpunkte aus 06h). Verifikation: 14 (fable) 5 mittel → 14b; 14b (opus) keine Funde über niedrig; Merge 14c (fünf Konflikte) unabhängig geprüft. Volllauf grün bis auf die bekannte Seed-Wort-Heuristik in `TestTwoHostScript` (Fehlalarm, 3× Wiederholung grün; Pflicht in 20). Commit c4e9014, D88. M1-Kriterium B damit vollständig im Arbeitsbranch.
+- 15i/15l/15m (Zeremonie: SIGPIPE und SIGXFSZ ab Programmstart, stderr muss beschreibbar sein, Abbruchpfad ohne wartende ioctls, Ausgabe vor dem Löschen neu gestartet). Stand: 15i umgesetzt; die Prüfung von 15l (opus) fand 2 hoch, die schon vor 15i bestanden → Nacharbeit 15m umgesetzt (Commit 1826d21 im Worktree), Angreifer-Prüfung läuft.
+- 13e/13f (`gomailctl`: /dev/tty nur in der kontrollierenden Sitzung, Tests ohne feste Wartezeiten; 13f passt die Tests an 14 an). Merge-Prüfung ohne Funde über niedrig (2 niedrig → 20, AUDIT). Volllauf läuft.
+- 18 `docs/AUDIT.md` geliefert (Worktree, Commit a20c6b4). Der Abgleich zeigte: **09b wurde beim Planen der Welle 4 übersehen** (S13 für Metadaten und Segmente, `internal/terms`, Testlücken aus 09). 09b mit Nachtrag (7458153) jetzt gestartet; bis dahin gilt in `internal/client` die strengste Lesart (`TODO(S13)`), und nach `device lost` fallen Mails mit eigener Benutzersignatur aus `List`. Die übrigen Widersprüche zwischen den Dokumenten gehen an eine Bereinigung von SPEC-ISSUES. Prüfung von AUDIT folgt.
