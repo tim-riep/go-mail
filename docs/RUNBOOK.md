@@ -210,3 +210,50 @@ rm -rf /tmp/gomail-demo
 | `keys: key store authentication failed (wrong passphrase or damaged file)` | falsche Passphrase |
 | `WARNUNG: Mail ... wird nicht verarbeitet` | eine Prüfung aus Abschnitt 7 ist fehlgeschlagen; die Mail wird nicht angezeigt |
 | `452 4.3.1` beim Einliefern | weniger als 10 % freier Platz im Datenverzeichnis |
+
+## Zwei Maschinen
+
+Der Test nach 9.1 (Abnahme, 10.2) läuft mit `scripts/two-host-test.sh`. Auftrag 19 ergänzt diesen Abschnitt; hier stehen nur Voraussetzungen und Aufrufe.
+
+### Voraussetzungen
+
+- Zwei Maschinen: der Server-Host exportiert ein Verzeichnis über **NFSv4**, der Client-Host hat es eingehängt, mit Sperrunterstützung (`vers=4.x`, `local_lock=none`; nie `nolock`, `local_lock=posix` oder `local_lock=all`, nie SSHFS). Das Skript prüft die Optionen in `/proc/mounts` des Client-Hosts; Leerzeichen und andere Sonderzeichen im Mountpfad (dort als `\040` usw. geschrieben) sind erlaubt.
+- Zwei verschiedene Betriebssystembenutzer (Name und uid verschieden), einer je Host, beide in der Gruppe `gomail` mit derselben gid auf beiden Seiten. Empfohlene `umask` 0007; die Programme setzen 0660/2770 ohnehin selbst (D70).
+- SSH mit Schlüssel ohne Rückfrage (`BatchMode`) zu beiden Benutzern, Login-Shell kompatibel zu `sh`. Das Skript selbst läuft auf einer dritten Maschine oder auf einem der beiden Hosts.
+- Programme auf beiden Hosts im `PATH` oder unter `--bin` (gleicher Pfad auf beiden Hosts): auf dem Server-Host `gomail-server`, `gomail-ceremony`, `gomail-witness`, `curl` mit SMTP, `base64`, `sha256sum` oder `shasum`; auf dem Client-Host `gomailctl`, `gomail-server` (für die Gegenprobe „zweiter Server“) und der Log-Helfer.
+- Log-Helfer bis Auftrag 14 (der Client trägt `user.rec` und `epoch.rec` noch nicht selbst ins Log ein): das Testprogramm von `internal/e2e`, gebaut mit
+
+  ```
+  go test -c -tags gomail_test -o e2e.test ./internal/e2e
+  ```
+
+  und auf den Client-Host kopiert (`--log-helper`).
+
+### Aufrufe
+
+```
+scripts/two-host-test.sh --server-host gomail-srv@server --client-host gomail-cli@client \
+    --export /srv/gomail --mount /mnt/gomail --log-helper /opt/gomail/e2e.test \
+    [--bin /opt/gomail/bin] [--pin <datei>] [--witness <datei>] [--workdir <dir>] [--out <dir>] [--keep]
+```
+
+- **Eigenes Verzeichnis:** Das Skript legt auf jedem Host unter `--workdir` (Standard `/tmp`, lokal `$TMPDIR` oder `/tmp`) genau ein eigenes Verzeichnis `two-host.XXXXXX` an (`mktemp -d`) und arbeitet nur darin: Plattformschlüssel unter `…/keys` auf dem Server-Host, Passphrase-Datei, Pin (ohne `--pin`) und Schlüsselspeicher auf dem Client-Host, Server- und Zeugenprotokolle. Was sonst unter `--workdir` liegt, bleibt unberührt. Fehlt `--workdir`, legt das Skript es an (nur die letzte Stufe, das Elternverzeichnis muss existieren) und entfernt es am Ende wieder, wenn es leer ist.
+- **`--pin` und `--witness` sind Ablageorte, die noch nicht existieren dürfen**; ihr Verzeichnis muss existieren (das Skript legt keine Elternverzeichnisse an). Eine vorhandene Datei ist ein Aufruffehler (Exit 2), das Skript überschreibt und löscht sie nicht. Es schreibt beide mit Rechten 0600 und löscht am Ende nur, was es selbst geschrieben hat. Ohne die Optionen liegen beide im eigenen Verzeichnis.
+- Das Datenverzeichnis entsteht neu unter `<export>/gomail-<lauf>` (Entwicklungszeremonie). Am Ende löscht das Skript das Datenverzeichnis, die eigenen Verzeichnisse, die selbst geschriebenen Dateien unter `--pin`/`--witness` und ein selbst angelegtes `--workdir`; mit `--keep` bleibt das alles stehen (das Protokoll nennt die Pfade), nur die Passphrase-Datei nicht. Im Zwei-Maschinen-Modus müssen `--export` und `--mount` existieren; das Skript legt sie nicht an. Die Markierungsdatei `<export>/.two-host-<lauf>` (Prüfung „Export und Mount zeigen dasselbe Verzeichnis“) wird immer entfernt, auch wenn die Prüfung scheitert.
+- **Keine Geheimnisse auf der Platte:** Die 24 Seed-Wörter von `gomailctl keygen` liest das Skript über eine FIFO in den Speicher der Shell und beantwortet daraus die drei Wortfragen; `list` und `read` prüft es in einer Pipe (`awk`), entschlüsselter Betreff und Text landen in keiner Datei, auch nicht mit `--keep`. Die Passphrase-Datei `…/passphrase` auf dem Client-Host löscht das Skript am Ende immer, **auch mit `--keep`**. Scheitert `keygen`, steht im Protokoll nur seine letzte Fehlerzeile, ohne die Wortfragen.
+- **Keine Klartexte in Kommandozeilen:** Betreff, Text und Passphrase des Laufs stehen in keiner Kommandozeile (`/proc/*/cmdline` ist für alle Benutzer lesbar): Die Befehle bekommen sie über die Umgebung, auf den Hosts über die Standardeingabe der entfernten Shell. Die Adressen stehen als Argumente in `curl` und `gomail-server address add` (deren Schnittstelle).
+- **Umgebung:** Das Skript liest nur `PATH`, `TMPDIR`, `GOMAIL_TEST_MIN_FREE` und was `ssh` braucht. Alle eigenen Variablen belegt es selbst vor; Werte aus der Umgebung (auch `GOMAILCTL_PASSPHRASE`, das sonst Vorrang vor der Passphrase-Datei hätte) wirken weder auf den Ablauf noch auf das Aufräumen. Gelöscht wird nur, was das Skript selbst angelegt hat und dessen Pfad es selbst abgeleitet hat. Prüfbar mit `env -i PATH="$PATH" sh scripts/two-host-test.sh …`.
+- **Gegenprobe „zweiter Server“ ohne Kopie des Ingest-Schlüssels:** Auf dem Client-Host versucht `gomail-server log repair --data <mount>/gomail-<lauf> --pin <pin>` die Serversperre `locks/server` zu nehmen, dieselbe Sperre, die `serve` hält; das braucht keinen Ingest-Schlüssel, der Ingest-Schlüssel verlässt den Server-Host nicht (9.1). Erwartet wird die Verweigerung „Server-Sperre: store: in use by another process“. Wirkt die Sperre über NFS nicht, nähme `log repair` die Sperre und baute `tree.rec` des Testdatenverzeichnisses neu; der Lauf bricht dann ab.
+- Wartet das Skript auf den Log-Kopf mit Zeugensignatur, prüft es, ob der Zeuge noch läuft, und bricht sonst sofort mit `witness.log` im Protokoll ab.
+- Das Protokoll steht in `<out>/protokoll.md` (die Datei darf noch nicht existieren): jeder Befehl mit Ausgabe, nur IDs und Pfade; Adressen, Betreff, Text und Passphrase sind ersetzt.
+- **Exit-Codes:** 0 bestanden; 1 abgebrochen (der Schritt steht im Protokoll), darunter im Zwei-Maschinen-Modus ein fehlendes `--export` (die Markierungsprüfung „Export und Mount zeigen dasselbe Verzeichnis“ scheitert); 2 Aufruffehler, auch solche, die das Skript erst auf einem Host erkennt (vorhandenes Ziel von `--pin`/`--witness`, fehlendes Elternverzeichnis von `--workdir`, `--pin`/`--witness` und im lokalen Modus von `--export`, fehlendes `go` im lokalen Modus ohne `--bin`); 130 Abbruch durch ein Signal (SIGINT, SIGTERM, SIGHUP). In jedem Fall beendet das Skript alle Prozesse, die es gestartet hat (Server, Zeuge, sperrender Client, `gomailctl keygen`, auch wenn dessen Shell auf dem Client-Host die Verbindung überlebt), und räumt wie oben beschrieben auf.
+
+Ohne zweite Maschine:
+
+```
+scripts/two-host-test.sh --local [--bin <dir>] [--log-helper <datei>] [--workdir <dir>] [--out <dir>] [--keep]
+```
+
+Ohne `--bin` und `--log-helper` baut das Skript Programme und Log-Helfer mit `-tags gomail_test` in sein eigenes Verzeichnis; bei weniger als 10 % freiem Platz `GOMAIL_TEST_MIN_FREE=0.000001` setzen (wirkt nur in diesem Testbuild). Ohne `--export`/`--mount` liegen Export und „Mount“ (ein symbolischer Link) im eigenen Verzeichnis; sind sie angegeben und fehlen, legt das Skript `--export` (nur die letzte Stufe) und `--mount` als Link an und entfernt beide am Ende wieder, außer mit `--keep` (`--export` nur, wenn es leer ist). `go test -tags gomail_test -run TestTwoHostScript ./internal/e2e` führt den lokalen Modus aus (mit einer Umgebung nur aus `PATH`, `TMPDIR`, `GOMAIL_TEST_MIN_FREE` und einer Prüfung von `/proc/*/cmdline` auf Klartexte), den Zwei-Maschinen-Modus über einen `ssh`-Ersatz auf dieser Maschine (Leerzeichen im Export- und Mountpfad, eine NFSv4-Zeile statt `/proc/mounts`), dazu die Abbruchfälle (fremde Aufräumvariablen in der Umgebung, vorhandenes `--pin`/`--witness`, scheiterndes `keygen`, SIGINT während `keygen` lokal und auf einem entfernten Host, SIGTERM während der Client seine Sperre hält). **Der lokale Modus ist kein Nachweis nach 9.1:** ein Benutzer, ein Kernel, ein lokales Dateisystem, der „Mount“ ist ein symbolischer Link. Er zeigt Programme, Startprüfungen, Rechte, Abwesenheit von Schlüsseln und Klartext und den Ablauf; die Durchsetzung der Sperren durch NFSv4 zwischen zwei Maschinen und die Trennung der Benutzer zeigt nur der Lauf auf zwei Maschinen.
+
+Noch nicht im Test: das Teilen eines Postfachs mit dem zweiten Benutzer (`gomailctl mailbox share` fehlt); geprüft wird nur, dass er das Postfach ohne Freigabe nicht lesen kann.

@@ -33,6 +33,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// The test binary doubles as the client log helper of
+	// scripts/two-host-test.sh (twohost_test.go).
+	if os.Getenv(helperEnv) == helperLogAppend {
+		os.Exit(logAppendMain(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	code := m.Run()
 	if binDir != "" {
 		os.RemoveAll(binDir)
@@ -216,26 +221,8 @@ func (p *platform) startWitness(s *serverProc) {
 // --insecure-no-log, and the test logs what it wrote.
 func (p *platform) logAsClient(kind translog.Kind, files ...string) {
 	p.t.Helper()
-	st, err := store.Open(p.data)
-	if err != nil {
+	if _, err := appendAsClient(p.data, p.pin, kind, files...); err != nil {
 		p.t.Fatal(err)
-	}
-	pin, err := store.ReadPlatformPin(p.pin)
-	if err != nil {
-		p.t.Fatal(err)
-	}
-	l, err := translog.Open(translog.Options{Store: st, Identities: []translog.Identity{{Gen: pin.Identities[0].Gen, Pub: pin.Identities[0].Pub}}})
-	if err != nil {
-		p.t.Fatal(err)
-	}
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			p.t.Fatal(err)
-		}
-		if _, err := l.Append(kind, data); err != nil {
-			p.t.Fatalf("%s: %v", filepath.Base(f), err)
-		}
 	}
 }
 
