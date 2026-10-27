@@ -515,34 +515,43 @@ func (ch *chain) usable(n uint32) (*store.Epoch, error) {
 	return e, nil
 }
 
-// userGeneration returns the identity key of generation gen of user id,
-// for a signature on data. Logged records (epoch.rec) are checked with
-// the log; for files that are not logged (wraps), only the current
-// generation is accepted.
-func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.PublicKey, error) {
+// userGen returns generation gen of user id from its user.rec, checked
+// against the log, and whether a later generation revoked it (2.2).
+func (c *Client) userGen(id store.ID, gen uint32) (*keys.GenerationCert, bool, error) {
 	u, raw, err := c.st.ReadUser(id)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSigner, err)
+		return nil, false, fmt.Errorf("%w: %v", ErrSigner, err)
 	}
 	// TODO(phase3-translog): signer's user.rec included in the log (2.7).
 	if err := c.cfg.Log.CheckUser(id, raw); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	g := u.Generation(gen)
 	if g == nil {
-		return nil, fmt.Errorf("%w: unknown generation %d", ErrSigner, gen)
+		return nil, false, fmt.Errorf("%w: unknown generation %d", ErrSigner, gen)
 	}
 	// TODO(phase3-translog): generation valid only from its log entry on (2.2 rule 3).
 	if err := c.cfg.Log.CheckGeneration(id, gen); err != nil {
+		return nil, false, err
+	}
+	return g, gen != u.Current().Gen, nil
+}
+
+// userKey returns the identity key of generation gen of user id, for a
+// signature on data. A revoked generation (2.2 rule 4, S13) counts for a
+// logged record (epoch.rec) if the log shows it before the revocation;
+// for a file that is never logged (wraps, folders.gml) it is rejected
+// with ErrRevoked: such a file counts only through a wrap-accept of the
+// reader (keysFor) or the reader's own check record before the
+// revocation (takeover, readFolders).
+func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.PublicKey, error) {
+	g, revoked, err := c.userGen(id, gen)
+	if err != nil {
 		return nil, err
 	}
-	if gen != u.Current().Gen {
-		// TODO(S13): a revoked generation counts only for records logged
-		// before the revocation; files that are never logged are not
-		// accepted from a revoked generation. Strictest reading until
-		// SPEC-ISSUES S13 is decided.
+	if revoked {
 		if logged == nil {
-			return nil, fmt.Errorf("%w: generation %d is revoked", ErrSigner, gen)
+			return nil, fmt.Errorf("%w: %w: generation %d is revoked", ErrSigner, ErrRevoked, gen)
 		}
 		// TODO(phase3-translog): logged before the revocation (2.2 rule 4).
 		if err := c.cfg.Log.CheckRevokedSignature(id, gen, logged); err != nil {
@@ -599,7 +608,7 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 			e, data, next := c.readBeyond(links, id, n)
 			if next != nil {
 				if !errors.Is(next.cause, store.ErrNotFound) {
-					c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %v", n, id, next.cause)
+					c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %s.", n, id, warnCause(next.cause))
 					ch.next = next
 				}
 				break
@@ -613,7 +622,7 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 			err = c.checkEpoch(links, e, data)
 		}
 		if err != nil {
-			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %v", id, n, err)
+			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %s.", id, n, warnCause(err))
 			if ch.err == nil {
 				ch.err = fmt.Errorf("%w: epoch %d: %v", store.ErrChain, n, err)
 			}
@@ -763,10 +772,11 @@ func (c *Client) checkEpochRule(ch *chain, e *store.Epoch, received int64) error
 // does not verify, it returns why (a missing file: store.ErrNotFound) and
 // whether it can never become valid (task 06c), for createEpoch: it does
 // not decode or names another mailbox or number (also a file larger than
-// store.MaxRecordFile), it breaks store.Chain.Add against the head, or
-// the signer's user.rec has no such generation or the signature does not
-// verify with its key. Other failures (reading the file or user.rec, the
-// log) do not prove anything; such a file is kept.
+// store.MaxRecordFile), it breaks store.Chain.Add against the head, it is
+// signed by a generation older than one the chain already names
+// (checkSignerGen), or the signer's user.rec has no such generation or
+// the signature does not verify with its key. Other failures (reading the
+// file or user.rec, the log) do not prove anything; such a file is kept.
 func (c *Client) readBeyond(links *store.Chain, id store.ID, n uint32) (*store.Epoch, []byte, *nextEpoch) {
 	x := &nextEpoch{mailbox: id, number: n}
 	data, err := store.ReadFileLimited(c.st.EpochFile(id, n), store.MaxRecordFile)
@@ -786,6 +796,9 @@ func (c *Client) readBeyond(links *store.Chain, id store.ID, n uint32) (*store.E
 		return invalid(err)
 	}
 	if err := links.Add(e, data); err != nil {
+		return invalid(err)
+	}
+	if err := c.checkSignerGen(links, e); err != nil {
 		return invalid(err)
 	}
 	if u, _, err := c.st.ReadUser(e.SignerID); err == nil && u.Generation(e.SignerGen) == nil {
@@ -811,6 +824,9 @@ func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) err
 	if err := links.Add(e, data); err != nil {
 		return err
 	}
+	if err := c.checkSignerGen(links, e); err != nil {
+		return err
+	}
 	pub, err := c.userKey(e.SignerID, e.SignerGen, data)
 	if err != nil {
 		return err
@@ -822,6 +838,48 @@ func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) err
 	return c.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data)
 }
 
+// checkSignerGen rejects epoch e of the chain links (already added) if
+// its signer signed it with a generation lower than one that an earlier
+// epoch of the chain names for the same user, as a member or as its
+// signer, and that the user's user.rec holds (ErrRevoked). That earlier
+// epoch precedes e in the hash chain and shows that the newer generation,
+// which revokes the older one, existed before e was signed; a signature
+// of a revoked generation counts only before the revocation (2.2 rule 4).
+// This is how a client without a verifying log keeps a thief with the key
+// store of a revoked generation from appending epochs once the chain names
+// the new one (device lost). A generation that user.rec does not hold
+// proves nothing and is not counted.
+//
+// TODO(ask): this local rule is the strictest reading of 2.2 rule 4 for
+// a chain checked without the log; neither the specification nor the
+// task names it. With the log (task 14) CheckRevokedSignature decides
+// the same by log order, and before the first epoch that names the new
+// generation only the log can.
+func (c *Client) checkSignerGen(links *store.Chain, e *store.Epoch) error {
+	u, _, err := c.st.ReadUser(e.SignerID)
+	if err != nil {
+		// The signature check fails as well (userKey).
+		return nil
+	}
+	known := u.Current().Gen
+	for n := uint32(1); n < e.Number; n++ {
+		p := links.Epoch(n)
+		if p == nil {
+			break
+		}
+		newer := p.SignerID == e.SignerID && p.SignerGen > e.SignerGen && p.SignerGen <= known
+		for _, m := range p.Members {
+			if m.Kind != store.MemberRecovery && m.ID == e.SignerID && m.Gen > e.SignerGen && m.Gen <= known {
+				newer = true
+			}
+		}
+		if newer {
+			return fmt.Errorf("%w: %w: epoch %d is signed by generation %d of %s, epoch %d names a newer generation", ErrSigner, ErrRevoked, e.Number, e.SignerGen, e.SignerID, n)
+		}
+	}
+	return nil
+}
+
 // keysFor returns the private keys of epoch e of the verified chain ch
 // (2.4, DECISIONS D61). A client has access to epoch e if a wrap for it
 // exists (members/<user-id>.wrap, or members/recovery.wrap for a client
@@ -829,7 +887,13 @@ func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) err
 //   - is for this client's current unwrap key (or the recovery key),
 //   - names the mailbox, epoch e and the recipient in its header,
 //   - is signed by a user member (kind 1) of e with a valid generation,
+//     or with a revoked one if this client's own wrap-accept of its
+//     current generation countersigns exactly this wrap (2.2 rule 4, S13),
 //   - holds keys whose public parts equal those of the signed epoch.rec.
+//
+// After the check the client countersigns the wrap (members/<me>.accept,
+// once per epoch and wrap, acceptWrap), so that it stays usable when the
+// member who made it later loses a generation.
 //
 // Membership of the reader is not required: a delegate for a past period
 // reads with wraps of epochs it is not a member of (2.5). Membership of
@@ -846,58 +910,94 @@ func (c *Client) keysFor(ch *chain, e *store.Epoch) (*store.EpochKeys, error) {
 	if k != nil {
 		return k, nil
 	}
-	data, key, err := c.readOwnWrap(e.MailboxID, e.Number)
+	k, data, err := c.openOwnWrap(e)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrWrap, err)
+		return nil, err
 	}
-	f, plain, err := envelope.Open(data, envelope.OpenOptions{
-		ExpectedSuite: e.Suite,
-		Key:           key,
-		ResolveSigner: func(ref envelope.SignerRef) (ed25519.PublicKey, error) {
-			if ref.Type != envelope.SignerUser {
-				return nil, ErrSigner
-			}
-			if _, ok := e.Member(store.ID(ref.ID)); !ok {
-				return nil, fmt.Errorf("%w: wrap signed by a non-member", ErrSigner)
-			}
-			return c.userKey(store.ID(ref.ID), ref.Gen, nil)
-		},
-	})
-	if err != nil {
-		c.warn("WARNUNG: Verpackung der Epoche %d von %s abgelehnt: %v", e.Number, e.MailboxID, err)
-		return nil, fmt.Errorf("%w: %v", ErrWrap, err)
-	}
-	defer keys.Wipe(plain)
-	h := f.Header
-	if h.Kind != envelope.KindWrap || h.MailboxID != e.MailboxID || h.Epoch != e.Number || h.FileID != key.ID {
-		return nil, fmt.Errorf("%w: wrap header does not match its location", ErrMismatch)
-	}
-	k, err = store.DecodeEpochKeys(plain)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrWrap, err)
-	}
-	if !k.Matches(e) {
-		k.Zero()
-		c.warn("WARNUNG: Schlüssel der Verpackung passen nicht zur signierten Epoche %d von %s.", e.Number, e.MailboxID)
-		return nil, fmt.Errorf("%w: keys do not match epoch.rec", ErrWrap)
-	}
+	c.acceptWrap(e, data)
 	c.mu.Lock()
 	c.epochKeys[ref] = k
 	c.mu.Unlock()
 	return k, nil
 }
 
+// openOwnWrap reads and checks the own wrap of epoch e like keysFor,
+// without the cache and without countersigning it, and returns the keys
+// with the exact bytes it checked.
+func (c *Client) openOwnWrap(e *store.Epoch) (*store.EpochKeys, []byte, error) {
+	data, key, err := c.readOwnWrap(e.MailboxID, e.Number)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrWrap, err)
+	}
+	// envelope.Open wraps the error of the resolver with %v, so its cause
+	// (ErrRevoked above all) is kept here for the warning (task 06h).
+	var resolveErr error
+	f, plain, err := envelope.Open(data, envelope.OpenOptions{
+		ExpectedSuite: e.Suite,
+		Key:           key,
+		ResolveSigner: func(ref envelope.SignerRef) (ed25519.PublicKey, error) {
+			pub, err := c.resolveWrapSigner(e, ref, data)
+			resolveErr = err
+			return pub, err
+		},
+	})
+	if err != nil {
+		cause := err
+		if resolveErr != nil {
+			cause = resolveErr
+		}
+		c.warn("WARNUNG: Verpackung der Epoche %d von %s abgelehnt: %s.", e.Number, e.MailboxID, warnCause(cause))
+		return nil, nil, fmt.Errorf("%w: %v", ErrWrap, err)
+	}
+	defer keys.Wipe(plain)
+	h := f.Header
+	if h.Kind != envelope.KindWrap || h.MailboxID != e.MailboxID || h.Epoch != e.Number || h.FileID != key.ID {
+		return nil, nil, fmt.Errorf("%w: wrap header does not match its location", ErrMismatch)
+	}
+	k, err := store.DecodeEpochKeys(plain)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrWrap, err)
+	}
+	if !k.Matches(e) {
+		k.Zero()
+		c.warn("WARNUNG: Schlüssel der Verpackung passen nicht zur signierten Epoche %d von %s.", e.Number, e.MailboxID)
+		return nil, nil, fmt.Errorf("%w: keys do not match epoch.rec", ErrWrap)
+	}
+	return k, data, nil
+}
+
+// resolveWrapSigner returns the key that checks the signature named by
+// ref on the own wrap data of epoch e: a user member of e (wrapSignerKey).
+func (c *Client) resolveWrapSigner(e *store.Epoch, ref envelope.SignerRef, data []byte) (ed25519.PublicKey, error) {
+	if ref.Type != envelope.SignerUser {
+		return nil, ErrSigner
+	}
+	if _, ok := e.Member(store.ID(ref.ID)); !ok {
+		return nil, fmt.Errorf("%w: wrap signed by a non-member", ErrSigner)
+	}
+	return c.wrapSignerKey(e, store.ID(ref.ID), ref.Gen, data)
+}
+
 // readOwnWrap reads the wrap of epoch n meant for this client and returns
 // it with the key that opens it: members/<me>.wrap for the current
 // generation, or members/recovery.wrap for a client opened with
-// RecoverRead (recipient type 4, TODO(Q1)).
+// RecoverRead (recipient type 4, TODO(Q1)). During DeviceLost a wrap for
+// a revoked generation of this user is opened with its key store (prevGen).
 func (c *Client) readOwnWrap(mbx store.ID, n uint32) ([]byte, envelope.RecipientKey, error) {
 	if c.rk != nil {
 		data, err := c.st.ReadRecoveryWrap(mbx, n)
 		return data, envelope.RecipientKey{Type: envelope.RecipientRecovery, ID: c.rk.id, Gen: store.RecoveryGen, PrivateKey: c.rk.unwrap}, err
 	}
 	data, err := c.st.ReadWrap(mbx, n, c.me)
-	return data, envelope.RecipientKey{Type: envelope.RecipientUserUnwrap, ID: c.me, Gen: c.ks.Generation, PrivateKey: c.ks.Unwrap}, err
+	ks := c.ks
+	if err == nil && c.prevKs != nil {
+		if f, perr := envelope.Parse(data); perr == nil && len(f.Recipients) == 1 {
+			if p := c.prevGen(f.Recipients[0].Gen); p != nil {
+				ks = p
+			}
+		}
+	}
+	return data, envelope.RecipientKey{Type: envelope.RecipientUserUnwrap, ID: c.me, Gen: ks.Generation, PrivateKey: ks.Unwrap}, err
 }
 
 // ownWrapExists reports whether a wrap for this client exists in epoch n
@@ -940,7 +1040,13 @@ func (c *Client) isUserMember(e *store.Epoch) bool {
 // Sync keeps the epoch supply of every mailbox of this client (2.4): if
 // no epoch has begun in the current month (the server noted a fallback),
 // an epoch with immediate begin is created, then epochs for the next
-// three months. Then it processes pending/ of the mailbox (Index, 6.2).
+// three months. Before that a user member wraps the epochs again for
+// every member whose generation was revoked (device lost, 2.2 point 5),
+// issues again the wraps of the listed members, its own and recovery.wrap
+// that a revoked generation signed (rewrapGenerations), and, while the
+// head still names a revoked generation (its own entry as well), creates
+// an epoch generation-revoked that discards the supply (K1 point 4).
+// Then it processes pending/ of the mailbox (Index, 6.2).
 func (c *Client) Sync() error {
 	var first error
 	for _, id := range c.Mailboxes() {
@@ -956,6 +1062,7 @@ func (c *Client) Sync() error {
 
 func (c *Client) syncMailbox(id store.ID) error {
 	return c.mutate(id, func(ch *chain) error {
+		c.acceptOwnWraps(ch)
 		head, headData := ch.head()
 		if !c.isUserMember(head) {
 			// The supply is created by user members only (K2 rule 1); a
@@ -967,8 +1074,12 @@ func (c *Client) syncMailbox(id store.ID) error {
 			}
 			return nil
 		}
-		folders := c.currentFolders(ch)
 		now := c.cfg.Now()
+		// Generations revoked by members (2.2 point 5, K1 point 4).
+		if done, err := c.syncGenerations(ch, now); done || err != nil {
+			return err
+		}
+		folders := c.currentFolders(ch)
 		note, err := c.st.ReadNote(id)
 		if err != nil {
 			c.warn("WARNUNG: Vermerk des Servers zu %s ist ungültig.", id)
@@ -1111,7 +1222,7 @@ func (c *Client) readFolders(ch *chain, n uint32) (*store.FolderList, store.ID, 
 		return nil, store.ID{}, 0, fmt.Errorf("%w: folders.gml of epoch %d is for epoch %d", ErrMismatch, e.Number, f.Header.Epoch)
 	}
 	inbox := store.ID(f.Header.FileID)
-	plain, err := c.openUserMeta(ch, data, inbox)
+	plain, taken, err := c.openUserMetaChecked(ch, data, inbox, foldersMemo(e.Number))
 	if err != nil {
 		return nil, store.ID{}, 0, err
 	}
@@ -1124,7 +1235,26 @@ func (c *Client) readFolders(ch *chain, n uint32) (*store.FolderList, store.ID, 
 		if fo.Name == InboxName && fo.ID == inbox {
 			// The version is part of the signed header (envelope checks
 			// field 8 is at least 1 for kind meta).
-			return l, inbox, f.Header.Version, nil
+			v := f.Header.Version
+			seen := c.mailboxState(id).Folders[fmt.Sprint(e.Number)]
+			switch {
+			case v < seen:
+				// Rejected by foldersAt; never recorded or taken over.
+			case taken && c.noTakeover:
+				// Step 2 of DeviceLost: the check record names it; step 4
+				// takes it over with the new generation.
+			case taken:
+				// Checked before the revocation: signed again by this
+				// user (2.2 rule 4 "Übernahme durch andere Mitglieder").
+				if v, err = c.resignFolders(ch, e, data, l, inbox, v); err != nil {
+					return nil, store.ID{}, 0, err
+				}
+			case f.Trailer != nil: // always: openUserMetaChecked verified it
+				if err := c.noteChecked(id, foldersMemo(e.Number), data, store.ID(f.Trailer.Signer.ID), f.Trailer.Signer.Gen); err != nil {
+					return nil, store.ID{}, 0, err
+				}
+			}
+			return l, inbox, v, nil
 		}
 	}
 	return nil, store.ID{}, 0, fmt.Errorf("%w: folders.gml names no inbox", ErrMismatch)
@@ -1136,7 +1266,7 @@ func (c *Client) readFolders(ch *chain, n uint32) (*store.FolderList, store.ID, 
 func (c *Client) inbox(ch *chain) (store.ID, []store.Folder, error) {
 	list, err := c.folders(ch)
 	if err != nil {
-		c.warn("WARNUNG: folders.gml von %s ist ungültig: %v", ch.mailbox.ID, err)
+		c.warn("WARNUNG: folders.gml von %s ist ungültig: %s.", ch.mailbox.ID, warnCause(err))
 		return store.ID{}, nil, err
 	}
 	var inbox store.ID
@@ -1151,40 +1281,63 @@ func (c *Client) inbox(ch *chain) (store.ID, []store.Folder, error) {
 	return inbox, list, nil
 }
 
-// openUserMeta opens a meta file signed by a member (name, folders).
+// openUserMeta opens a meta file signed by a member (name, folders). A
+// signature of a revoked generation is rejected (ErrRevoked).
 func (c *Client) openUserMeta(ch *chain, data []byte, fileID store.ID) ([]byte, error) {
+	plain, _, err := c.openUserMetaChecked(ch, data, fileID, "")
+	return plain, err
+}
+
+// openUserMetaChecked is openUserMeta with the local check record of
+// file memo (2.2 rule 4, takeover; empty: none): a file signed by a
+// revoked generation is accepted only if the record names exactly it
+// (taken reports that), and rejected with a warning otherwise. Recording
+// a file verified with a valid generation is the caller's task, after its
+// own checks (noteChecked).
+func (c *Client) openUserMetaChecked(ch *chain, data []byte, fileID store.ID, memo string) (plain []byte, taken bool, err error) {
 	f, err := envelope.Parse(data)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	e, err := ch.usable(f.Header.Epoch)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if f.Header.Kind != envelope.KindMeta || f.Header.MailboxID != ch.mailbox.ID || f.Header.FileID != fileID {
-		return nil, ErrMismatch
+		return nil, false, ErrMismatch
 	}
 	k, err := c.keysFor(ch, e)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	_, plain, err := envelope.Open(data, envelope.OpenOptions{
+	mbx := ch.mailbox.ID
+	_, plain, err = envelope.Open(data, envelope.OpenOptions{
 		ExpectedSuite: e.Suite,
 		Key:           envelope.RecipientKey{Type: envelope.RecipientEpochMeta, ID: e.MailboxID, Gen: e.Number, PrivateKey: k.Meta},
 		ResolveSigner: func(ref envelope.SignerRef) (ed25519.PublicKey, error) {
 			if ref.Type != envelope.SignerUser {
 				return nil, ErrSigner
 			}
-			if _, ok := e.Member(store.ID(ref.ID)); !ok {
+			signer := store.ID(ref.ID)
+			if _, ok := e.Member(signer); !ok {
 				return nil, ErrSigner
 			}
-			return c.userKey(store.ID(ref.ID), ref.Gen, nil)
+			pub, err := c.userKey(signer, ref.Gen, nil)
+			if !errors.Is(err, ErrRevoked) {
+				return pub, err
+			}
+			if memo == "" || !c.checkedBefore(mbx, memo, data, signer, ref.Gen) {
+				c.warn("WARNUNG: Eine Datei der Epoche %d von %s ist von der widerrufenen Generation %d signiert und wurde von diesem Client vorher nicht geprüft; sie wird nicht verwendet.", e.Number, mbx, ref.Gen)
+				return nil, err
+			}
+			taken = true
+			return c.revokedKey(signer, ref.Gen)
 		},
 	})
 	if err != nil {
-		return nil, signerErr(err)
+		return nil, false, signerErr(err)
 	}
-	return plain, nil
+	return plain, taken, nil
 }
 
 // signerErr maps signature failures of envelope to ErrSigner.

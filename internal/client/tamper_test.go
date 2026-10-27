@@ -192,7 +192,7 @@ func TestOlderMetadataVersion(t *testing.T) {
 		t.Fatalf("older version: %v", err)
 	}
 	list, _ = f.u.Client.List(f.mbx, store.ID{})
-	if len(list) != 0 || !warned(f.env, "older metadata version") {
+	if len(list) != 0 || !warned(f.env, "ältere Version als bereits gesehen") {
 		t.Fatal("older version listed or not warned")
 	}
 	// The memory survives a restart of the client.
@@ -305,7 +305,7 @@ func TestMailForOlderEpochAfterNewBegan(t *testing.T) {
 	if _, _, err := f.u.Client.Read(f.mbx, id); !errors.Is(err, client.ErrStaleEpoch) {
 		t.Fatalf("stale epoch: %v", err)
 	}
-	if !warned(f.env, "had begun") {
+	if !warned(f.env, "nach dem Beginn einer neueren") {
 		t.Fatal("no warning")
 	}
 	// Received before its epoch began.

@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -87,7 +88,7 @@ func TestWrapSignedByUserMemberOnly(t *testing.T) {
 	}
 	// Signed by bob, registered but no member of epoch 1.
 	w, err := readWith(t, f, f.u, 1, sealWrap(t, f.env, bob, f.u, wrapHeader(f.mbx, 1, f.u), plain1), a.ID)
-	if !errors.Is(err, client.ErrWrap) || !strings.Contains(w, "non-member") {
+	if !errors.Is(err, client.ErrWrap) || !strings.Contains(err.Error(), "non-member") || !strings.Contains(w, "Unterzeichner nicht zugelassen") || strings.Contains(w, "non-member") {
 		t.Fatalf("wrap signed by a non-member: %v (%s)", err, w)
 	}
 
@@ -105,7 +106,7 @@ func TestWrapSignedByUserMemberOnly(t *testing.T) {
 		t.Fatalf("wrap of epoch 5 signed by alice: %v (%s)", err, w)
 	}
 	w, err = readWith(t, f, f.u, 5, sealWrap(t, f.env, bob, f.u, wrapHeader(f.mbx, 5, f.u), plain5), m5.ID)
-	if !errors.Is(err, client.ErrWrap) || !strings.Contains(w, "non-member") {
+	if !errors.Is(err, client.ErrWrap) || !strings.Contains(err.Error(), "non-member") || !strings.Contains(w, "Unterzeichner nicht zugelassen") || strings.Contains(w, "non-member") {
 		t.Fatalf("wrap signed by a delegate: %v (%s)", err, w)
 	}
 	// The delegate's own wrap, signed by alice, stays valid for him.
@@ -179,11 +180,13 @@ func TestWrapKeysMustMatchEpoch(t *testing.T) {
 }
 
 // TestWrapOfRevokedSignerGeneration: bob's wraps were signed by alice's
-// generation 1. After alice moved to generation 2, bob's client no longer
-// accepts them: a wrap is never logged, so a revoked generation does not
-// count for it (2.2 rule 4, SPEC-ISSUES S13, strictest reading); no
-// .accept file (wrap-accept, task 06b) exists. The epochs, which are
-// logged, stay valid.
+// generation 1. After alice moved to generation 2, a wrap is never
+// logged, so a revoked generation does not count for it by itself (2.2
+// rule 4, SPEC-ISSUES S13): bob's client accepts it only because it
+// countersigned it (members/<bob>.accept, wrap-accept, task 06b) when it
+// first checked it. Without that acceptance the wrap is rejected; with an
+// acceptance of another wrap as well. The epochs, which are logged, stay
+// valid.
 func TestWrapOfRevokedSignerGeneration(t *testing.T) {
 	f := newFixture(t)
 	a := f.deliver(t, "a", "x")
@@ -193,25 +196,65 @@ func TestWrapOfRevokedSignerGeneration(t *testing.T) {
 	if _, _, err := bob.Client.Read(f.mbx, a.ID); err != nil {
 		t.Fatalf("bob before the revocation: %v", err)
 	}
-	if w := parse(t, mustRead(t, f.env.Store.WrapFile(f.mbx, 1, bob.ID))); w.Trailer == nil || w.Trailer.Signer.Gen != 1 {
+	wrap := mustRead(t, f.env.Store.WrapFile(f.mbx, 1, bob.ID))
+	if w := parse(t, wrap); w.Trailer == nil || w.Trailer.Signer.Gen != 1 {
 		t.Fatal("bob's wrap is not signed by generation 1")
+	}
+	acc, err := f.env.Store.ReadAccept(f.mbx, 1, bob.ID)
+	if err != nil || acc.WrapHash != sha256Sum(wrap) || acc.UserGen != 1 {
+		t.Fatalf("bob did not countersign his wrap: %v", err)
+	}
+	accept := mustRead(t, f.env.Store.AcceptFile(f.mbx, 1, bob.ID))
+	// Sync countersigns bob's other wraps as well.
+	if err := bob.Client.Sync(); err != nil {
+		t.Fatal(err)
 	}
 	if gen := f.env.Rotate(f.u); gen != 2 {
 		t.Fatalf("generation %d", gen)
 	}
-	bc := f.env.Reopen(bob)
-	f.env.Warnings.Take()
-	if _, _, err := bc.Read(f.mbx, a.ID); !errors.Is(err, client.ErrWrap) {
-		t.Fatalf("wrap signed by a revoked generation: %v", err)
+	read := func() (string, error) {
+		bc := f.env.Reopen(bob)
+		f.env.Warnings.Take()
+		_, _, err := bc.Read(f.mbx, a.ID)
+		return strings.Join(f.env.Warnings.Take(), "\n"), err
 	}
-	if w := strings.Join(f.env.Warnings.Take(), "\n"); !strings.Contains(w, "generation 1 is revoked") {
-		t.Fatalf("warnings: %s", w)
+	if w, err := read(); err != nil {
+		t.Fatalf("countersigned wrap of a revoked generation: %v (%s)", err, w)
 	}
-	if _, err := bc.MailboxName(f.mbx); !errors.Is(err, client.ErrWrap) {
-		t.Fatalf("folders through a wrap of a revoked generation: %v", err)
+	// Without the acceptance: rejected.
+	if err := os.Remove(f.env.Store.AcceptFile(f.mbx, 1, bob.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := read(); !errors.Is(err, client.ErrWrap) || !strings.Contains(err.Error(), "generation 1 is revoked") || !strings.Contains(err.Error(), "must be issued again") ||
+		!strings.Contains(w, "abgelehnt") || strings.Contains(w, ".accept") {
+		t.Fatalf("wrap signed by a revoked generation without acceptance: %v (%s)", err, w)
+	}
+	// Rejected wraps are never countersigned afterwards.
+	if _, err := os.Stat(f.env.Store.AcceptFile(f.mbx, 1, bob.ID)); !os.IsNotExist(err) {
+		t.Fatal("acceptance written for a rejected wrap")
+	}
+	// A valid acceptance of another wrap: rejected.
+	ks := f.env.Keystore(bob)
+	forged := &store.WrapAccept{MailboxID: f.mbx, Epoch: 1, UserID: bob.ID, WrapHash: sha256Sum([]byte("another wrap")), UserGen: 1}
+	if err := forged.Sign(ks.Identity); err != nil {
+		t.Fatal(err)
+	}
+	ks.Zero()
+	if err := f.env.Store.WriteAccept(forged); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := read(); !errors.Is(err, client.ErrWrap) || !strings.Contains(err.Error(), "another wrap") || !strings.Contains(w, "abgelehnt") {
+		t.Fatalf("acceptance of another wrap: %v (%s)", err, w)
+	}
+	// The original acceptance again: accepted.
+	if err := store.WriteFileAtomic(f.env.Store.AcceptFile(f.mbx, 1, bob.ID), accept); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := read(); err != nil {
+		t.Fatalf("acceptance restored: %v (%s)", err, w)
 	}
 	// The chain itself, signed by generation 1 and logged, verifies.
-	if err := bc.Sync(); err != nil {
+	if err := bob.Client.Sync(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -322,10 +365,10 @@ func TestIncompleteDiscards(t *testing.T) {
 		f.env.Clock.Advance(time.Hour)
 		forgeImmediate(t, f, []uint32{2, 3})
 		f.env.Warnings.Take()
-		if _, err := f.u.Client.List(f.mbx, store.ID{}); !errors.Is(err, store.ErrChain) {
+		if _, err := f.u.Client.List(f.mbx, store.ID{}); !errors.Is(err, store.ErrChain) || !strings.Contains(err.Error(), "does not discard epoch 4") {
 			t.Fatalf("incomplete discards: %v", err)
 		}
-		if w := strings.Join(f.env.Warnings.Take(), "\n"); !strings.Contains(w, "does not discard epoch 4") {
+		if w := strings.Join(f.env.Warnings.Take(), "\n"); !strings.Contains(w, "bricht bei Epoche 5 ab") {
 			t.Fatalf("warnings: %s", w)
 		}
 		c := f.env.Reopen(f.u)

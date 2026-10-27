@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"github.com/tim-riep/go-mail/internal/keys"
+	"github.com/tim-riep/go-mail/internal/shamir"
 	"github.com/tim-riep/go-mail/internal/store"
 )
 
@@ -22,6 +23,35 @@ type Prompter interface {
 	AskWord(position int) (string, error)
 }
 
+// SharePrompter is a Prompter that also shows the Shamir shares of the
+// seed (2.2 "Wiederherstellung", gomailctl keygen --shares). The shares
+// are shown only through ShowShares and never written to a file.
+//
+// TODO(task-13): ShowShares belongs to Prompter; it is a separate
+// interface only because cmd/gomailctl, which implements Prompter, is
+// changed by task 13 and not by this task.
+type SharePrompter interface {
+	Prompter
+	// ShowShares displays the shares once: shares[i] are the 30 words of
+	// the share with index i+1 (shamir.Share.Words).
+	ShowShares(shares [][]string) error
+}
+
+// Shares is a split "k-of-n" of the seed: Threshold of Count shares
+// rebuild it.
+type Shares struct {
+	Threshold int
+	Count     int
+}
+
+// KeygenOptions are the options of KeygenWithOptions.
+type KeygenOptions struct {
+	// Shares splits the seed additionally into shares (2.2
+	// "Wiederherstellung", e.g. 2-of-3); zero means no split. 2 <=
+	// Threshold <= Count <= 255 (shamir.Split).
+	Shares Shares
+}
+
 // ConfirmWords is the number of words asked back (2.2).
 const ConfirmWords = 3
 
@@ -31,11 +61,31 @@ const ConfirmWords = 3
 // with passphrase and the seed and root are wiped. The user exists only
 // locally until Register.
 func Keygen(cfg Config, passphrase []byte, p Prompter) (store.ID, error) {
+	return KeygenWithOptions(cfg, passphrase, p, KeygenOptions{})
+}
+
+// KeygenWithOptions is Keygen with options. With opts.Shares the seed is
+// split with shamir.Split after the words are confirmed, each share is
+// shown as 30 words through SharePrompter.ShowShares (p must implement
+// it), and the shares are wiped; the platform gets no share (2.2). A
+// split that does not rebuild the seed from its first Threshold shares
+// stops Keygen before anything is written.
+func KeygenWithOptions(cfg Config, passphrase []byte, p Prompter, opts KeygenOptions) (store.ID, error) {
 	if err := cfg.check(); err != nil {
 		return store.ID{}, err
 	}
 	if len(passphrase) == 0 {
 		return store.ID{}, fmt.Errorf("client: empty passphrase")
+	}
+	var sp SharePrompter
+	if opts.Shares != (Shares{}) {
+		if err := checkShares(opts.Shares); err != nil {
+			return store.ID{}, err
+		}
+		var ok bool
+		if sp, ok = p.(SharePrompter); !ok {
+			return store.ID{}, fmt.Errorf("%w: the prompter cannot show shares", ErrArgument)
+		}
 	}
 	if _, err := os.Stat(cfg.keystorePath()); err == nil {
 		return store.ID{}, ErrRegistered
@@ -47,6 +97,11 @@ func Keygen(cfg Config, passphrase []byte, p Prompter) (store.ID, error) {
 	defer seed.Zero()
 	if err := showAndConfirm(seed, p); err != nil {
 		return store.ID{}, err
+	}
+	if sp != nil {
+		if err := showShares(seed, opts.Shares, sp); err != nil {
+			return store.ID{}, err
+		}
 	}
 
 	u := keys.DeriveUser(seed)
@@ -128,14 +183,59 @@ func showAndConfirm(seed *keys.Seed, p Prompter) error {
 		if err != nil {
 			return err
 		}
-		// TODO(S11): the input is compared exactly, without trimming or
-		// case folding, until the normalization of seed word input is
-		// decided (SPEC-ISSUES S11).
-		if subtle.ConstantTimeCompare([]byte(got), []byte(words[pos])) != 1 {
+		// The answer is normalized like every word input (2.2 "Eingabe
+		// von Wörtern", S11) and must then be exactly the word.
+		w, err := oneWord(got)
+		if err != nil {
+			return fmt.Errorf("%w: position %d: %w", ErrConfirm, pos+1, err)
+		}
+		if subtle.ConstantTimeCompare([]byte(w), []byte(words[pos])) != 1 {
 			return ErrConfirm
 		}
 	}
 	return nil
+}
+
+// checkShares checks a split k-of-n before any secret exists.
+func checkShares(s Shares) error {
+	if s.Threshold < 2 || s.Count < s.Threshold || s.Count > 255 {
+		return fmt.Errorf("%w: shares %d-of-%d: %w", ErrArgument, s.Threshold, s.Count, shamir.ErrParams)
+	}
+	return nil
+}
+
+// showShares splits seed into s.Count shares of which s.Threshold rebuild
+// it (shamir.Split, randomness from crypto/rand), checks that the first
+// s.Threshold of them do, shows them as words through p and wipes them.
+func showShares(seed *keys.Seed, s Shares, p SharePrompter) error {
+	shares, err := shamir.Split(seed[:], s.Threshold, s.Count, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for _, sh := range shares {
+			sh.Zero()
+		}
+	}()
+	back, err := shamir.Combine(shares[:s.Threshold])
+	if err != nil {
+		return err
+	}
+	same := subtle.ConstantTimeCompare(back, seed[:]) == 1
+	keys.Wipe(back)
+	if !same {
+		return fmt.Errorf("client: the shares do not rebuild the seed")
+	}
+	out := make([][]string, len(shares))
+	defer func() {
+		for _, w := range out {
+			clear(w)
+		}
+	}()
+	for i, sh := range shares {
+		out[i] = sh.Words()
+	}
+	return p.ShowShares(out)
 }
 
 // choosePositions draws k distinct positions below n from crypto/rand.

@@ -23,6 +23,10 @@ func SetCrashHook(t interface{ Cleanup(func()) }, f func(point string) bool) {
 // ErrCrashed is the error of a simulated crash.
 var ErrCrashed = errCrashed
 
+// ErrKept is the cause of a lost race for an epoch.rec beyond the head
+// that did not verify but is not known to be invalid for good.
+var ErrKept = errKept
+
 // MaxEpochAttempts is the number of attempts of a change that loses the
 // race for an epoch number (K2 rule 3).
 const MaxEpochAttempts = maxEpochAttempts
@@ -31,3 +35,6 @@ const MaxEpochAttempts = maxEpochAttempts
 // not in force between two machines, so that a test can let two clients
 // create the same epoch (K2 rule 3).
 func (c *Client) WithoutMailboxLock() { c.skipLock = true }
+
+// WarnCause is warnCause for the tests of package client_test.
+var WarnCause = warnCause

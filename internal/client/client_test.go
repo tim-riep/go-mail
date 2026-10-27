@@ -20,9 +20,12 @@ import (
 
 type wrongPrompter struct{ testenv.Echo }
 
+// AskWord answers with a typo (a digit appended, which no word of the
+// list has): unlike case or white space, a typo is never normalized away
+// (S11).
 func (p *wrongPrompter) AskWord(pos int) (string, error) {
 	w, _ := p.Echo.AskWord(pos)
-	return strings.ToUpper(w), nil
+	return strings.ToUpper(w) + "1", nil
 }
 
 type failPrompter struct{ show, ask bool }
@@ -44,7 +47,6 @@ func TestKeygenAndRegister(t *testing.T) {
 	env := testenv.New(t)
 	dir := filepath.Join(env.Base, "c1")
 	cfg := env.ClientConfig(dir)
-	// TODO(S11): exact comparison; upper case is not the word.
 	if _, err := client.Keygen(cfg, testenv.Passphrase, &wrongPrompter{}); !errors.Is(err, client.ErrConfirm) {
 		t.Fatal("wrong confirmation accepted")
 	}

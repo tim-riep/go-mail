@@ -361,7 +361,7 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 	}
 	content, err := f.Decrypt(envelope.RecipientKey{Type: envelope.RecipientEpochContent, ID: mbx, Gen: e.Number, PrivateKey: k.Content})
 	if err != nil {
-		c.warn("WARNUNG: Mail %s lässt sich nicht entschlüsseln: %v", id, err)
+		c.warn("WARNUNG: Mail %s lässt sich nicht entschlüsseln: %s.", id, warnCause(err))
 		return nil, nil, err
 	}
 	return m, content, nil
@@ -369,14 +369,14 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 
 // warnRejected warns about a mail that failed a check. A mail for a
 // replaced or discarded epoch is shown as not deliverable, to be requested
-// again (K8). The warning names only the mail ID and the error, never
-// content.
+// again (K8). The warning names only the mail ID and a fixed cause
+// (warnCause), never content or the text of the error.
 func (c *Client) warnRejected(id store.ID, what string, err error) {
 	if errors.Is(err, ErrStaleEpoch) || errors.Is(err, ErrDiscardedEpoch) {
-		c.warn("WARNUNG: Mail %s %s: nicht zustellbar, bitte erneut anfordern (%v)", id, what, err)
+		c.warn("WARNUNG: Mail %s %s: nicht zustellbar, bitte erneut anfordern (%s).", id, what, warnCause(err))
 		return
 	}
-	c.warn("WARNUNG: Mail %s %s: %v", id, what, err)
+	c.warn("WARNUNG: Mail %s %s: %s.", id, what, warnCause(err))
 }
 
 // OpenPending opens a term list or marker pending/<n>/<file>.gml (5.2
@@ -392,7 +392,7 @@ func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.
 	}
 	e, err := ch.usable(epoch)
 	if err != nil {
-		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
+		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %s.", file, warnCause(err))
 		return nil, err
 	}
 	return c.openPending(ch, e, file)
@@ -423,12 +423,12 @@ func (c *Client) openPending(ch *chain, e *store.Epoch, file store.ID) (*store.P
 		},
 	})
 	if err != nil {
-		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
+		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %s.", file, warnCause(err))
 		return nil, signerErr(err)
 	}
 	defer keys.Wipe(plain)
 	reject := func(err error) (*store.Pending, error) {
-		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %v", file, err)
+		c.warn("WARNUNG: Begriffsliste %s wird nicht verarbeitet: %s.", file, warnCause(err))
 		return nil, err
 	}
 	if f.Header.Kind != envelope.KindPending || f.Header.MailboxID != mbx || f.Header.Epoch != epoch || f.Header.FileID != file {

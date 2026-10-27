@@ -301,7 +301,11 @@ func TestRevokedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cl.Close()
-	if err := cl.Sync(); err != nil {
+	// The chain verifies; as the only user member, whose wraps are for the
+	// revoked generation, the user cannot create the epoch
+	// generation-revoked: Sync reports ErrPartial (task 06h finding 2), not
+	// a chain error.
+	if err := cl.Sync(); !errors.Is(err, client.ErrPartial) || errors.Is(err, store.ErrChain) {
 		t.Fatalf("epochs of the revoked generation must verify through the log: %v", err)
 	}
 	if _, err := cl.List(mbx, store.ID{}); !errors.Is(err, client.ErrWrap) {

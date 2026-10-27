@@ -71,6 +71,17 @@ var (
 	// available. The wraps written stay; the error names only epoch
 	// numbers.
 	ErrPartial = errors.New("client: not every requested epoch was wrapped")
+	// ErrSeed rejects seed words or shares whose root key is not the root
+	// key of the user (DeviceLost, Restore). Nothing is written.
+	ErrSeed = errors.New("client: the seed does not belong to this user")
+	// ErrDeviceLostPending reports a device lost that was interrupted
+	// after user.rec named the new generation: the key store still holds
+	// the old one. Running DeviceLost again with the seed completes it.
+	ErrDeviceLostPending = errors.New("client: an interrupted device lost must be completed with the seed (device lost)")
+	// ErrRevoked rejects a file outside the log signed by a revoked
+	// generation that is not countersigned (wrap-accept) or not checked
+	// by this client before the revocation (2.2 rule 4, S13).
+	ErrRevoked = errors.New("client: signed by a revoked generation")
 	// ErrMetaChanged rejects a metadata version whose receipt time
 	// (created) or mail hash differs from the one remembered for the mail:
 	// both stay the same over all versions (section 7, task 09).
@@ -148,12 +159,30 @@ type state struct {
 	UserID     string                   `json:"user_id"`
 	Registered bool                     `json:"registered"`
 	Mailboxes  map[string]*mailboxState `json:"mailboxes"`
+	// Unconfirmed is set by Restore: the client was restored from the
+	// seed without another device and trusts on first contact (2.7 "Neue
+	// Geräte und Wiederherstellung"); every start warns until a confirmed
+	// state exists. TODO(task-14): cleared once a tree head with witness
+	// signatures has been checked.
+	Unconfirmed bool `json:"unconfirmed,omitempty"`
 	// Device is the random device ID of this client directory, the first
 	// part of the name of its index segments (6.2, K5). Created by the
 	// first Index.
 	Device string `json:"device,omitempty"`
 }
 
+// mailboxState is what this client remembers of one mailbox. It is the
+// protection against a server that rolls back or replaces files (2.4,
+// K1 point 3, 2.2 point 4, K3, section 7), so it only ever grows. Fixed
+// rule (task 06h): no path makes Epoch/EpochHash (the highest epoch seen),
+// Epochs (verified and discarded epochs), Checked (check records),
+// Recovery (confirmed recovery records), Versions, Folders or Mails of a
+// mailbox smaller, and no path removes or replaces the entry of a mailbox:
+// not device lost when mailbox.rec is missing (reissueAll), not the
+// adoption of memberships (adoptMemberships, which adds entries only).
+// Only a command by which the user explicitly asks to forget a mailbox
+// could remove an entry; there is none. Reissue is a mark, not memory:
+// it is set and cleared.
 type mailboxState struct {
 	Epoch     uint32            `json:"epoch"`
 	EpochHash string            `json:"epoch_hash"`
@@ -176,6 +205,18 @@ type mailboxState struct {
 	// Folders holds, per epoch, the highest version of folders.gml seen
 	// (section 7 "Gegen Wiedereinspielen", applied to folders.gml).
 	Folders map[string]uint32 `json:"folders,omitempty"`
+	// Checked is the local check record for files outside the log that
+	// a user signed (2.2 rule 4 "Übernahme durch andere Mitglieder",
+	// S13): per file ("folders/<n>") the hash, signer and generation of the
+	// last version this client verified while the signer's generation was
+	// valid. Only hashes, IDs and numbers.
+	Checked map[string]*checkMemo `json:"checked,omitempty"`
+	// Reissue is set by DeviceLost to the new generation if it could not
+	// issue every file of this mailbox again (ErrPartial); DeviceLost run
+	// again then continues instead of creating a generation, and Sync
+	// clears it once nothing signed by the revoked generation is left
+	// (syncGenerations). Only a number.
+	Reissue uint32 `json:"reissue,omitempty"`
 	// Mails holds, per mail, the epoch, the receipt time and the SHA-256
 	// of the mail file of the first metadata version seen: every later version
 	// must carry the same (section 7, task 09). Only hashes over
@@ -253,6 +294,23 @@ type Client struct {
 	mu        sync.Mutex
 	ingest    map[uint32]ingestKey
 	epochKeys map[epochRef]*store.EpochKeys
+	// locked is the mailbox whose lock mutate holds (zero otherwise), so
+	// that a takeover inside a change writes without taking it again.
+	locked store.ID
+	// prevKs is set only during step 4 of DeviceLost and its continuation:
+	// the key stores of this user's revoked generations (the old key store
+	// and those derived from the seed), still used to open the own wraps
+	// made for them, to check the templates they signed (oldGenKey) and,
+	// since holding the seed proves them, the own wraps they signed
+	// (seedProof). See prevGen.
+	prevKs []*keys.Keystore
+	// noAccept suppresses the wrap-accept of keysFor while DeviceLost
+	// countersigns with the new generation itself.
+	noAccept bool
+	// noTakeover is set during step 2 of DeviceLost: a file signed by a
+	// revoked generation with a check record is only checked, not signed
+	// again; step 4 signs it with the new generation (reissueFolders).
+	noTakeover bool
 	// dirty is set when a metadata version or mail memo was noted in the
 	// state but not yet saved (checkMeta); saveSeen writes it once per
 	// List, Read, Search, Index or SetFlags.
@@ -318,6 +376,10 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	// The data directory must hold exactly the user.rec this client
 	// registered (2.2), and the log must contain it.
 	_, remote, err := cfg.Store.ReadUser(me)
+	if err == nil && extendsUser(user, remote) {
+		cfg.Warn(warnDeviceLostPending)
+		return nil, ErrDeviceLostPending
+	}
 	if err != nil || string(remote) != string(local) {
 		cfg.Warn("WARNUNG: user.rec im Datenverzeichnis weicht vom registrierten Stand ab.")
 		return nil, ErrUserRecord
@@ -338,8 +400,13 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	g := user.Current()
 	if ks.Generation != g.Gen || !ks.Identity.Public().(ed25519.PublicKey).Equal(g.IdentityPub) || !ks.Unwrap.PublicKey().Equal(g.UnwrapPub) {
 		ks.Zero()
+		if ks.Generation+1 == g.Gen {
+			cfg.Warn(warnDeviceLostPending)
+			return nil, ErrDeviceLostPending
+		}
 		return nil, fmt.Errorf("client: the key store does not hold the current generation of the user")
 	}
+	warnUnconfirmed(cfg, st)
 	return &Client{cfg: cfg, st: cfg.Store, ks: ks, user: user, me: me, state: st, unlock: unlock,
 		ingest: map[uint32]ingestKey{}, epochKeys: map[epochRef]*store.EpochKeys{}}, nil
 }

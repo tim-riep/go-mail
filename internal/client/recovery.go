@@ -118,7 +118,10 @@ func recoveryMember(e *store.Epoch) (store.Member, bool) {
 //     festgelegt, verpackt ein Mitglied die bestehenden Epochen für ihn").
 //
 // Running SetRecovery again with the same record completes an
-// interrupted run.
+// interrupted run. If an existing epoch that has begun and is not
+// discarded could not be wrapped in step 4 (this user is not a user member
+// of it, or its keys are not available), the recipient is still entered
+// and the error is ErrPartial, naming the skipped epochs.
 func (c *Client) SetRecovery(mbx store.ID, pub *store.RecoveryPub, confirm func(fingerprint string) bool) error {
 	if err := c.writable(); err != nil {
 		return err
@@ -140,7 +143,10 @@ func (c *Client) SetRecovery(mbx store.ID, pub *store.RecoveryPub, confirm func(
 	if err := c.save(); err != nil {
 		return err
 	}
-	return c.mutate(mbx, func(ch *chain) error {
+	var skipped []uint32
+	err = c.mutate(mbx, func(ch *chain) error {
+		// Only the result of the last attempt counts (K2 rule 3).
+		skipped = nil
 		if err := c.mayCreate(ch); err != nil {
 			return err
 		}
@@ -174,9 +180,16 @@ func (c *Client) SetRecovery(mbx store.ID, pub *store.RecoveryPub, confirm func(
 		if cur == nil {
 			return nil
 		}
-		_, _, err := c.wrapExisting(ch, member, 1, cur.Number)
+		var err error
+		_, skipped, err = c.wrapExisting(ch, member, 1, cur.Number)
 		return err
 	})
+	if err == nil && len(skipped) > 0 {
+		// The recipient is entered; some existing epochs could not be
+		// wrapped for it (like Share).
+		err = fmt.Errorf("%w: epochs %v of %s", ErrPartial, skipped, mbx)
+	}
+	return err
 }
 
 // removeRecoveryWraps deletes recovery.wrap of every epoch of ch that is
@@ -271,7 +284,9 @@ func (c *Client) ConfirmRecovery(mbx store.ID, confirm func(fingerprint string) 
 // recipient is the one of the chain whose recovery/<id>.pub holds the
 // keys derived from the seed; every wrap is checked like a member's
 // (signed by a user member of its epoch, keys equal to epoch.rec).
-// The words must be exact (keys.SeedFromWords).
+// The words are normalized like every word input (2.2 "Eingabe von
+// Wörtern", S11: NFKD, lower case, any white space), then they must be
+// exactly words of the list (keys.SeedFromWords).
 func RecoverRead(cfg Config, mbx store.ID, words []string) (*Client, error) {
 	if err := cfg.checkReader(); err != nil {
 		return nil, err
@@ -283,7 +298,11 @@ func RecoverRead(cfg Config, mbx store.ID, words []string) (*Client, error) {
 	if err := cfg.Log.CheckFresh(cfg.Now()); err != nil {
 		return nil, err
 	}
-	seed, err := keys.SeedFromWords(words)
+	normalized, err := normalizeList(words)
+	if err != nil {
+		return nil, err
+	}
+	seed, err := keys.SeedFromWords(normalized)
 	if err != nil {
 		return nil, err
 	}

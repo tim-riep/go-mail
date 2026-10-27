@@ -266,7 +266,10 @@ func (e *Env) AssignAddress(addr string, mbx store.ID) {
 }
 
 // Echo answers the seed confirmation correctly.
-type Echo struct{ words []string }
+type Echo struct {
+	words  []string
+	shares [][]string
+}
 
 // ShowWords remembers the words.
 func (p *Echo) ShowWords(w []string) error { p.words = append([]string(nil), w...); return nil }
@@ -276,6 +279,24 @@ func (p *Echo) AskWord(pos int) (string, error) { return p.words[pos-1], nil }
 
 // Words returns the words shown last (for a recovery seed in tests).
 func (p *Echo) Words() []string { return append([]string(nil), p.words...) }
+
+// ShowShares remembers the shares (client.SharePrompter).
+func (p *Echo) ShowShares(s [][]string) error {
+	p.shares = nil
+	for _, w := range s {
+		p.shares = append(p.shares, append([]string(nil), w...))
+	}
+	return nil
+}
+
+// Shares returns the shares shown last.
+func (p *Echo) Shares() [][]string {
+	var out [][]string
+	for _, w := range p.shares {
+		out = append(out, append([]string(nil), w...))
+	}
+	return out
+}
 
 // Passphrase of test users.
 var Passphrase = []byte("correct horse battery staple")
@@ -315,13 +336,29 @@ func (e *Env) NewUser(name string) *User {
 	return &User{Dir: dir, ID: id, Client: c, Words: echo.Words()}
 }
 
-// Rotate moves u to its next generation as a lost device would (2.2,
-// "device lost" is task 06b): from u's seed it derives identity and
-// unwrap key of generation current+1, appends their certificate (which
-// revokes the current generation) to user.rec signed by the root, writes
-// user.rec to the data directory and the client directory, the key store
-// with the new generation, appends user.rec to the log and opens the
-// client again. It returns the new generation.
+// DeviceLost runs client.DeviceLost for u with its seed words (the client
+// of u is closed first, as gomailctl device lost runs as its own process)
+// and opens the client again. It returns the new generation; an error of
+// DeviceLost fails the test.
+func (e *Env) DeviceLost(u *User) uint32 {
+	e.T.Helper()
+	u.Client.Close()
+	gen, err := client.DeviceLost(e.ClientConfig(u.Dir), Passphrase, u.Words)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	e.Reopen(u)
+	return gen
+}
+
+// Rotate moves u to its next generation like a lost device, but without
+// anything client.DeviceLost does in the mailboxes (no wraps, epoch or
+// files issued again): from u's seed it derives identity and unwrap key
+// of generation current+1, appends their certificate (which revokes the
+// current generation) to user.rec signed by the root, writes user.rec to
+// the data directory and the client directory, the key store with the
+// new generation, appends user.rec to the log and opens the client again.
+// It returns the new generation.
 func (e *Env) Rotate(u *User) uint32 {
 	e.T.Helper()
 	fail := func(err error) {

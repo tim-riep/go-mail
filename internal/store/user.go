@@ -1,8 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/rec"
@@ -160,4 +165,62 @@ func (u *User) Generation(gen uint32) *keys.GenerationCert {
 		return nil
 	}
 	return u.Generations[gen-1]
+}
+
+// ReplaceUser replaces users/<id>/user.rec by u when u extends the stored
+// record by exactly one generation (device lost, 2.2 rule 2): the stored
+// record must decode, name the same user and root key and hold exactly
+// the generations 1..g of u, byte for byte, and u the generations 1..g+1,
+// signed by the root. A stored record that already equals u is left as it
+// is (a resumed device lost). Anything else is ErrExists and nothing is
+// written; a missing record is ErrNotFound. The check and the atomic
+// replacement run under the lock users/<id>/lock (9.1). It returns the
+// encoding of u.
+func (s *Store) ReplaceUser(u *User) ([]byte, error) {
+	data, err := u.Encode()
+	if err != nil {
+		return nil, err
+	}
+	p := s.UserFile(u.ID)
+	if _, err := os.Lstat(filepath.Dir(p)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: user %s", ErrNotFound, u.ID)
+		}
+		return nil, err
+	}
+	unlock, err := lockFile(filepath.Join(filepath.Dir(p), "lock"))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	old, oldData, err := s.ReadUser(u.ID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: stored user.rec of %s: %v", ErrExists, u.ID, err)
+	}
+	if bytes.Equal(oldData, data) {
+		return data, nil
+	}
+	if !old.RootPub.Equal(u.RootPub) || len(u.Generations) != len(old.Generations)+1 {
+		return nil, fmt.Errorf("%w: user.rec of %s is not extended by exactly one generation", ErrExists, u.ID)
+	}
+	for i, g := range old.Generations {
+		a, err := g.Encode()
+		if err != nil {
+			return nil, err
+		}
+		b, err := u.Generations[i].Encode()
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(a, b) {
+			return nil, fmt.Errorf("%w: user.rec of %s differs in generation %d", ErrExists, u.ID, g.Gen)
+		}
+	}
+	if err := WriteFileAtomic(p, data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }

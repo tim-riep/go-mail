@@ -61,7 +61,8 @@ func (c *Client) mutate(mbx store.ID, op func(ch *chain) error) error {
 		}
 		defer unlock()
 	}
-	defer func() { c.next = nil }()
+	c.locked = mbx
+	defer func() { c.next, c.locked = nil, store.ID{} }()
 	for attempt := 1; ; attempt++ {
 		c.created, c.next = nil, nil
 		ch, err := c.loadChain(mbx, true)
@@ -118,6 +119,15 @@ func (c *Client) currentGeneration(id store.ID) (uint32, *ecdh.PublicKey, error)
 // wraps are sealed for: users and delegates with the current generation
 // of their user.rec (2.4 "für den aktuellen Entpackschlüssel"), the
 // recovery recipient with the record confirmed on this device.
+//
+// TODO(Q1): with a recovery recipient in the member list, a user member
+// creates no epoch (supply, immediate, device lost) on a device that has
+// not confirmed the record (ConfirmRecovery): the strict reading of K3
+// point 3 ("only after that does this device wrap new epochs for it"),
+// which keeps the server from slipping in a key of its own. Whether a
+// member must confirm the record on every device before it can create
+// epochs, or may create them without a wrap for the recovery recipient,
+// is open (question 3 of the review of task 06e).
 func (c *Client) resolveMembers(mbx store.ID, list []store.Member) ([]newMember, error) {
 	out := make([]newMember, 0, len(list))
 	for _, m := range list {
@@ -256,7 +266,7 @@ func (c *Client) wrapExisting(ch *chain, m newMember, from, to uint32) (wrapped,
 		}
 		k, err := c.keysFor(ch, e)
 		if err != nil {
-			c.warn("Hinweis: Epoche %d von %s wird nicht weitergegeben: %v", n, mbx, err)
+			c.warn("Hinweis: Epoche %d von %s wird nicht weitergegeben: %s.", n, mbx, warnCause(err))
 			skipped = append(skipped, n)
 			continue
 		}

@@ -104,7 +104,7 @@ func (c *Client) rewriteFolders(ch *chain, name string, inbox store.ID, folders 
 		// One above the version read, and above every version seen.
 		_, _, v, err := c.foldersAt(ch, e.Number)
 		if err != nil {
-			c.warn("WARNUNG: folders.gml der Epoche %d von %s wird ersetzt: %v", e.Number, mbx, err)
+			c.warn("WARNUNG: folders.gml der Epoche %d von %s wird ersetzt: %s.", e.Number, mbx, warnCause(err))
 		}
 		k := fmt.Sprint(e.Number)
 		v = max(v, ms.Folders[k])

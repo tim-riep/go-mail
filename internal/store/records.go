@@ -99,6 +99,22 @@ func DecodeEpochKeys(data []byte) (*EpochKeys, error) {
 
 // Matches reports whether the keys belong to epoch e: same mailbox, same
 // number and public keys equal to those in the signed epoch.rec.
+//
+// The index key (Index) is deliberately not bound: it is a symmetric HMAC
+// key (search marks, 6.1) without a public part, and epoch.rec carries no
+// commitment to it, so Matches cannot tell a wrap with another index key
+// from the genuine one. What that means: whoever can make a wrap that a
+// reader accepts (a user member of the epoch with a valid generation; the
+// holder of a revoked generation's key store for a wrap the reader
+// countersigned or, during device lost, an own wrap of that generation
+// proven by the seed) and holds the content and meta keys of the epoch
+// anyway can give that reader an index key of its own choice. It gains no
+// access to mail: content and meta keys are checked. It can make the
+// reader's search miss mails and the reader's index segments useless to
+// the other members (their marks use another key); mails, metadata and
+// folders.gml are not affected. A binding would need a new field in
+// epoch.rec (a hash of the index key), a format change outside the tasks
+// so far.
 func (k *EpochKeys) Matches(e *Epoch) bool {
 	return k.MailboxID == e.MailboxID && k.Epoch == e.Number &&
 		k.Content.PublicKey().Equal(e.ContentPub) && k.Meta.PublicKey().Equal(e.MetaPub)
