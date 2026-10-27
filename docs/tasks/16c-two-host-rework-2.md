@@ -1,0 +1,19 @@
+# Auftrag 16c: Nacharbeit `scripts/two-host-test.sh`, Runde 2 (Funde der Prüfung von 16b)
+
+Welle 4. Feste Vorgaben: `docs/tasks/00-vorgaben.md` (gelten wörtlich). Branch `worktree-agent-aa6835d2a852f9497`, Worktree `/home/user/go-mail/.claude/worktrees/agent-aa6835d2a852f9497` (Stand 52263f5; zuerst `git merge --no-edit claude/quirky-keller-hjsl5i`, nur Doku seither). Aufträge 16 und 16b bleiben gültig. Nur `scripts/two-host-test.sh`, `internal/e2e/twohost_test.go`, `docs/RUNBOOK.md` (Abschnitt „Zwei Maschinen“). Prüfhilfen unter `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/verify16b/` (`sigkg.sh`, `sigpt.sh`, `scanwords.py`, ssh-Ersatz `fake/`). Platte knapp: `GOMAIL_TEST_MIN_FREE=0.000001` für lokale Läufe des Testbuilds (`-tags gomail_test`).
+
+## Fund hoch
+
+1. **Aufräum-Zustand aus der Umgebung geerbt.** `RW`, `SW`, `CW`, `SDATA`, `WKEY`, `CPIN`, `DATA_OURS`, `WKEY_OURS`, `PIN_OURS`, `MARK_OURS`, `MARKF`, `MADE_LINK`, `MADE_EXPORT`, `MADE_WORKDIR`, `MADE_SWORKDIR`, `MADE_CWORKDIR`, `PROTO` sind vor `trap cleanup EXIT` nicht vorbelegt; `RW=/fremd sh scripts/two-host-test.sh --local … --workdir /gibtsnicht/x` löscht `/fremd` (Exit 2). Umsetzen: Alle Zustandsvariablen des Aufräumens vor dem Trap ausdrücklich leer bzw. auf 0 setzen; `cleanup` löscht nur Pfade, die unterhalb des eigenen `mktemp`-Verzeichnisses liegen oder deren `*_OURS`-Kennzeichen das Skript selbst gesetzt hat (zusätzliche Plausibilitätsprüfung: Pfad beginnt mit dem eigenen Laufverzeichnis bzw. ist die selbst angelegte Datei). Zudem darf das Skript keine weiteren Variablen aus der Umgebung übernehmen, außer den dokumentierten (`GOMAIL_TEST_MIN_FREE`, `TMPDIR`, `PATH`, ssh-Umgebung): `set -u` plus explizite Vorbelegung aller eigenen Variablen; prüfe mit `env -i PATH=$PATH sh scripts/…`. Test: Untertest, der die Variablen aus Fund 1 mit Fremdpfaden setzt und einen frühen Abbruch erzwingt; danach existieren die Fremdpfade noch.
+
+## Funde niedrig
+
+2. `KEYGEN`: `cat "$t/err" >&2` gibt bei Fehlern „Wort Nr. N:“ aus → stderr des `keygen` vor der Ausgabe filtern (Positionen ohne Wörter sind unkritisch, aber die Fragezeilen gehören nicht ins Protokoll; nur letzte Fehlerzeile ohne „Wort“-Präfix).
+3. Entfernter `keygen` läuft nach Abbruch bis 60 s weiter: Schleife bricht ab, wenn `$t` fehlt; PID des `keygen` in `PIDS`.
+4. `/proc/mounts` schreibt Leerzeichen als `\040`: Oktal-Escapes vor dem Vergleich dekodieren (Test im ssh-Ersatz mit Leerzeichen im Mountpfad).
+5. `list … --dir $BOB` schreibt stdout nach `$T/out`: nach `/dev/null` (nur der Exit-Code zählt) oder über awk prüfen.
+6. RUNBOOK: fehlendes `--export` im Zwei-Maschinen-Modus → Exit 1 (Markierungsprüfung), nicht 2; lokaler Modus legt `--export`/`--mount` an und entfernt sie; Passphrase-Datei auch mit `--keep` löschen (und im RUNBOOK nennen).
+7. Test `SIGINT_during_keygen`: Wrapper mit `exec` und Prozess-Substitution, damit der Test belegt, dass das Skript das echte `gomailctl` beendet; danach Prozessgruppe prüfen.
+8. Betreff/Text in Kommandozeilen von `sh -c` (`GM_S=…`, `grep -e <Betreff>` in Schritt e) sind über `/proc/*/cmdline` sichtbar: alle Klartextwerte ausschließlich über die Umgebung (`export` vor `sh -c`, im Remote-Zweig über stdin der entfernten Shell), nie als Argument; Test: während des Laufs `cat /proc/*/cmdline` nach Betreff/Text durchsuchen → kein Treffer.
+
+Fertig: `dash -n`, `bash -n`, lokaler Lauf bestanden (auch mit `env -i`), `go test -race -tags gomail_test ./internal/e2e`, `GOARCH=386 go test -tags gomail_test -run 'TestTwoHostScript|TestRunbook' ./internal/e2e`, `gofmt -l .` leer, `go vet ./...`, Vektoren byte-gleich. Ein Commit `scripts: two-host test initialises its cleanup state, no secrets in command lines (task 16c)`; kein Modellname. Bericht nach `00-vorgaben.md`: je Fund Änderung und Testname.
