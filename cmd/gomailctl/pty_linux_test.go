@@ -479,8 +479,9 @@ func TestPtyKeygenNoTerminal(t *testing.T) {
 			if exists(dir) {
 				t.Fatal("client directory")
 			}
-			s := p.out.String()[from:]
-			if strings.Contains(s, "Wort Nr") || strings.Contains(s, "Ihr Seed") || !strings.Contains(s, "nur") {
+			// The transcript up to a marker typed after the end holds
+			// everything the program wrote (task 13e point 2).
+			if s, _ := p.quiet(t, from); strings.Contains(s, "Wort Nr") || strings.Contains(s, "Ihr Seed") || !strings.Contains(s, "nur") {
 				t.Fatalf("terminal: %q", s)
 			}
 		})

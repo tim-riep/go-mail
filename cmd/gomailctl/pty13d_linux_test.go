@@ -182,20 +182,22 @@ func TestPtyKeygenMasterStdout(t *testing.T) {
 		if code := ch.exit(t); code != 1 {
 			t.Fatalf("swap %v: exit %d\n%q\n%q", swap, code, errOut(), p.out.String())
 		}
-		time.Sleep(100 * time.Millisecond)
 		if s := errOut(); !strings.Contains(s, "Gegenseite (Master) eines Pseudoterminals") || strings.Contains(s, "Passphrase") {
 			t.Fatalf("swap %v: stderr %q", swap, s)
 		}
-		if s := p.out.String(); s != "" {
+		p.restored(t)
+		// Everything written to either side is in the transcript and the
+		// input queue before the marker (task 13e point 2).
+		s, n := p.quiet(t, 0)
+		if s != "" {
 			t.Fatalf("swap %v: written to the terminal: %q", swap, s)
 		}
-		if n := inputQueued(t, p.slave); n != 0 {
+		if n != 0 {
 			t.Fatalf("swap %v: %d bytes in the input of the terminal", swap, n)
 		}
 		if exists(dir) {
 			t.Fatalf("swap %v: client directory", swap)
 		}
-		p.restored(t)
 	}
 }
 
@@ -243,16 +245,23 @@ func TestPtyWordsMasterDevTTY(t *testing.T) {
 		if code := ch.exit(t); code != 1 {
 			t.Fatalf("%s: exit %d\n%q\n%q", tc.name, code, errOut(), a.out.String())
 		}
-		time.Sleep(100 * time.Millisecond)
 		if s := errOut(); !strings.Contains(s, "Gegenseite (Master) eines Pseudoterminals") || strings.Contains(s, "Passphrase") || strings.Contains(s, "eingeben") {
 			t.Fatalf("%s: stderr %q", tc.name, s)
 		}
-		// Only the typed words, echoed by A, and none of the program.
-		if s := strings.TrimSpace(strings.ReplaceAll(a.out.String(), "\r\n", "\n")); s != strings.Join(alice.Words, " ") {
-			t.Fatalf("%s: terminal A shows %q", tc.name, s)
+		a.restored(t)
+		// Only the typed words, echoed by A and queued unread, and none
+		// of the program; everything it wrote to either side is in the
+		// transcript and the input queue before the marker (task 13e
+		// point 2).
+		typed := strings.Join(alice.Words, " ")
+		if s, n := a.quiet(t, 0); strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n")) != typed || n != len(typed)+1 {
+			t.Fatalf("%s: terminal A shows %q, %d bytes queued", tc.name, s, n)
 		}
-		if b != nil && b.out.String() != "" {
-			t.Fatalf("%s: terminal B shows %q", tc.name, b.out.String())
+		if b != nil {
+			b.restored(t)
+			if s, n := b.quiet(t, 0); s != "" || n != 0 {
+				t.Fatalf("%s: terminal B shows %q, %d bytes queued", tc.name, s, n)
+			}
 		}
 		u, _, err := c.env.Store.ReadUser(alice.ID)
 		if err != nil || u.Current().Gen != 1 {
@@ -261,7 +270,6 @@ func TestPtyWordsMasterDevTTY(t *testing.T) {
 		if exists(filepath.Join(c.env.Base, "clients", "master-restore")) {
 			t.Fatalf("%s: restore wrote a client directory", tc.name)
 		}
-		a.restored(t)
 	}
 }
 

@@ -35,7 +35,9 @@ import (
 // script) the words are accepted: the line discipline of a terminal
 // echoes nothing there. keygen reads its three words only from a
 // terminal (keygenPre). The same terminal may be named through
-// /dev/tty (task 13c finding 2, sameTerminal). The master side of a
+// /dev/tty (task 13c finding 2, sameTerminal); two descriptors of
+// /dev/tty count as one terminal only when both are the controlling
+// terminal of the program (task 13e point 1). The master side of a
 // pseudo terminal is never a terminal of the user (task 13d finding 1,
 // isTerminalFd): on standard input or output it refuses keygen, device
 // lost and restore before anything is shown or read (errPtyMaster).
@@ -158,16 +160,19 @@ func terminalOf(v any) (uint64, bool) {
 }
 
 // sameTerminal reports whether a and b are the same terminal: the same
-// device, or, for two files, both the controlling terminal of the
-// program (task 13c finding 2: /dev/tty is a device of its own, 5:0 on
-// Linux, and names the controlling terminal; sameControlling).
+// device other than /dev/tty, or, for two files, both the controlling
+// terminal of the program (task 13c finding 2: /dev/tty is a device of
+// its own, 5:0 on Linux, and names the controlling terminal;
+// sameControlling). Two descriptors of /dev/tty have the same device
+// even when they were opened in different sessions and name different
+// terminals (task 13e point 1): they pass only through sameControlling.
 func sameTerminal(a, b any) bool {
 	x, ok1 := terminalOf(a)
 	y, ok2 := terminalOf(b)
 	if !ok1 || !ok2 {
 		return false
 	}
-	if x == y {
+	if x == y && !isDevTTY(x) {
 		return true
 	}
 	fa, ok1 := a.(*os.File)

@@ -19,6 +19,8 @@ var brokenPipe []os.Signal
 
 func sameControlling(uintptr, uintptr) bool { return false }
 
+func isDevTTY(uint64) bool { return false }
+
 func isTerminalFd(uintptr) bool { return false }
 
 func isPtyMaster(uintptr) bool { return false }

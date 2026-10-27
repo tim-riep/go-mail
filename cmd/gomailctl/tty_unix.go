@@ -160,35 +160,64 @@ func terminalID(fd uintptr) (id uint64, ok bool) {
 // devTTY is the path of the controlling terminal of a process.
 const devTTY = "/dev/tty"
 
-// sameControlling reports whether the terminals a and b are the same
-// controlling terminal although their devices differ (task 13c finding
-// 2): one of them must be /dev/tty, a device of its own (5:0 on Linux)
-// that stands for the controlling terminal of the program, and both
-// must answer TIOCGPGRP with the same foreground process group. The
-// kernel answers that request on a terminal only for the session it
-// controls (ENOTTY otherwise), and a foreground process group belongs
-// to one session and so to one terminal; none (0) counts as no answer.
-// The master side of a pseudo terminal answers TIOCGPGRP for its slave,
-// so the master of the controlling terminal would pass: terminalID
-// refuses every master (isTerminalFd, task 13d finding 1), and on Linux
-// the other side must also be the controlling terminal by its device
-// number (isControllingDevice, tty_nr of /proc/self/stat).
-func sameControlling(a, b uintptr) bool {
+// isDevTTY reports whether rdev is the device of /dev/tty, a device of
+// its own (5:0 on Linux) that stands for the controlling terminal of the
+// process that opened it: by the device number of /dev/tty or, where
+// that number is fixed (Linux, isDevTTYNumber), by that number, so that a
+// missing /dev/tty does not make a descriptor of it a terminal of its
+// own.
+func isDevTTY(rdev uint64) bool {
 	var st syscall.Stat_t
-	if err := syscall.Stat(devTTY, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFCHR {
-		return false
+	if err := syscall.Stat(devTTY, &st); err == nil && st.Mode&syscall.S_IFMT == syscall.S_IFCHR && uint64(st.Rdev) == rdev {
+		return true
 	}
-	tty := uint64(st.Rdev)
+	return isDevTTYNumber(rdev)
+}
+
+// sameControlling reports whether the terminals a and b, one of them or
+// both /dev/tty (isDevTTY), are the same terminal: both must be the
+// controlling terminal of the program and answer TIOCGPGRP with the same
+// foreground process group. The kernel answers that request on a
+// terminal only for the session it controls (ENOTTY otherwise), and a
+// foreground process group belongs to one session and so to one
+// terminal; none (0) counts as no answer.
+//
+// With one side /dev/tty (task 13c finding 2), the other side must also
+// be the controlling terminal by its device number (isControllingDevice,
+// tty_nr of /proc/self/stat on Linux, task 13d finding 1): the master
+// side of a pseudo terminal answers TIOCGPGRP for its slave, so the
+// master of the controlling terminal would pass; terminalID refuses
+// every master (isTerminalFd) as well.
+//
+// With both sides /dev/tty (task 13e point 1), the device number names
+// no terminal: a descriptor of /dev/tty opened in another session (and
+// inherited) names the controlling terminal of that session, not the
+// one of the program, and two such descriptors from two sessions have
+// the same device number 5:0. Both must then be the controlling terminal
+// of the program (isControllingFd: on Linux TIOCGDEV, the terminal behind
+// the descriptor, is tty_nr) and answer TIOCGPGRP; otherwise they are
+// refused, even if both name the same terminal of another session.
+func sameControlling(a, b uintptr) bool {
 	x, ok1 := terminalID(a)
 	y, ok2 := terminalID(b)
-	if !ok1 || !ok2 || (x != tty && y != tty) {
+	if !ok1 || !ok2 {
 		return false
 	}
-	other := x
-	if x == tty {
-		other = y
-	}
-	if other == tty || !isControllingDevice(other) {
+	ttyA, ttyB := isDevTTY(x), isDevTTY(y)
+	switch {
+	case ttyA && ttyB:
+		if !isControllingFd(a) || !isControllingFd(b) {
+			return false
+		}
+	case ttyA:
+		if !isControllingDevice(y) {
+			return false
+		}
+	case ttyB:
+		if !isControllingDevice(x) {
+			return false
+		}
+	default:
 		return false
 	}
 	p, ok1 := foreground(a)

@@ -91,3 +91,22 @@ func parseTTYNr(stat []byte) (uint64, bool) {
 	}
 	return uint64(uint32(int32(n))), true
 }
+
+// isDevTTYNumber reports whether rdev is 5:0, the device number of
+// /dev/tty on Linux (Documentation/admin-guide/devices.txt), as stat
+// encodes it (major 5 << 8).
+func isDevTTYNumber(rdev uint64) bool { return rdev == 5<<8 }
+
+// isControllingFd reports whether fd, a descriptor of /dev/tty, names
+// the controlling terminal of the program (task 13e point 1): TIOCGDEV
+// returns the device number of the terminal behind the descriptor (the
+// controlling terminal of the process that opened /dev/tty), which must
+// be tty_nr of /proc/self/stat (isControllingDevice). A descriptor
+// inherited from another session names the terminal of that session.
+func isControllingFd(fd uintptr) bool {
+	var dev uint32
+	if ioctl(fd, syscall.TIOCGDEV, unsafe.Pointer(&dev)) != nil {
+		return false
+	}
+	return isControllingDevice(uint64(dev))
+}
