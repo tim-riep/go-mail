@@ -60,6 +60,24 @@ gomail-server serve --data ./data --listen 127.0.0.1:2525 --ingest-key ./keys/in
 - Beim Start räumt der Server `spool/` und `work/` (5.2, 5.3).
 - Das Log enthält nur IDs, Größen und Statuscodes. Beenden mit Strg+C.
 
+### Server mit Transparenzlog (ab Auftrag 15)
+
+Seit Auftrag 15 läuft `gomail-server serve` immer mit dem Transparenzlog; `--insecure-no-log` gibt es beim Server nicht mehr, dafür sind `--pin` (außerhalb des Datenverzeichnisses) und `--log-listen` Pflicht. Die Schritte oben beschreiben noch den Stand von Phase 1; Auftrag 19 stellt das RUNBOOK ganz um. Für den Betrieb des Servers gilt schon jetzt:
+
+- **`--require-client-lock`** (Testsperre nach 9.1, Lesart D70): Der Server startet nur, wenn eine wirksame Client-Sperre `locks/client` besteht (gomailctl hält sie). Ohne den Schalter startet der Server auch ohne laufenden Client und meldet nur, dass keine Client-Sperre gehalten wird; ein dauerhaft laufender Server kann beim Start keinen Client voraussetzen. Der Test auf zwei Maschinen schaltet ihn ein. Die Testsperre zeigt nur, dass irgendein Prozess mit Zugriff auf das Datenverzeichnis die Sperre hält; sie garantiert keine Echtheit des Clients (keine Authentifizierung).
+- **Inkonsistentes Log:** Erkennt der Server, dass `log/tree.rec` zurückgesetzt oder beschädigt wurde (ein Eintrag jenseits des nächsten Index, ein veröffentlichter Kopf jenseits der Größe, ein kleinerer oder anderer Baum als der zuletzt gesehene), verweigert er den Start mit `translog: log is inconsistent`. Läuft er bereits, lehnt er jede Einlieferung mit `451 4.3.0` ab und signiert keine Köpfe mehr (das Server-Log nennt `signing refused`), liefert aber den zuletzt veröffentlichten Kopf weiter an die Zeugen aus. Das bleibt so, bis der Server beendet, `log repair` ausgeführt und der Server neu gestartet ist: Ein laufender Server übernimmt einen reparierten Baum nie.
+- **`log repair`:**
+
+  ```
+  gomail-server log repair --data ./data --pin ./keys/identity-1.pin
+  ```
+
+  *Wann:* wenn der Server wegen eines inkonsistenten Logs nicht startet oder mit 451 ablehnt, und nur bei beendetem Server (der Befehl hält die Serversperre `locks/server` und scheitert neben einem laufenden Server).
+
+  *Was es tut:* Es baut `log/tree.rec`, die Kacheln und `log/keys/` aus den Einträgen und den signierten Köpfen neu. Die neue Größe m ist die Zahl der Einträge, die ab `entries/0.rec` lückenlos vorhanden und lesbar sind; jeder Kopf in `log/heads/` muss eine gültige Log-Signatur tragen, höchstens m groß sein und zum aus den Einträgen neu berechneten Baum passen. Es löscht nichts. Liegen Einträge jenseits von m (verwaiste Einträge `log/entries/<i>.rec` mit i ≥ m), meldet es deren Zahl und Bereich, schreibt nichts und endet mit Status 1; der Betreiber prüft und entfernt sie bewusst und führt `log repair` erneut aus. Bei Erfolg meldet es `0 verwaiste Einträge gemeldet, 0 verworfen`. Danach den Server neu starten.
+
+  *Was es nicht heilt:* einen fehlenden oder geänderten Eintrag unterhalb eines signierten Kopfes (nur ein Backup von `log/`, das jeden je an einen Zeugen gegebenen Kandidaten umfasst, stellt die Bytes wieder her); ein `tree.rec`, das mehr Einträge nennt als vorhanden sind; eine Datei in `log/heads/`, die kein Kopf dieses Logs ist (der Betreiber entfernt sie und repariert erneut). Einen Rückschritt, bei dem auch `entries/<n+1>.rec` entfernt wurde und den kein veröffentlichter Kopf deckt (die Einträge seit dem letzten veröffentlichten Kopf), erkennt ein neu gestarteter Server gar nicht; nur der laufende Server und die Clients bemerken ihn (`internal/translog/doc.go`, „What write access to log/ gives an attacker“). Die Schreiber der verlorenen Einträge hängen sie erneut an.
+
 ## 3. Benutzer erzeugen
 
 Zurück im ersten Terminal. Die Passphrase des Schlüsselspeichers kommt aus der Umgebungsvariable `GOMAILCTL_PASSPHRASE`, aus `--passphrase-file` oder wird abgefragt. Die Abfrage auf dem Terminal ist in Phase 1 sichtbar (keine Terminalsteuerung ohne Zusatzmodul); für echte Passphrasen die Datei oder die Variable verwenden.

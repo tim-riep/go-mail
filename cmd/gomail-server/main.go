@@ -53,7 +53,12 @@
 // or already assigned to that mailbox (exit status 2 otherwise; no
 // message names the address). "log repair" rebuilds tree.rec, the tiles
 // and keys/ from the entries and the signed heads (translog.RepairTree)
-// while no server runs.
+// while no server runs. It removes nothing: entries beyond the size the
+// entries give (translog.OrphanEntriesError, task 15d) are reported
+// with their count and nothing is written (exit status 1); the operator
+// removes them on purpose and repairs again. On success it says that
+// no entry was reported or dropped. A running server never accepts the
+// repaired tree; it is restarted afterwards.
 //
 // Both listeners accept only a loopback address unless
 // --isolated-test-network is given (5.1). Pin, ingest key and admin key
@@ -627,8 +632,19 @@ func logCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	defer release()
 	if err := translog.RepairTree(translog.Options{Store: st, Identities: ids, Origin: pin.Origin}); err != nil {
-		return fail(stderr, err)
+		code := fail(stderr, err)
+		// Orphaned entries (task 15d point 2): reported, never removed.
+		var oe *translog.OrphanEntriesError
+		if errors.As(err, &oe) {
+			where := fmt.Sprintf("log/entries/%d.rec", oe.First)
+			if oe.Last != oe.First {
+				where += fmt.Sprintf(" bis log/entries/%d.rec", oe.Last)
+			}
+			fmt.Fprintf(stderr, "gomail-server: %d verwaiste Einträge jenseits von %d gemeldet, 0 verworfen; nichts geschrieben. "+
+				"Nach Prüfung %s bewusst entfernen und log repair erneut ausführen\n", oe.Count, oe.Size, where)
+		}
+		return code
 	}
-	fmt.Fprintln(stdout, "log/tree.rec, Kacheln und keys/ aus den Einträgen und Köpfen neu gebaut")
+	fmt.Fprintln(stdout, "log/tree.rec, Kacheln und keys/ aus den Einträgen und Köpfen neu gebaut; 0 verwaiste Einträge gemeldet, 0 verworfen")
 	return 0
 }

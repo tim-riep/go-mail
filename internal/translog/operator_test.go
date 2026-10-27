@@ -795,15 +795,31 @@ func TestRepairTree(t *testing.T) {
 	t.Run("garbage entry ends the tree", func(t *testing.T) {
 		e, _, _ := setup(t)
 		full := e.tree()
-		// A garbage file beyond the tree is not taken into it.
+		// A garbage file beyond the tree is not taken into it; since
+		// task 15d it is reported as an orphan at m and kept, and the
+		// repair writes nothing until the operator removes it.
 		if err := store.WriteFileAtomic(e.path(EntryPath(full.Size)), []byte("garbage")); err != nil {
+			t.Fatal(err)
+		}
+		var oe *OrphanEntriesError
+		err := RepairTree(e.serverOptions())
+		if !errors.As(err, &oe) || !errors.Is(err, ErrConsistency) || oe.Size != full.Size || oe.Count != 1 || oe.First != full.Size || oe.Last != full.Size {
+			t.Fatalf("garbage entry at m: %v", err)
+		}
+		if _, err := os.Stat(e.path(EntryPath(full.Size))); err != nil {
+			t.Fatal("garbage entry removed")
+		}
+		if e.tree() != full {
+			t.Fatal("garbage entry taken into the tree")
+		}
+		if err := os.Remove(e.path(EntryPath(full.Size))); err != nil {
 			t.Fatal(err)
 		}
 		if err := RepairTree(e.serverOptions()); err != nil {
 			t.Fatal(err)
 		}
 		if e.tree() != full {
-			t.Fatal("garbage entry taken into the tree")
+			t.Fatal("tree after the repair")
 		}
 	})
 }

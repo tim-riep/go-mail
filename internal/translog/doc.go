@@ -458,11 +458,29 @@
 //     sets tree.rec to the largest m for which entries 0 to m-1 exist
 //     and decode, m is at least the size of every head in heads/, and
 //     the root hashes recomputed from the entries equal those of the
-//     signed heads of size <= m. Not covered: a rollback by exactly one
-//     entry that no head covers yet; the next Append removes that entry
-//     as a leftover. Its writer notices (a client through its Pending
-//     leaf, ErrConsistency once a head covers the index with another
-//     entry, or ErrWithheld) and appends again.
+//     signed heads of size <= m. Not covered (task 15d): any rollback of
+//     tree.rec to a size n in which the attacker also removes
+//     entries/<n+1>.rec and that no published head covers (no head in
+//     heads/ above n). refuse looks at entries/<n+1>.rec and heads/
+//     only, so a new process (a restart) does not detect it and accepts
+//     the smaller tree; the running process detects it through seen
+//     (operatorCur), a client through its reference head and its Pending
+//     leaf. The window is therefore the entries appended since the
+//     newest published head, normally the appends of one HeadInterval
+//     (removing heads/ as well is the point "delete or roll back heads/"
+//     below, which witnesses and clients detect). The next Append of
+//     the new process removes entry n as a leftover and appends at n;
+//     the entries from n+2 on stay as orphans, refuse makes the Append
+//     after that fail (ErrConsistency), and RepairTree reports them
+//     (OrphanEntriesError with their count) and removes nothing: the
+//     operator removes them on purpose and repairs again (task 15d
+//     point 2). The writers of the dropped entries notice (a client
+//     through its Pending leaf, ErrConsistency once a head covers the
+//     index with another entry, or ErrWithheld) and append again.
+//     TestOperatorShrunkTree (rework15c_test.go) shows both sides of
+//     the gap: the running process refuses, a new process accepts the
+//     smaller tree; TestRepairTreeOrphans (rework15d_test.go) the
+//     orphans.
 //   - delete or roll back heads/: clients keep their last verified head
 //     and accept only extensions (ErrConsistency); without a newer head
 //     they become stale after 24 hours and stop (ErrStale).
@@ -864,7 +882,9 @@
 // (Options.Identities, finding 03d-2). Task 11 adds the flags
 // --log-listen <addr> and --head-interval <duration> of "gomail-server
 // serve" and the command "gomail-server log repair --data <dir> --pin
-// <file>" (RepairTree).
+// <file>" (RepairTree). Task 15c adds the flag --require-client-lock of
+// "gomail-server serve" (a client lock locks/client in force at the
+// start, ingest.Config.PeerCheck; off by default, reading D70 of 9.1).
 //
 // # Tasks
 //
@@ -1010,14 +1030,25 @@
 //     index or a published head beyond the size), so a new process that
 //     never saw the larger tree fails the same way. Only a new process
 //     heals, after "gomail-server log repair" (RepairTree) where the
-//     files show the rollback; a rollback by exactly one entry that no
-//     head covers stays the gap named above. Head keeps serving the
+//     files show the rollback; a rollback with entries/<n+1>.rec
+//     removed that no published head covers stays the gap named above
+//     (task 15d). Head keeps serving the
 //     published heads with the log keys of the last accepted tree.
 //     ingest answers ErrConsistency with 451 (the server accepts no
 //     mail), loghttp.Tick logs the refusal of SignHead and drops its
 //     candidate. "gomail-server serve --require-client-lock" requires
 //     a client lock in force at the start (ingest.Config.PeerCheck; off
 //     by default, D70).
+//     Task 15d (low findings of the verification of task 15c): a test
+//     of refuse in SignHead for a new process
+//     (TestSignHeadRefuseEntryBeyond); RepairTree reports files
+//     entries/<i>.rec with i >= m as an OrphanEntriesError
+//     (ErrConsistency with their count) before it writes anything and
+//     removes nothing, and "gomail-server log repair" prints how many
+//     entries it reported (and that it dropped none); the gap above is
+//     named as every rollback with entries/<n+1>.rec removed since the
+//     newest published head. The behaviour of refuse, view and Append
+//     is unchanged.
 //
 // # Open phase-3 log sites
 //

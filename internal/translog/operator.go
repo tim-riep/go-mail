@@ -36,6 +36,33 @@ type InvalidEntriesError struct {
 	Entries []InvalidEntry
 }
 
+// OrphanEntriesError is returned by RepairTree when files
+// entries/<i>.rec with i >= Size exist, where Size is the number of
+// entries that exist and decode from entry 0 on (the size the repair
+// would set; task 15d point 2). Such an orphan is left beyond a gap
+// (tree.rec rolled back with entries/<n+1>.rec removed and entry n
+// appended again, doc.go "What write access to log/ gives an attacker")
+// or does not decode. RepairTree removes nothing and writes nothing; it
+// unwraps to ErrConsistency. Count is the number of orphans, First and
+// Last their smallest and largest index.
+type OrphanEntriesError struct {
+	Size        int64
+	Count       int64
+	First, Last int64
+}
+
+func (e *OrphanEntriesError) Error() string {
+	where := fmt.Sprintf("entries/%d.rec", e.First)
+	if e.Last != e.First {
+		where += fmt.Sprintf(" to entries/%d.rec", e.Last)
+	}
+	return fmt.Sprintf("%v: %d orphaned entries beyond the %d entries that exist and decode (%s); nothing removed",
+		ErrConsistency, e.Count, e.Size, where)
+}
+
+// Unwrap returns ErrConsistency.
+func (e *OrphanEntriesError) Unwrap() error { return ErrConsistency }
+
 // maxListedInvalid bounds the indices the message of an
 // InvalidEntriesError lists.
 const maxListedInvalid = 16
@@ -604,16 +631,28 @@ func (o *operatorLog) PublishHead(h *Head) error {
 //  3. a tree.rec that can be read and names a size above m is
 //     ErrConsistency: entries below the committed size are missing, and
 //     a smaller tree.rec would drop committed entries for good;
-//  4. it writes the tiles of tlog.NewTiles(8, 0, m) (a tile with other
+//  4. a file entries/<i>.rec with i >= m (an orphaned entry: left beyond
+//     a gap or not decodable, task 15d point 2) is an
+//     *OrphanEntriesError, which wraps ErrConsistency and counts them.
+//     Nothing is removed and nothing is written: refuse would keep the
+//     repaired log failing on an orphan at m+1 or above, and only the
+//     operator decides to remove them (doc.go "What write access to log/
+//     gives an attacker"); then he repairs again. An orphan at m alone
+//     would not stop the log (the next Append removes it as a
+//     leftover); it is reported all the same (task 15d names i >= m);
+//  5. it writes the tiles of tlog.NewTiles(8, 0, m) (a tile with other
 //     bytes is replaced), the key file of every valid entry and then
 //     tree.rec with m and the recomputed root hash.
+//
+// Steps 1 to 4 write no file (only missing directories of log/ are
+// created first); an error there leaves the files as they were.
 //
 // TODO(ask): doc.go says "exist and decode"; read strictly, an entry that
 // is in the tree but does not decode with DecodeEntry (written past
 // Append) ends the repair below it, and a head that covers it makes the
-// repair fail (fail closed, the operator restores log/ from a backup).
-// The hashes of the whole tree are held in memory (about 64 bytes per
-// entry).
+// repair fail (fail closed, the operator restores log/ from a backup);
+// it and the entries after it are orphans (step 4). The hashes of the
+// whole tree are held in memory (about 64 bytes per entry).
 func RepairTree(opts Options) error {
 	if opts.Store == nil {
 		return fmt.Errorf("%w: no data directory", ErrConsistency)
@@ -694,7 +733,11 @@ func RepairTree(opts Options) error {
 	if old, err := l.f.readTree(); err == nil && old.Size > m {
 		return fmt.Errorf("%w: tree.rec names %d entries, only %d exist and decode", ErrConsistency, old.Size, m)
 	}
-	// 4. tiles, keys, tree.rec
+	// 4. orphaned entries at m and beyond
+	if err := l.f.orphans(m); err != nil {
+		return err
+	}
+	// 5. tiles, keys, tree.rec
 	for _, t := range tlog.NewTiles(TileHeight, 0, m) {
 		data, err := tlog.ReadTileData(t, rd)
 		if err != nil {
@@ -754,6 +797,49 @@ func (l *fileLog) eachHead(fn func(size int64) error) error {
 			return logErr("heads", err)
 		}
 	}
+}
+
+// orphans returns an *OrphanEntriesError when entries/ holds a file
+// <i>.rec with a canonical decimal i >= m (RepairTree step 4), of any
+// file type: refuse looks at the name only. Other names are no entries
+// and are ignored. It only reads the directory.
+func (f *files) orphans(m int64) error {
+	d, err := os.Open(f.path(EntriesDir))
+	if err != nil {
+		return logErr("entries", err)
+	}
+	defer d.Close()
+	o := &OrphanEntriesError{Size: m, First: -1}
+	for {
+		ents, err := d.ReadDir(headBatch)
+		for _, e := range ents {
+			name, ok := strings.CutSuffix(e.Name(), ".rec")
+			if !ok {
+				continue
+			}
+			i, perr := parseDecimal(name)
+			if perr != nil || i < m || i >= MaxTreeSize {
+				continue
+			}
+			o.Count++
+			if o.First < 0 || i < o.First {
+				o.First = i
+			}
+			if i > o.Last {
+				o.Last = i
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return logErr("entries", err)
+		}
+	}
+	if o.Count > 0 {
+		return o
+	}
+	return nil
 }
 
 // writeKeyFileID is writeKeyFile for a key given by its keyID.
