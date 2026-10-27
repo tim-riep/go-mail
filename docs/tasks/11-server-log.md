@@ -13,3 +13,13 @@ Welle 3. Sicherheitskritisch (Köpfe, Gegensignaturen). Feste Vorgaben: `docs/ta
 
 ## Fertig-Kriterien
 `gofmt -l .` leer, `go vet ./...`, `go test -race ./...`, `GOARCH=386 go test ./...`. Bericht nach `00-vorgaben.md`.
+
+## Nachtrag (nach Zusammenführung von Auftrag 07 mit 07b/07c)
+Basis ist der Arbeitsbranch nach 07. Zusätzlich zu den Pflichtpunkten gehören in diesen Auftrag die niedrigen Funde der dritten Prüfrunde von 07, weil sie denselben Code betreffen:
+1. `Refresh` bei fortbestehendem `ownErr` (Client): festlegen und testen, ob ein bestandener Kopf dann übernommen wird (dann in `translog.go` dokumentieren, dass der Aufrufer den zurückgegebenen Kopf auch bei `ErrConsistency` persistiert, wie bei `ErrWithheld`/`ErrStale`) oder die Übernahme unterbleibt; strengste Lesart: Übernahme unterbleibt, `Last` bleibt alt.
+2. Client-`Append` nach einem Rollback des festgeschriebenen Baums: `getCur` verwirft den zwischengespeicherten `cur` stillschweigend und baut ihn einmal vom verifizierten `ref` neu auf, statt einmalig `ErrConsistency` zu melden; `TestOwnErrCleared` wird darauf festgenagelt (kein `if errors.Is(err, ErrConsistency) { nochmal }`).
+3. `doc.go` „Withheld entries“: „Refresh returns the error of audit or CheckHead“; doppelte Fehlertext-Präfixe in `audit`/`included` entfernen (Fremdfehler nur einmal mit `ErrConsistency` umhüllen).
+4. `candidates` (`impl.go`): Schleife explizit auf `MaxIdentities` begrenzen.
+5. Kommentar `internal/client/client.go` („phase 1: translog.Unverified“) → `translogtest.Unverified` (einzige erlaubte Änderung in `client`, nur dieser Kommentar).
+6. Für Auftrag 14 dokumentieren (`doc.go` „Tasks“): die Funktion, die der Client an `store.ReplaceEpoch` übergibt (`Append(KindEpoch, old)` → `errors.Is(err, ErrOrder)`, unter der Postfachsperre, Sperrreihenfolge Postfach → Log; bei `ErrPrerequisite` fehlende frühere Epochen, bei `ErrUnloggedSigner` die `user.rec` des Signierers anhängen), die Behandlung eines Pending-Eintrags nach Rollback um eins (Aufrufer entfernt ihn und hängt neu an) und dass nach `Refresh` immer `CheckFresh` folgt.
+Commit-Nachricht: `translog, witness, gomail-server: signed heads, cosigning over HTTP, server log side (task 11)`; kein Modellname.
