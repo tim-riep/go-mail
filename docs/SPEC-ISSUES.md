@@ -8,6 +8,15 @@ Stand Phase 0.1 (Version 1.1 in `docs/PLAN.md`, Abschnitt 13): Erledigt sind S01
 
 Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (Schritt 0, Commit d8d7afa). S11 und S13 tragen unten einen Vorschlag und warten auf die Entscheidung des Auftraggebers; bis dahin ist jeweils die strengste Lesart umgesetzt (DECISIONS D60). Neu aus Phase 1 sind S15 bis S23.
 
+## Stand M1
+- Grundlage: Version 1.4 (`docs/PLAN.md`, Abschnitt 16) und `docs/PHASE2-KLAERUNGEN.md`. Neu sind S24 bis S69 aus den Prüfberichten der Aufträge bis M1.
+- Jeder neue Punkt trägt eine Art. **Klarstellend:** Die Spezifikation schweigt oder ist mehrdeutig, der Code hat eine Lesart gewählt, die Spezifikation sollte sie übernehmen. **Offen:** Eine Entscheidung des Auftraggebers ist nötig, die Frage steht in `docs/QUESTIONS.md`, soweit eine Nummer genannt ist.
+- Zahl: 46 neue Punkte, davon 36 klarstellend und 10 offen.
+- Offen: S24 (Q8), S25 (Q8), S27 (Q9), S28 (Q4, Q8), S35 (ohne Frage), S43 (Q1), S44 (Q1), S48 (Q4), S52 (ohne Frage, `TODO(ask)`), S69 (ohne Frage, `TODO(ask)`). Dazu bleibt S23 offen (Q12).
+- Bestehende Punkte: S11 und S13 sind im Client umgesetzt (Auftrag 06b), S23 hängt an Q12; der Stand steht jeweils unten. S22 ist mit Version 1.4 erledigt (Kopffeld 8 `version`, K6); der Server prüft jede eigene Signatur ohne Schlüssel nach dem Schreiben (`ingest.VerifyMeta`, D73). S15 ist teilweise erledigt: 5.1 nennt seit Version 1.3 25 MiB; Header (1.000.000 Byte) und Mindestrate (1.000 Byte/s) bleiben dezimal (D67).
+- Der Stand im Code bezieht sich auf den Arbeitszweig. Wo ein Punkt Auftrag 06b, 09 oder 10 nennt, liegt der Code noch in dessen Worktree und ist nicht zusammengeführt.
+- Zu prüfen: S34 (Quellen und Code widersprechen sich).
+
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
 - Stelle: 3.1 Aufbau, 3.3 Regel 7.
@@ -90,6 +99,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
   3. Jedes Wort muss danach exakt in der Liste stehen. Abkürzungen auf die ersten vier Buchstaben (in BIP-39 eindeutig) werden **nicht** angenommen: eine Abkürzung wäre ein zweiter Weg zum selben Seed und eine weitere Fehlerquelle, und die Wörter werden ohnehin selten getippt.
   4. Ein unbekanntes Wort wird mit seiner Position gemeldet, ohne es auszugeben; die Prüfsumme deckt vertauschte oder falsche, aber gültige Wörter.
   Damit akzeptiert `keygen` etwa " Abandon " für "abandon", aber nie ein anderes Wort. Kein Format ändert sich.
+- Stand M1: Version 1.3 übernimmt den Vorschlag (2.2 „Eingabe von Wörtern“). Im Client umgesetzt in Auftrag 06b (`client.normalizeWords`, `oneWord`, `normalizeList`, verwendet in `keygen`, `DeviceLost` und `Restore`); `keys` und `shamir` bleiben strikt. Auftrag 10 bringt dieselbe Regel als Paket `internal/words`, das die Funktionen des Clients ersetzen soll.
 
 ## S12 Suite 2 ändert die Größen im Empfängerteil
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 senkt die Höchstzahl der Empfänger auf 4; vier Einträge der Suite 2 (je etwa 1,2 KiB) passen in die 16 KiB. Die Feldgrößen je Suite sind erst beim Einführen von Suite 2 festzulegen.
@@ -110,6 +120,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
   3. Damit ein kompromittiertes Gerät in der Zeit bis zum Widerruf nichts Dauerhaftes anrichten kann, nehmen Clients beim Abgleich nur Verpackungen an, deren Mitglied in der signierten `epoch.rec` steht (umgesetzt), und verlangen nach einem Widerruf die neue Verpackung, bevor sie weitere Mails dieser Epoche anzeigen.
   4. In 2.2 Punkt 4 und in Abschnitt 7 sollte diese Trennung ausdrücklich stehen.
   Kein Format ändert sich; Phase 2 baut damit `device lost`, Phase 3 die Log-Prüfung.
+- Stand M1: Version 1.3 übernimmt den Vorschlag (2.2 Punkt 4). Umgesetzt in Auftrag 06b: Gegensignatur der eigenen Verpackung (`client.writeAccept`, `checkAccept`, Datensatz `wrap-accept`) und Neuausstellung bei `device lost` (`client.DeviceLost`). Für Metadaten mit Benutzersignatur und für Indexsegmente gilt noch die strengste Lesart (`TODO(S13)` in `client/read.go` und `client/index.go`, Auftrag 09); Auftrag 09b überträgt die Regel aus 06b, sonst fallen nach `device lost` Mails aus `List`.
 
 ## S14 Signaturdomäne der Plattformdatensätze verdoppelt das Präfix
 - Erledigt in Phase 1, Schritt 0 (Commit d8d7afa): Version 1.2 legt in 3.7 Kurznamen für alle Signaturen fest; `keys` ist umgestellt, Vektoren neu erzeugt (DECISIONS D47).
@@ -172,3 +183,327 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: Offen ist, ob `to` auch `Cc` umfasst, ob `day` und `month` aus dem `Date`-Header oder der Empfangszeit kommen, wann eine Mail einen Anhang hat und wie die Wurzel eines Threads bestimmt wird.
 - Phase 1: `to` aus `To` und `Cc`; `day` und `month` aus der signierten Empfangszeit in UTC; Anhang bei `multipart/mixed` auf oberster Ebene; Wurzel ist der erste Eintrag von `References`, sonst `In-Reply-To`, sonst die eigene `Message-ID` (DECISIONS D55).
 - Vorschlag: Diese Regeln in 5.4 aufnehmen; sie bestimmen, welche Marken ein Client in Phase 5 sucht.
+- Stand M1: Offen bleibt die Thread-Wurzel für Mails mit Marker `unprocessed`. Die Metadaten halten weder `References` noch `In-Reply-To`; der Client bildet `thread:` aus der eigenen `Message-ID` (`client/terms.go`, Auftrag 09), eine Antwort ist unter der Wurzel dann nicht auffindbar. Ob die Metadaten ein Feld `thread` erhalten, entscheidet Q12.
+
+## S24 Widerruf kompromittierter Ingest- und Admin-Generationen
+- Art: offen (Q8).
+- Stelle: 2.3 „Wechsel der Identität“ und „Widerrufe und Aktualität“; 10.1 „Signatur einer kompromittierten Ingest- oder Identitätsgeneration“.
+- Problem: 2.3 kennt nur den Wechsel der Identität per Client-Update. Für eine kompromittierte Ingest- oder Admin-Generation gibt es keinen Datensatz, der sie widerruft.
+- Stand M1: Der Pin hat kein Feld 7 (`store.PlatformPinSchema`), `translog.Verifier.Revoked` bleibt leer, die Stellen tragen `TODO(ask)`.
+- Ergänzung aus der Prüfung von 03b: Feld 7 braucht neben `revoked_at_size` auch `revoked_at_time`, weil Köpfe einer Größe mit späteren Zeiten neu signiert werden und die Kopfzeit zu `revoked_at_size` sonst nicht eindeutig ist (`internal/translog/doc.go`, „Platform generations“).
+- Vorschlag: Wie Q8 (a) und (b), mit `revoked_at_time` als viertem Bestandteil von Feld 7.
+
+## S25 Gültigkeitsende einer Plattformgeneration nach dem Wechsel
+- Art: offen (Q8).
+- Stelle: 2.3 „Für einen neuen Ingest-Schlüssel …“, 9.2 (`ingest-rotate`, keine Admin-Rotation).
+- Problem: Nach `ingest-rotate` bleibt der alte Ingest-Schlüssel nach 2.3 unbegrenzt gültig; ein gestohlener alter Schlüssel könnte Metadaten mit späterer Empfangszeit signieren. Für Admin-Generationen gilt dasselbe für Adresszuordnungen.
+- Stand M1: Strengste Lesart für Ingest: Generation g signiert gültig nur bis `valid_from` von `ingest-<g+1>.cert` (`translog.LogKey.Covers` für Köpfe, D72 (9)). Für Admin-Generationen gibt es kein Ende (Q8, Nachtrag).
+- Vorschlag: Wie Q8 (c), dieselbe Regel für Admin-Generationen, und Q8 (d) `admin-rotate`.
+
+## S26 Umschaltzeitpunkt bei `ingest-rotate`
+- Art: klarstellend.
+- Stelle: 2.3 „Für einen neuen Ingest-Schlüssel … neue Zeremonie“; 2.4 „Vorlauf und Uhren“ Regel 4.
+- Problem: Gilt die neue Generation ab der Zeremonie, gehen Mails verloren, die der Server zwischen Zeremonie und Umschalten noch mit dem alten Schlüssel signiert (die Clients lehnen sie nach S25 ab).
+- Stand M1: `gomail-ceremony ingest-rotate --valid-from` setzt den geplanten Umschaltzeitpunkt; ein Zeitpunkt in der Vergangenheit wird abgelehnt (`ceremony.checkValidFrom`, Auftrag 10). Auf dem Arbeitszweig steht dazu noch `TODO(ask)` an `ceremony.IngestRotate`.
+- Vorschlag: In 2.3 festhalten, dass `valid_from` des neuen Zertifikats der geplante Umschaltzeitpunkt ist und nie in der Vergangenheit liegt.
+
+## S27 Zeitliche Bindung von Adresszuordnungen
+- Art: offen (Q9).
+- Stelle: 2.3 „Adresszuordnungen“.
+- Problem: `valid_from` wählt der Admin frei. Eine später geloggte Zuordnung mit rückdatiertem `valid_from` schreibt Mails nachträglich einem Postfach zu.
+- Stand M1: Der Datensatz hat kein Feld `issued` (`store.AddressSchema`); es gilt die jüngste Zuordnung mit `valid_from ≤ Empfangszeit` ohne Obergrenze (`translog.Log.CheckAddress`, `TODO(Q9)`).
+- Vorschlag: Wie Q9.
+
+## S28 Format des Pins `identity-<gen>.pin`
+- Art: offen (Q4, Q8).
+- Stelle: 2.3 „öffentlicher Teil im Client hinterlegt“, „Wechsel der Identität“; 2.7 „Die öffentlichen Schlüssel der Zeugen sind im Client hinterlegt wie die Plattformidentität“.
+- Problem: 2.3 nennt den Pin, legt aber seine Felder nicht fest.
+- Stand M1: `store.PlatformPinSchema` mit Generation, Schlüssel, Entwicklungskennzeichen, Feld 4 `origin`, Feld 5 `witnesses`, Feld 6 `min_witnesses` und Feld 8 `identities` (alle Identitätsgenerationen), höchstens 64 KiB (D72 (7)); Feld 7 fehlt bis Q8 (S24). Der Server bekommt denselben Pin.
+- Vorschlag: Die Felder in 2.3 aufnehmen, sobald Q4 und Q8 entschieden sind.
+
+## S29 Probe-Rekonstruktion und Grenzen der Aufteilung
+- Art: klarstellend.
+- Stelle: 2.3 „Zeremonie“ Schritt 4 („aus drei zufällig gewählten Anteilen“).
+- Problem: „drei“ passt nur zu 3-of-5; `--shares` lässt andere Aufteilungen zu.
+- Stand M1: Die Probe nimmt k (die Schwelle) zufällig gewählte Anteile; zulässig ist 2 ≤ k ≤ n ≤ 16 (`ceremony.splitAndProbe`, `pick`, `Shares.check` mit `MaxShareCount`, Auftrag 10).
+- Vorschlag: „aus k zufällig gewählten Anteilen“ schreiben und die Grenzen nennen.
+
+## S30 Export erst nach der Probe
+- Art: klarstellend.
+- Stelle: 2.3 „Zeremonie“ Schritte 2 und 4.
+- Problem: Nach 2.3 werden die öffentlichen Teile in Schritt 2 exportiert, die Probe folgt in Schritt 4.
+- Stand M1: Vor der Probe wird nichts geschrieben; Export und Schlüssel folgen erst nach bestandener Probe (`ceremony.Init`: `splitAndProbe` vor `commit`, D72 (11), Auftrag 10).
+- Vorschlag: Den Export in 2.3 hinter die Probe setzen.
+
+## S31 Neuverteilung macht alte Anteile nicht ungültig
+- Art: klarstellend.
+- Stelle: 2.3 „Für … eine Neuverteilung der Anteile kommen drei Anteilsinhaber … zusammen“.
+- Problem: 2.3 sagt nicht, was eine Neuverteilung bewirkt. Alte Anteile rekonstruieren weiter denselben Root.
+- Stand M1: `ceremony.Reshare` teilt denselben Root neu mit neuer Kennung der Aufteilung; die Kennung warnt nur beim Mischen alter und neuer Anteile (Auftrag 10).
+- Vorschlag: In 2.3 festhalten, dass eine Neuverteilung nur gegen verlorene Anteile und Wechsel der Inhaber hilft; sind genug alte Anteile in falschen Händen, ist der Root zu ersetzen (Kompromissfall nach „Wechsel der Identität“).
+
+## S32 Terminalregeln der Zeremonie
+- Art: klarstellend.
+- Stelle: 2.3 „Zeremonie“; 9.2 `gomail-ceremony`.
+- Problem: 2.3 nennt keine Regeln für Anzeige und Eingabe der Anteile.
+- Stand M1: Anteile erscheinen und werden eingegeben nur, wenn stdin und stdout ein Terminal mit abschaltbarem Echo sind; keine Eingabe aus Datei oder Pipe; nach jedem Schritt wird der Bildschirm samt Scrollback gelöscht; stderr muss kein Terminal sein, weil dort keine Geheimnisse erscheinen (`cmd/gomail-ceremony`: `isTerminal`, `errNoTerminal`, `clearScreen`, Auftrag 10). Betriebsregel im RUNBOOK: nur an der Linux-Konsole, kein tmux, screen, script oder Emulator mit eigenem Verlauf.
+- Vorschlag: Diese Regeln in 2.3 aufnehmen.
+
+## S33 Eingetippte Anteile bleiben im Speicher
+- Art: klarstellend (bekannte Grenze).
+- Stelle: 2.2 „private Schlüssel werden nach Gebrauch im Speicher überschrieben, soweit Go das zulässt“; 2.3 „Zeremonie“.
+- Problem: Die Grenze ist nur für den Schlüsselspeicher genannt. Getippte Anteilswörter liegen im Puffer von `bufio` und in Go-Zeichenketten, die sich nicht überschreiben lassen.
+- Stand M1: `cmd/gomail-ceremony` löscht die eigenen Zeilenpuffer, die Kopien in Zeichenketten bleiben bis zur Speicherbereinigung (Auftrag 10).
+- Vorschlag: Die Grenze in 2.3 nennen; die Zeremonie läuft ohnehin auf einem Rechner, der danach ausgeschaltet wird (Schritt 5).
+
+## S34 Schlüsselverzeichnis als symbolischer Link
+- Art: klarstellend, **zu prüfen**.
+- Stelle: 2.3 „Zeremonie“; 9.2 `gomail-ceremony` (die Option `--keys` nennt die Spezifikation nicht).
+- Problem: Nicht festgelegt ist, wie die Zeremonie das Verzeichnis für private Schlüssel prüft.
+- Stand M1: Laut Prüfung von 10b wird `--keys` als Link aufgelöst und das Ziel geprüft (0700, eigener Benutzer, `O_NOFOLLOW` beim Öffnen); Q14 nennt dasselbe Verhalten als offenen Hinweis. Der Code in Auftrag 10 (Stand 10d) lehnt dagegen einen Link im letzten Element ab (`ceremony.checkKeyFiles` mit `Lstat`, `openKeyDir` mit `O_NOFOLLOW`). Welche Aussage gilt, ist zu prüfen.
+- Vorschlag: In 9.2 festhalten: `--keys` ist ein eigenes Verzeichnis mit 0700 des ausführenden Benutzers, kein symbolischer Link.
+
+## S35 Verwerfen bereits begonnener Epochen
+- Art: offen (keine Frage in `QUESTIONS.md`).
+- Stelle: 2.4 „Verwerfen des Vorrats“ Regel 1 und 4; K1.
+- Problem: `discards` richtet sich nach dem Beginn der neuen Epoche, den ihr Unterzeichner wählt. Legt ein Mitglied den Beginn einer sofortigen Epoche früh, verwirft sie auch Epochen, die schon begonnen haben; deren Mails lehnt der Client danach ab (Regel 3).
+- Stand M1: `store.Chain.Add` prüft die Vollständigkeit von `discards` und den Beginn gegen die letzte nicht verworfene Vorgängerin, aber gegen keine Uhr; verworfene Nummern zählen dabei nicht mit.
+- Vorschlag: Der Beginn einer sofortigen Epoche liegt nicht vor dem Beginn der laufenden, nicht verworfenen Epoche und höchstens fünf Minuten nach dem Anlegen.
+
+## S36 Grund der Ausweich-Epoche bei erschöpftem Vorrat
+- Art: klarstellend (Q5, D63).
+- Stelle: 2.4 „Vorrat“ („eine Epoche mit sofortigem Beginn“), Tabelle der Gründe.
+- Problem: Keiner der sechs Gründe passt; „sofort“ hätte nach der Tabelle Regel 2 und Vorlauf Regel 2 zur Folge.
+- Stand M1: Die Ausweich-Epoche trägt `regular` und beginnt wie jede geplante Epoche fünf Minuten nach dem Anlegen (`client.ImmediateDelay` in `syncMailbox`). Zum Beginn siehe S19.
+- Vorschlag: In 2.4 „eine geplante Epoche mit Grund `regular`, Beginn fünf Minuten nach dem Anlegen“ schreiben.
+
+## S37 Beginn von Epoche 1
+- Art: klarstellend.
+- Stelle: 2.4 „Vorlauf und Uhren“ Regel 1, Tabelle der Gründe.
+- Problem: Epoche 1 hat keinen Grund in der Tabelle; als `regular` müsste sie nach Regel 1 fünf Minuten Vorlauf haben, und der Server nähme so lange nichts an.
+- Stand M1: Epoche 1 trägt `regular` und beginnt beim Anlegen (`client.CreateMailbox`, D75 (9)). Ohne Vorgängerin gibt es nichts, wofür zu spät verschlüsselt werden könnte.
+- Vorschlag: In 2.4 festhalten, dass die erste Epoche `regular` trägt und ohne Vorlauf beginnt.
+
+## S38 `member-added` nur sofort
+- Art: klarstellend (D63).
+- Stelle: 2.4 Tabelle der Gründe („geplant oder sofort“), „Verwerfen des Vorrats“ Regel 2.
+- Problem: Aus `epoch.rec` ist nicht ablesbar, welche Form gemeint ist; Regel 2 (bei geplanter Wirkung ist `discards` leer) ist für `member-added` damit nicht prüfbar.
+- Stand M1: `member-added` gilt immer als sofort (`store.Reason.Immediate`); gebaut wird nur diese Form.
+- Vorschlag: In der Tabelle „sofort“ schreiben.
+
+## S39 Vorlauf geplanter Epochen ist nicht prüfbar
+- Art: klarstellend.
+- Stelle: 2.4 „Vorlauf und Uhren“ Regel 1.
+- Problem: `epoch.rec` hat keine Erstellzeit; ob eine geplante Epoche fünf Minuten nach dem Anlegen beginnt, kann kein Prüfer feststellen.
+- Stand M1: Regel 1 ist Pflicht des Schreibers: der Client legt geplante Epochen frühestens fünf Minuten in der Zukunft an (`client.supply`, `ImmediateDelay`); `store.Chain` prüft sie nicht.
+- Vorschlag: Regel 1 in 2.4 als Pflicht des anlegenden Clients kennzeichnen; mit dem Log ließe sie sich gegen die Logzeit prüfen.
+
+## S40 Gleicher Beginn gilt nicht als später
+- Art: klarstellend.
+- Stelle: 2.4 „Verwerfen des Vorrats“ Regel 1 („mit späterem Beginn“) und Regel 4 („Beginn sinkt nie“).
+- Problem: Offen ist, wie zwei Epochen mit gleichem Beginn zu behandeln sind.
+- Stand M1: Gleicher Beginn ist nicht später: eine solche Epoche wird nicht verworfen, und gleicher Beginn verletzt Regel 4 nicht (`store.Chain.Add`, D68).
+- Vorschlag: In Regel 1 „mit echt späterem Beginn“ schreiben.
+
+## S41 Kopf der Kette für Leser
+- Art: klarstellend.
+- Stelle: 2.4 „Schutz gegen Zurückspielen“; 4 (`mailbox.rec` „aktuelle Epoche“).
+- Problem: Offen ist, ob eine gültige `epoch.rec` jenseits von `mailbox.rec` für Leser zählt und wer `mailbox.rec` fortschreibt.
+- Stand M1: Für Leser endet die Kette bei `mailbox.rec`; Epochen jenseits davon übernimmt nur ein Schreiber unter der Postfachsperre nach vollständiger Prüfung (`client.loadChain` mit `adopt`, `mutate`, `syncMailbox`; D75 (2)).
+- Vorschlag: In 4 festhalten, dass `mailbox.rec` den Kopf bestimmt und jeder Client sie unter der Postfachsperre auf die letzte geprüfte Epoche vorrücken darf.
+
+## S42 Nicht reguläre `epoch.rec` hinter dem Kopf
+- Art: klarstellend (bekannte Grenze).
+- Stelle: 2.4 „Schutz gegen Zurückspielen“; 7 „Verhalten des Clients bei Fehlern“.
+- Problem: Die Spezifikation sagt nicht, was mit einer Datei bei Kopf+1 geschieht, die sich weder lesen noch als nie gültig beweisen lässt.
+- Stand M1: Der Client ersetzt nur beweisbar ungültige Dateien (`client.readBeyond`, `createEpoch` mit `store.ClearInvalidEpoch` und `ReplaceInvalidEpoch`, D75 (3)). Ein Verzeichnis oder FIFO an dieser Stelle bleibt liegen, und jede Änderung am Postfach scheitert dauerhaft (fail closed). Ein FIFO blockiert `store.ReadFileLimited`, weil `os.Open` vor der Prüfung auf eine reguläre Datei wartet.
+- Vorschlag: Als bekannte Grenze festhalten (Schreibzugriff auf das Datenverzeichnis erlaubt nach 2.7 ohnehin Vorenthalten); mit dem Log entscheidet `ErrOrder` über das Ersetzen (Auftrag 14).
+
+## S43 Ablage des öffentlichen Wiederherstellungsschlüssels
+- Art: offen (Q1 (c)).
+- Stelle: 2.4 „Wiederherstellungsempfänger“; 4.
+- Problem: Abschnitt 4 nennt keinen Ort, über den der öffentliche Schlüssel zum eintragenden Mitglied kommt.
+- Stand M1: `mailboxes/<id>/recovery/<recovery-id>.pub`, unsigniert, per Fingerabdruck je Gerät bestätigt (`store.RecoveryPubFile`, D75 (7), `TODO(Q1)`).
+- Vorschlag: Wie Q1 (c).
+
+## S44 Wiederaufnahme durch den Wiederherstellungsempfänger
+- Art: offen (Q1 (d)).
+- Stelle: 2.4 „Wiederherstellungsempfänger“; K3 Punkt 4 und K2 Regel 1.
+- Problem: K3 Punkt 4 erlaubt dem Wiederherstellungsempfänger, sich selbst neu als Mitglied aufzunehmen; K2 Regel 1 verbietet ihm, Epochen anzulegen, und ohne neue Epoche ist keine Aufnahme möglich.
+- Stand M1: Der Wiederherstellungsschlüssel liest nur (`client.RecoverRead`, `ErrReadOnly`).
+- Vorschlag: Wie Q1 (d).
+
+## S45 Vertretung mit geplantem Ende
+- Art: klarstellend.
+- Stelle: 2.5 „Vertretung“; 9.2 `mailbox share … [--to <epoche>]`.
+- Problem: Offen ist, ob eine Vertretung mit einem Ende in der Zukunft angelegt werden kann.
+- Stand M1: `client.Share` nimmt `To` nur vor der laufenden Epoche an (`ErrRange`); eine laufende Vertretung endet über `Revoke` mit `delegation-ended`.
+- Vorschlag: In 2.5 festhalten, dass `--to` nur vergangene Zeiträume begrenzt und eine laufende Vertretung durch Entzug endet.
+
+## S46 Entzug löscht Verpackungen aller nicht verworfenen Epochen
+- Art: klarstellend (strenger als die Spezifikation).
+- Stelle: 2.5 Tabelle, „Zugriff entziehen“ („keine Verpackungen mehr für neue Epochen“).
+- Problem: 2.5 spricht nur von neuen Epochen; ob die Verpackungen bestehender Epochen bleiben, ist offen.
+- Stand M1: `client.Revoke` löscht die Verpackungen des Entzogenen für alle nicht verworfenen Epochen und legt sofort `member-removed` bzw. `delegation-ended` an (D75 (6)).
+- Vorschlag: In 2.5 „seine Verpackungen aller Epochen werden gelöscht“ schreiben; was er schon gelesen hat, bleibt nach 2.5 ohnehin bei ihm.
+
+## S47 Prüfung nach dem Entzug beim Lesen statt beim Sync
+- Art: klarstellend.
+- Stelle: 2.5 „Clients der verbleibenden Mitglieder prüfen beim Sync …“.
+- Problem: `sync` öffnet keine Mails; geprüft werden kann die verwendete Epoche erst an den Metadaten.
+- Stand M1: Die Epochenregel gilt beim Lesen der Metadaten und Begriffslisten (`client.checkEpochRule`, aufgerufen aus `checkMeta` für `List` und `Read` und aus `OpenPending`), nicht in `Sync`.
+- Vorschlag: „prüfen beim Lesen“ schreiben.
+
+## S48 Kopfformat: Origin und Zeitzeile
+- Art: offen (Q4).
+- Stelle: 2.7 „Der Server signiert regelmäßig den Baumkopf“; 2.3 Aktualitätsgrenze; 3.7 letzter Absatz.
+- Problem: Nicht festgelegt sind Schlüssel, Origin und Zeit des Kopfs; eine `note` hat keinen Zeitstempel.
+- Stand M1: Kopf als `note` mit `origin`, Größe, Hash und Zeile `time <ms>`, signiert mit dem Ingest-Schlüssel als `gomail-log` (`translog` `head.go`, D72 (2), `TODO(Q4)`).
+- Vorschlag: Wie Q4.
+
+## S49 `witnesses.rec` ist eine unsignierte Arbeitskopie
+- Art: klarstellend.
+- Stelle: 4 (`witnesses.rec` „öffentliche Schlüssel der Zeugen“); 2.7 „im Client hinterlegt wie die Plattformidentität“.
+- Problem: Offen ist, ob `witnesses.rec` signiert ist und wen sie bindet.
+- Stand M1: Unsigniert, bindet nur den Server (welche Gegensignaturen er annimmt, wie viele ein Kopf braucht); verbindlich für Clients ist die Liste im Pin (`witness.WitnessesSchema`, D72 (8)).
+- Vorschlag: In 4 „Arbeitskopie des Servers, verbindlich ist der Pin“ schreiben, wie bei `addresses.json`.
+
+## S50 Zeugenquorum und die Garantie bei „zwei aus drei“
+- Art: klarstellend.
+- Stelle: 2.7 „Zeugen“ („mindestens zwei aus drei“) und „Garantien“ („Unter der Annahme, dass nicht alle geforderten Zeugen mit dem Server zusammenarbeiten“).
+- Problem: Bei min aus n Zeugen ist eine geteilte Sicht nur ausgeschlossen, wenn weniger als 2·min − n Zeugen mit dem Server zusammenarbeiten. Bei zwei aus drei ist das kein einziger: ein kolludierender Zeuge genügt für zwei Sichten mit je einem ehrlichen Zeugen.
+- Stand M1: Pin und `witnesses.rec` verlangen 2·min > n (`translog.CheckQuorum`, D72 (5)).
+- Vorschlag: Die Regel 2·min > n in 2.7 aufnehmen und die Garantie mit der Schranke 2·min − n formulieren.
+
+## S51 Vermerk ohne Postfach-ID
+- Art: klarstellend.
+- Stelle: 2.7 „Abgleich zwischen Clients“; 4 `checkpoints/<user-id>-<device-id>.rec`; 3.7 `checkpoint`.
+- Problem: Der Vermerk nennt kein Postfach und lässt sich in ein anderes Postfach kopieren.
+- Stand M1: `store.CheckpointSchema` (Benutzer, Gerät, Origin, Größe, Wurzelhash, Kopfzeit, Generation); der Client schreibt denselben Vermerk in jedes seiner Postfächer. Eine Kopie sagt nur, welchen Kopf das Gerät gesehen hat, und ist deshalb harmlos.
+- Vorschlag: In 2.7 festhalten, dass ein Vermerk das Gerät und nicht das Postfach betrifft.
+
+## S52 Kopfzeit eines kleineren Vermerks
+- Art: offen (keine Frage in `QUESTIONS.md`, `TODO(ask)`).
+- Stelle: 2.7 „Abgleich zwischen Clients“.
+- Problem: Die Spezifikation legt nicht fest, welche Rolle die Kopfzeit eines Vermerks bei der Prüfung spielt.
+- Stand M1: Strengste Lesart: Ein Vermerk kleiner als der eigene Kopf mit späterer Kopfzeit zeigt, dass der Server für ein anderes Gerät eine alte Größe weiter signiert hat (`ErrConsistency`); bei gleicher Größe sind beide Richtungen erlaubt, ein größerer Vermerk ist `ErrPending` (`translog.Verifier.CheckCheckpoint`).
+- Vorschlag: Diese Lesart bestätigen oder die Kopfzeit nur zur Anzeige verwenden.
+
+## S53 Signierte Struktur führt den Unterzeichner
+- Art: klarstellend.
+- Stelle: 3.4 („Die kanonische Struktur enthält immer den SHA-256 …“); 7 (`meta-signed` nennt nur die Generation des Unterzeichners).
+- Problem: 3.4 nennt als festen Inhalt nur den Hash der Datei; ob Art, ID und Generation des Unterzeichners mitsigniert werden, sagt allein 7, und dort nur die Generation.
+- Stand M1: `envelope.SignedSchema` signiert für jede Dateiart `file_hash`, `signer_type`, `signer_id`, `signer_gen` und die art-spezifischen Felder als eingebetteten Datensatz `extra`.
+- Vorschlag: Die Felder der signierten Struktur in 3.4 aufzählen.
+
+## S54 Höchstgröße des Trailers
+- Art: klarstellend.
+- Stelle: 3.1 (Höchstwerte nur für Kopf und Empfängerteil); 3.3 „Grenzen für den Parser“.
+- Problem: Für das Element `0x03` nennt die Spezifikation keine Obergrenze.
+- Stand M1: `envelope.MaxTrailerSize` ist 1.024 Byte und wird vor jeder Reservierung geprüft.
+- Vorschlag: In 3.1 „Trailer höchstens 1 KiB“ ergänzen.
+
+## S55 `signer_id` der Ingest-Signatur
+- Art: klarstellend.
+- Stelle: 3.4 (`signer_id` 16 Byte).
+- Problem: Für `signer_type` 1 (Plattform-Ingest) gibt es keine Benutzer-ID.
+- Stand M1: `signer_id` besteht aus 16 Nullbytes, die Generation wählt den Schlüssel (D49); die Selbstprüfung des Servers lehnt eine andere ID ab (`ingest.parseIngestSigned`).
+- Vorschlag: In 3.4 festhalten.
+
+## S56 `pending` signiert keine Zusatzfelder
+- Art: klarstellend.
+- Stelle: 3.4 („Je nach Dateiart kommen weitere Felder hinzu (siehe 7)“); 7.
+- Problem: 7 legt Zusatzfelder nur für `meta` fest; für `pending` schweigt die Spezifikation.
+- Stand M1: `extra` bleibt leer (`ingest.pendingSignedExtra`); Postfach, Epoche, Datei-ID und `created` sind über den Kopf im Hash der Datei gebunden.
+- Vorschlag: In 7 festhalten, dass `pending` nur Hash und Unterzeichner signiert.
+
+## S57 Inhalt von `folders.gml`
+- Art: klarstellend.
+- Stelle: 4 (`folders.gml` „Name des Postfachs und Ordnerliste, für meta dieser Epoche, signiert“).
+- Problem: Abschnitt 4 nennt weder Dateiart noch Datensatz noch die Belegung des Kopfs.
+- Stand M1: Datei der Art `meta` mit `file_id` gleich dem Posteingang und Versionszähler im Kopf; Inhalt `gomail/v1/rec/folders` mit Postfach-ID, Epoche, Name und Ordnerliste (`store.FoldersSchema`, D69).
+- Vorschlag: In 4 aufnehmen.
+
+## S58 Schutz von `folders.gml` gegen Zurückspielen
+- Art: klarstellend.
+- Stelle: 7 „Gegen Wiedereinspielen“ (nur Metadaten); 3.1 Feld 8.
+- Problem: Eine ältere, gültig signierte `folders.gml` derselben Epoche lässt sich zurückspielen; den Versionszähler verlangt 7 nur für Metadaten.
+- Stand M1: Jede Neuschrift erhöht `version`; der Client merkt sich je Epoche die höchste gesehene Version (`Folders` in `state.json`) und lehnt ältere ab (`client`, D75 (8)).
+- Vorschlag: 7 auf `folders.gml` ausdehnen.
+
+## S59 Auswahl der Ordnerliste bei nicht öffnender Verpackung
+- Art: klarstellend.
+- Stelle: 4 „Ein Client liest die Liste der neuesten Epoche, auf die er Zugriff hat“.
+- Problem: „Zugriff“ ist nicht bestimmt. Eine untergeschobene Verpackung in einer späteren Epoche, die sich nicht öffnen lässt, kann die Auswahl auf diese Epoche lenken.
+- Stand M1: `client.folderList` wählt die neueste nicht verworfene Epoche, in der der Client gelistet ist oder eine eigene Verpackung vorliegt (`ownWrapExists`, nur `Lstat`); lässt sie sich nicht öffnen, scheitert `List` ohne Rückfall (fail closed, Schutz gegen Zurückspielen, D75 (8)). Wer schreiben kann, kann nach 2.7 ohnehin vorenthalten.
+- Vorschlag: Die Lesart in 4 festhalten; alternativ festlegen, dass eine nicht öffnende Verpackung übersprungen wird.
+
+## S60 Verzeichnis `locks/`
+- Art: klarstellend.
+- Stelle: 4; 9.1 „Testsperre“.
+- Problem: Abschnitt 4 nennt keine Sperrdateien.
+- Stand M1: `locks/server` (exklusiv) und `locks/client` (geteilt) im Datenverzeichnis (`store.Store.HoldRoleLock`, `CheckPeerLock`, D70).
+- Vorschlag: `locks/` in 4 aufnehmen.
+
+## S61 `identity-<gen>.pub` neben der Nachfolge
+- Art: klarstellend.
+- Stelle: 4 (`identity-1.pub`, `identity-2.succ`).
+- Problem: Für Generationen ab 2 nennt Abschnitt 4 nur `.succ`.
+- Stand M1: `gomail-ceremony succeed` schreibt für jede neue Generation auch `identity-<gen>.pub` (`ceremony.runSucceed`, Auftrag 10).
+- Vorschlag: In 4 `identity-<gen>.pub` für jede Generation nennen.
+
+## S62 `SIZE` zählt nur die Daten des Absenders
+- Art: klarstellend.
+- Stelle: 5.1 („maximale Größe 25 MiB … `SIZE` in `EHLO`“); 5.2 Schritt 2 (`Received`-Header).
+- Problem: Offen ist, ob der vom Server ergänzte `Received`-Header zur Grenze zählt.
+- Stand M1: Gezählt werden nur die Zeilen des Absenders nach dem Dot-Unstuffing mit CRLF; der `Received`-Header zählt nicht (Lesart von RFC 1870, `smtpd` `session.data`).
+- Vorschlag: In 5.1 „gezählt werden die Daten des Absenders“ ergänzen.
+
+## S63 Namen und Bits der Flags
+- Art: klarstellend.
+- Stelle: 7 („Ändert ein Benutzer Flags …“); K4 Punkt 3.
+- Problem: Die Spezifikation nennt keine Flags.
+- Stand M1: Bits 0 bis 4 des signierten Felds `flags`: `seen`, `answered`, `flagged`, `deleted`, `draft`; unbekannte Bits bleiben unverändert (`client.flagBits`, Auftrag 09). Keine Formatänderung.
+- Vorschlag: Die Liste in 7 aufnehmen.
+
+## S64 Nur Benutzer-Mitglieder ändern Flags
+- Art: klarstellend.
+- Stelle: 7 Tabelle („`<mail-id>.meta.gml` nach Flag-Änderung, Identität des Benutzers“).
+- Problem: Offen ist, welcher Benutzer Metadaten neu signieren darf.
+- Stand M1: Nur ein Benutzer-Mitglied (Art 1) der Epoche der Mail, mit seiner aktuellen Generation; Vertretung und Wiederherstellungsempfänger nicht (`client.setFlags`, `checkMeta`, Auftrag 09).
+- Vorschlag: In 7 „Identität eines Benutzer-Mitglieds der Epoche“ schreiben.
+
+## S65 Testsperre: der Server setzt keinen Client voraus
+- Art: klarstellend (Bestätigung erbeten).
+- Stelle: 9.1 „Beim Start prüfen Server und Client, dass eine Testsperre von der jeweils anderen Seite wirksam ist“.
+- Problem: Läuft noch kein Client, kann der Server dessen Sperre nicht prüfen und dürfte nach dem Wortlaut nicht starten.
+- Stand M1: Der Client prüft die Sperre des laufenden Servers; der Server hält nur seine eigene Sperre und startet ohne Client (`store.Store.CheckPeerLock`, `ingest.Config.PeerCheck` standardmäßig aus; D70, D73). Das Verdrahten in den Programmen ist Auftrag 15.
+- Vorschlag: In 9.1 „Der Client prüft beim Start die Sperre des Servers“ schreiben.
+
+## S66 Mehrere Clients gleichzeitig
+- Art: klarstellend.
+- Stelle: 9.1.
+- Problem: Eine exklusive Client-Sperre ließe nur einen Client je Datenverzeichnis zu.
+- Stand M1: Die Rollensperre des Clients ist geteilt; mehrere Clients laufen gleichzeitig (`store.RoleClient`, D70).
+- Vorschlag: In 9.1 festhalten.
+
+## S67 Befehle und Optionen der Zeremonie
+- Art: klarstellend.
+- Stelle: 2.3 „Zeremonie“ (offline, ohne Netzwerk); 9.2 (`init`, `ingest-rotate`, `reshare`).
+- Problem: Die Zeremonie läuft offline und kann das Log nicht schreiben; ein Wechsel der Identität (2.3) hat keinen Befehl.
+- Stand M1: Zusätzlich `succeed` (Nachfolge, `--compromised` für den Kompromissfall, bis zur Aufhebung von `TODO(task-07)` gesperrt) und `publish` (bringt den Export ins Datenverzeichnis und ins Log); Optionen `--out`, `--keys`, `--origin`, `--witness`, `--min-witnesses`, `--pin`, `--gen`, `--valid-from`, bei `publish` `--from`, `--data`, `--pin` (`cmd/gomail-ceremony`, D72 (11), Auftrag 10). Gedeckt durch M1-Kriterium C.
+- Vorschlag: Die Befehle und Optionen in 9.2 aufnehmen.
+
+## S68 Optionen des Zeugen
+- Art: klarstellend.
+- Stelle: 9.2 `gomail-witness serve --log <url> --key <schlüsseldatei>`.
+- Problem: Ohne Log-Schlüssel, Origin und Zustandsverzeichnis kann der Zeuge die Regeln aus 2.7 nicht prüfen.
+- Stand M1: Zusätzlich `--log-key` (bei einer Ingest-Rotation zweimal), `--origin`, `--state`, `--interval` und der Befehl `keygen` (`cmd/gomail-witness`, D74).
+- Vorschlag: In 9.2 aufnehmen.
+
+## S69 Entwicklungszeremonie und Zeuge
+- Art: offen (keine Frage in `QUESTIONS.md`, `TODO(ask)`).
+- Stelle: 9.2 `gomail-ceremony init`; 2.7 (mindestens ein Zeuge).
+- Problem: 9.2 nennt keine Option für den Zeugen einer Entwicklungszeremonie (`init --dev`).
+- Stand M1: Ohne angegebene Zeugen erzeugt `ceremony.InitDev` einen Entwicklungszeugen (`gomail-dev-witness`, Schlüssel 0600 im Schlüsselverzeichnis) und pinnt ihn mit Quorum 1 aus 1.
+- Vorschlag: Entscheiden, ob die Entwicklungszeremonie einen eigenen Zeugen erzeugt oder Zeugen wie `init` verlangt.
