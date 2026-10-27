@@ -10,3 +10,18 @@ Nach Zusammenführung von 06b und 09 auf dem Arbeitsbranch (der Orchestrator nen
 6. **Hinweis (niedrig):** `from:`/`to:` aus gekürzten Metadatenwerten (4096 Byte, Umschlagabsender 320 Byte) können bei überlangen Headern vom Server abweichen: in `terms` dokumentieren und in `TestMetaTermsMatchServer` einen Fall mit 5 KiB-Header aufnehmen, der die Abweichung festhält.
 
 Fertig: `gofmt -l .` leer, `go vet ./...`, `go test -race ./internal/client ./internal/ingest ./internal/terms ./internal/e2e`, `GOARCH=386 go test ./internal/client ./internal/ingest`, Abdeckung `client` ≥ 85 %, Vektoren byte-gleich. Ein Commit `client, ingest, terms: one implementation of the term rules, S13 for metadata and segments, pinned tests (task 09b)`; kein Modellname. Bericht je Punkt mit Mutationsnachweisen für 3(a)–(d).
+
+## Nachtrag (nach 06b–06h, 13 und 14)
+
+09b wurde beim Planen der Welle 4 übersehen und startet erst jetzt, auf dem Stand nach Auftrag 14 (Client am Transparenzlog). Es gelten zusätzlich:
+
+- **Basis:** Generationen und Widerrufe stammen seit 14 aus dem Log (D84, D88). Die Übernahmeregel aus Punkt 2 ist die von 06b/06h (`checkAccept`, Prüfvermerke in `state.json`, D84). Baue darauf auf, nicht auf einer eigenen Variante. Ein Prüfvermerk zählt nur, wenn er vor dem im Log belegten Widerruf entstanden ist. Ohne Vermerk wird die Datei nicht verwendet, und eine Warnung nennt nur die Mail-ID bzw. das Segment.
+- **`devicelost.go`:** Die beiden `TODO(task-09)` (Kommentar am Dateianfang und in der Neuausstellung) werden durch Punkt 2 aufgelöst. Danach gibt es in `internal/client` kein `TODO(S13)` und kein `TODO(task-09)` mehr.
+- **Darf zusätzlich ändern:** `internal/e2e/**`, falls der Umzug aus Punkt 1 einen Test dorthin verlegt. `cmd/gomailctl/**` wird nicht geändert. Liegt dort ein Aufruf auf entfernten Namen, melde ihn, statt ihn anzupassen.
+- **Tests:** `internal/client`, `cmd/gomailctl` und `internal/e2e` brauchen `-tags gomail_dev,gomail_test`. `go test -race` auf `internal/client` dauert etwa 25 Minuten, also `-timeout 40m`. `internal/e2e` läuft nur mit `GOMAIL_TEST_MIN_FREE=0.000001`; diese Variable gilt nur für e2e.
+- **Fertig zusätzlich:**
+  - `go vet -tags gomail_dev,gomail_test ./...`
+  - `go test -race -tags gomail_dev,gomail_test ./internal/client ./internal/e2e ./cmd/gomailctl`
+  - `GOARCH=386 go test -tags gomail_dev,gomail_test ./internal/client`
+  - Abdeckung `internal/client` ≥ 85 % und `internal/terms` ≥ 85 %, jeweils mit den Tags.
+- **Mutationsnachweise:** auch für Punkt 2. Wird die Prüfung des Prüfvermerks entfernt, muss mindestens ein Test brechen, ebenso beim Vergleich „Vermerk vor Widerruf“.
