@@ -1,0 +1,22 @@
+# Auftrag 11b: Nacharbeit Serverseite des Logs (Funde der Verifikation von 11)
+
+Branch `worktree-agent-a128f78ab9ace90c2`, Worktree `/home/user/go-mail/.claude/worktrees/agent-a128f78ab9ace90c2` (Stand b903367). Feste Vorgaben: `/home/user/go-mail/docs/tasks/00-vorgaben.md` (gelten wörtlich). Auftrag 11 bleibt gültig. Lies `internal/translog/operator.go` (`SignHead`, `syncTree`, `PublishHead`, `readHead`), `internal/loghttp/loghttp.go` (`serveHead`, `serveConsistency`, `cosign`, `s.known`), `harness_test.go`, `cmd/gomail-server/main.go` (`address add`, `readPin`), `paths.go`, `internal/store` (`AddAddress`, `addresses.lock`). Prüftests des Verifizierers als Vorlage (prüfen, anpassen, umbenennen): `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/verify11-spec/tests/` (`translog_verify11_test.go`, `loghttp_verify11_test.go`, `gomail-server_verify11_test.go`) und `.../verify11-attack/attack_loghttp_test.go`, `attack_translog_test.go`.
+
+## Funde mittel
+
+1. **fsync vor der Signatur ungetestet (Q10 Punkt 2).** Mutation „`syncTree` aus `SignHead` entfernt“ überlebt alle Tests. Umsetzen: Einspritzpunkt (`hook("sync")` nach `syncTree`, vor `note.Sign`) und ein Test, der den Hook fehlschlagen lässt und erwartet, dass kein Kopf entsteht; zusätzlich ein Test, der die gesyncten Pfade zählt (Einträge ab Basis, geänderte Kacheln, `tree.rec`, Verzeichnisse bis `log/`); die Mutation muss brechen.
+2. **`address add` für eine bereits anders zugeordnete Adresse.** Der Logeintrag wird geschrieben, `store.AddAddress` verweigert danach mit `ErrExists`; Log (Postfach B ab `valid_from`) und Arbeitskopie (A) widersprechen sich dauerhaft, der Fehlertext nennt die Adresse im Klartext. Umsetzen: unter `addresses.lock` **vor** dem `Append` prüfen, dass die Adresse frei oder bereits diesem Postfach zugeordnet ist, sonst Nutzungsfehler ohne Logeintrag (strengste Lesart: keine Umzuordnung im PoC, `TODO(ask)` mit Hinweis auf SPEC-ISSUES); Fehlertexte von `address add` ohne die Adresse (nur Postfach-ID und „Adresse bereits zugeordnet“); Test aus der Vorlage (`TestVerify11AddressReassign`, erwartet jetzt: kein zweiter Logeintrag, `addresses.json` unverändert, Exit 2, keine Adresse in stderr).
+
+## Funde niedrig
+
+3. **Testlücke „nie zwei Köpfe gleicher Größe mit verschiedenem Hash“ in `PublishHead`:** Test `TestVerify11PublishSameSizeOtherHash` übernehmen (Mutation muss brechen).
+4. **Testlücke „Logzeile nur der deckenden Generation“ in `PublishHead`:** Test `TestVerify11PublishCoveringGeneration` übernehmen.
+5. **Testumgebung ohne `Options.Known`:** `harness_test.go` setzt `Known` wie `main.go`; `Head()`/`current()` des Operators öffnen den veröffentlichten Kopf zeilenweise wie `readHead`, so dass eine vergiftete Zeugenzeile `GET /head` und `GET /consistency` nicht mit 500 scheitern lässt (Test `TestVerify11KnownPoisonedHead`, erwartet jetzt 200).
+6. **`readPin` ohne Symlink-Auflösung:** `filepath.EvalSymlinks` für Pin und `Store.Root` wie `indexPath` (07c); Pin über Symlink im Datenverzeichnis → Nutzungsfehler; Test.
+7. **`/cosign` nach Ingest-Rotation:** Körper mit der Logsignatur der alten Generation für den veröffentlichten Kopf werden mit 400 abgelehnt, weil `s.known` nur `cfg.LogKey` kennt. Umsetzen: zusätzlich die geloggten Ingest-Schlüssel des festgeschriebenen Baums zulassen (wie `PublishHead` sie bestimmt); Test über eine Rotation.
+
+## Festhalten (Dokumentation in `doc.go`/Paketkommentar, keine Änderung)
+
+- `/cosign` nimmt mehrere gültige Zeugenzeilen in einem Körper an (mildere Lesart als „genau zwei Zeilen“ beim Zeugen); `RepairTree` scheitert fail closed an jeder nicht lesbaren Datei in `heads/` (Betreiber löscht sie); `PublishHead` prüft die Kopfzeit nicht gegen die eigene Uhr (Zeuge Regel 2 und Client `MaxClockSkew` tun es); `RepairTree` prüft die deckende Generation nicht (Client-Sache); `loghttp` ohne Verbindungsobergrenze und Ratenbegrenzung (10.2, vor Produktion).
+
+Fertig: `gofmt -l .` leer, `go vet ./...`, `go test -race ./internal/translog/... ./internal/loghttp ./internal/witness ./cmd/gomail-server ./internal/e2e`, `GOARCH=386 go test ./internal/translog/... ./internal/loghttp ./cmd/gomail-server`, `FuzzServer` 60 s, Vektoren byte-gleich. Ein Commit `translog, loghttp, gomail-server: sync pinned, address add checks before logging, poisoned heads served line by line (task 11b)`; kein Modellname. Bericht je Fund: Änderung, Testname, Mutationsnachweis für 1, 3, 4.
