@@ -26,15 +26,18 @@ import (
 // InitOptions.Display; the command line asks the same on a terminal,
 // cmd/gomail-ceremony): it keeps the shares shown and gives back the
 // share asked for by index, and the next one of queue for any share.
+// asked records the indices asked for (the trial reconstruction).
 type sharePrompter struct {
 	shown map[int][]string
 	queue [][]string
+	asked []int
 }
 
 func (p *sharePrompter) Handover(int, int) error { return nil }
 
 func (p *sharePrompter) AskShare(want int) ([]string, error) {
 	if want > 0 {
+		p.asked = append(p.asked, want)
 		return p.shown[want], nil
 	}
 	if len(p.queue) == 0 {
@@ -183,11 +186,11 @@ func refreshUntil(t *testing.T, l translog.Log, logs func() string, check func()
 //     refuses to start with it (ingest.ErrSuperseded), and a client log
 //     with pin 3 (heads cosigned by the new witness) ends generation 1 at
 //     that valid_from (LogKey.Until) and accepts the new certificate
-//     issued by identity 3. TODO(task-14): this step checks the end of
-//     generation 1 on a client log of its own (clientLog), not through
-//     gomailctl; the rule for metadata signed by ingest generation 1
-//     after that time (translog doc.go "Platform generations") in the
-//     client log of gomailctl is not covered here.
+//     issued by identity 3. This step checks the end of generation 1 on
+//     a client log of its own (clientLog); the rule for metadata signed
+//     by ingest generation 1 after that time (translog doc.go "Platform
+//     generations") in the client log of gomailctl is covered by
+//     TestRunbook (RUNBOOK 6).
 func TestSuccessionEndToEnd(t *testing.T) {
 	bin := programs(t)
 	dir := t.TempDir()

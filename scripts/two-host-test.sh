@@ -108,6 +108,10 @@
 # task 13) and checks that it reads the mail then.
 
 set -eu
+# No trace of the commands, whatever the caller set (SHELLOPTS of bash,
+# set -x in ENV): a trace would print the passphrase and the subject the
+# script holds in variables (task 19).
+set +o xtrace +o verbose
 
 # Every variable of this script starts here, empty or 0 (task 16c
 # finding 1): no value comes from the environment, and unset drops the
@@ -163,7 +167,8 @@ Aufruf:
   --workdir  darunter legt das Skript auf jedem Host sein eigenes Verzeichnis two-host.XXXXXX
              an, außerhalb von Export und Mount (Standard /tmp, lokal $TMPDIR oder /tmp)
   --out      Verzeichnis für das Protokoll (protokoll.md, darf noch nicht existieren)
-  --keep     eigene Verzeichnisse, Datenverzeichnis, Pin und Zeugenschlüssel nicht löschen
+  --keep     eigene Verzeichnisse, Datenverzeichnis, Pin, Zeugenschlüssel und lokal angelegte
+             --export/--mount nicht löschen; die Passphrase-Datei wird immer gelöscht
   --local    alles auf dieser Maschine, ohne NFS (kein Nachweis nach 9.1)
 
 Exit: 0 bestanden, 1 abgebrochen, 2 Aufruffehler, 130 Abbruch durch Signal
@@ -569,7 +574,7 @@ step "a) Voraussetzungen"
 TOOLS="cat chmod cksum cut dirname find grep head sed sort awk od tr wc mkdir rm rmdir mkfifo mktemp kill sleep tail ls id uname"
 must server "for t in $TOOLS curl base64 dd chgrp; do command -v \$t >/dev/null || { echo \"fehlt: \$t\"; exit 1; }; done
 command -v sha256sum >/dev/null || command -v shasum >/dev/null || { echo 'fehlt: sha256sum oder shasum'; exit 1; }
-curl --version | grep -qi 'smtp' || { echo 'curl ohne SMTP'; exit 1; }
+curl -q --version | grep -qi 'smtp' || { echo 'curl ohne SMTP'; exit 1; }
 echo 'Werkzeuge vorhanden'"
 must client "for t in $TOOLS; do command -v \$t >/dev/null || { echo \"fehlt: \$t\"; exit 1; }; done; echo 'Werkzeuge vorhanden'"
 ok "Werkzeuge auf beiden Seiten vorhanden (curl mit SMTP auf dem Server-Host)"
@@ -675,7 +680,7 @@ if [ "$LOCAL" = 1 ]; then
 		MADE_EXPORT=1
 	fi
 	if [ ! -e "$MOUNT" ] && [ ! -L "$MOUNT" ]; then
-		ln -s "$EXPORT" "$MOUNT"
+		ln -s "$EXPORT" "$MOUNT" 2>/dev/null || die "--mount $MOUNT lässt sich nicht anlegen (das Elternverzeichnis muss existieren)"
 		MADE_LINK=1
 	fi
 	md "" "Mount als symbolischer Link: $MOUNT -> $EXPORT"
@@ -976,7 +981,7 @@ ok "Postfach $MBX mit Adresse <Adresse> (signiert und geloggt auf dem Server-Hos
 
 RC=0
 printf 'From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s\r\n' "$FROM" "$ADDR" "$SUBJECT" "$BODY" |
-	run_on server "curl --silent --show-error --url $(q "smtp://$SMTP") --mail-from $(q "$FROM") --mail-rcpt $(q "$ADDR") --upload-file - && echo 'eingeliefert'" >"$T/out" 2>"$T/err" || RC=$?
+	run_on server "curl -q --silent --show-error --url $(q "smtp://$SMTP") --mail-from $(q "$FROM") --mail-rcpt $(q "$ADDR") --upload-file - && echo 'eingeliefert'" >"$T/out" 2>"$T/err" || RC=$?
 {
 	printf '\n```console\nserver$ curl --url smtp://%s --mail-from <Absender> --mail-rcpt <Adresse> --upload-file -   # Mail mit <Betreff> und <Text>\n' "$SMTP"
 	cat "$T/out" "$T/err"

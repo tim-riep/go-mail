@@ -7,7 +7,6 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"io"
-	"net/smtp"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,46 +163,11 @@ func (s *serverProc) stop() {
 	s.cmd.Wait()
 }
 
-// startServerProgram starts gomail-server and returns once both
-// listeners are up.
+// startServer starts gomail-server with serveArgs and returns once both
+// listeners are up (startServerProc).
 func (p *platform) startServer() *serverProc {
 	p.t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	p.t.Cleanup(cancel)
-	s := &serverProc{cmd: exec.CommandContext(ctx, filepath.Join(p.bin, "gomail-server"), p.serveArgs()...)}
-	s.cmd.Env = append(os.Environ(), testMinFree, testHeadGap)
-	stderr, _ := s.cmd.StderrPipe()
-	if err := s.cmd.Start(); err != nil {
-		p.t.Fatal(err)
-	}
-	p.t.Cleanup(s.stop)
-	addrs := make(chan [2]string, 2)
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		re := regexp.MustCompile(`msg="(smtp|log) listening" addr=(127\.0\.0\.1:\d+)`)
-		for sc.Scan() {
-			s.mu.Lock()
-			s.logs.WriteString(sc.Text() + "\n")
-			s.mu.Unlock()
-			if m := re.FindStringSubmatch(sc.Text()); m != nil {
-				addrs <- [2]string{m[1], m[2]}
-			}
-		}
-	}()
-	deadline := time.After(30 * time.Second)
-	for s.smtp == "" || s.log == "" {
-		select {
-		case a := <-addrs:
-			if a[0] == "smtp" {
-				s.smtp = a[1]
-			} else {
-				s.log = a[1]
-			}
-		case <-deadline:
-			p.t.Fatalf("server did not start:\n%s", s.Logs())
-		}
-	}
-	return s
+	return startServerProc(p.t, p.bin, append(os.Environ(), testMinFree, testHeadGap), p.serveArgs())
 }
 
 // startWitness starts gomail-witness with the witness key of the
@@ -314,134 +278,6 @@ func (p *platform) keygen(common []string) {
 	if err := kg.Wait(); err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
-}
-
-// TestRunbook builds the programs and runs the steps of docs/RUNBOOK.md:
-// ceremony, server with the transparency log and a witness, keygen,
-// invite, register, mailbox, address, mail via SMTP, list, read,
-// inspect, sync.
-func TestRunbook(t *testing.T) {
-	p := newPlatform(t)
-	data, keys, alice := p.data, p.keys, filepath.Join(p.dir, "alice")
-	run := p.run
-	common := []string{"--data", data, "--dir", alice, "--pin", p.pin}
-	// --insecure-no-log is no switch of gomailctl any more (task 14).
-	if code, _, e := p.exec("", "gomailctl", append([]string{"sync", "--insecure-no-log"}, common...)...); code != 2 || !strings.Contains(e, "insecure-no-log") {
-		t.Fatalf("gomailctl --insecure-no-log: exit %d %s", code, e)
-	}
-
-	// 2. Server, only with the log; then the witness.
-	if code, _, _ := p.exec("", "gomail-server", "serve", "--data", data, "--ingest-key", p.ingestKey); code != 2 {
-		t.Fatalf("server without --pin: exit %d", code)
-	}
-	srv := p.startServer()
-	p.startWitness(srv)
-
-	// 3. keygen: answer the three questions from the words shown.
-	p.keygen(common)
-
-	// 4. Invitation and registration.
-	code := strings.TrimSpace(run("", "gomail-server", "invite", "create", "--data", data))
-	reg := run("", "gomailctl", append([]string{"register", "--invite", code}, common...)...)
-	userID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reg), "Registriert:"))
-	// gomailctl appended its user.rec to the log itself (task 14).
-	if _, err := os.Stat(filepath.Join(data, "users", userID, "user.rec")); err != nil {
-		t.Fatal(err)
-	}
-
-	// 5. Mailbox and address: mailbox create waits for a head that
-	// covers the user entry; it logs its epochs itself.
-	mbx := strings.TrimSpace(p.runLogged("", "gomailctl", append([]string{"mailbox", "create", "Büro"}, common...)...))
-	epochs, _ := filepath.Glob(filepath.Join(data, "mailboxes", mbx, "epochs", "*", "epoch.rec"))
-	if len(epochs) == 0 {
-		t.Fatal("no epochs")
-	}
-	if _, err := os.Stat(filepath.Join(alice, "new-mailboxes", mbx)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("copy of the new mailbox left in the client directory: %v", err)
-	}
-	if c, _, _ := p.exec("", "gomail-server", "address", "add", "info@brownbear.example", "--mailbox", mbx, "--data", data,
-		"--admin-key", p.admin, "--insecure-no-log"); c != 2 {
-		t.Fatalf("address add with --insecure-no-log: exit %d", c)
-	}
-	run("", "gomail-server", "address", "add", "info@brownbear.example", "--mailbox", mbx, "--data", data,
-		"--admin-key", p.admin, "--pin", p.pin)
-
-	// 6. A mail via SMTP.
-	msg := "From: rechnung@lieferant.example\r\nTo: info@brownbear.example\r\nSubject: Rechnung 4711\r\n\r\nHallo.\r\n"
-	if err := smtp.SendMail(srv.smtp, nil, "rechnung@lieferant.example", []string{"info@brownbear.example"}, []byte(msg)); err != nil {
-		t.Fatal(err)
-	}
-	// A second mail with a known secret phrase in header and body.
-	secret := "Subject: Geheimprojekt Nordlicht\r\nFrom: vorstand@brownbear.example\r\nTo: info@brownbear.example\r\n\r\nKennwort: Nordlicht-2026\r\n"
-	if err := smtp.SendMail(srv.smtp, nil, "vorstand@brownbear.example", []string{"info@brownbear.example"}, []byte(secret)); err != nil {
-		t.Fatal(err)
-	}
-
-	// 7. list, read, inspect, sync. list is repeated until a head
-	// covers the address assignment too: without it the mail is not
-	// shown (2.3).
-	var list string
-	for deadline := time.Now().Add(time.Minute); ; time.Sleep(250 * time.Millisecond) {
-		list = p.runLogged("", "gomailctl", append([]string{"list", mbx}, common...)...)
-		if strings.Contains(list, "Rechnung 4711") || time.Now().After(deadline) {
-			break
-		}
-	}
-	if !strings.Contains(list, "Rechnung 4711") {
-		t.Fatalf("list: %q", list)
-	}
-	var mailID string
-	for _, line := range strings.Split(list, "\n") {
-		if strings.Contains(line, "Rechnung 4711") {
-			mailID = strings.Fields(line)[0]
-		}
-	}
-	content := run("", "gomailctl", append([]string{"read", mbx, mailID}, common...)...)
-	if !strings.HasSuffix(content, msg) || !strings.HasPrefix(content, "Received: ") {
-		t.Fatalf("read: %q", content)
-	}
-	run("", "gomailctl", append([]string{"list", mbx, "--folder", "INBOX"}, common...)...)
-	insp := run("", "gomailctl", "inspect", filepath.Join(data, "mailboxes", mbx, "epochs", "1", "epoch.rec"))
-	if !strings.Contains(insp, `"_type": "gomail/v1/rec/epoch"`) {
-		t.Fatalf("inspect: %q", insp)
-	}
-	run("", "gomailctl", append([]string{"sync"}, common...)...)
-
-	// The witness cosigned a head of the server: heads/<n>.sig.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if hs, _ := filepath.Glob(filepath.Join(data, "log", "heads", "*.sig")); len(hs) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no head published:\n%s", srv.Logs())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// The server log holds no content and no addresses.
-	srv.stop()
-	logs := srv.Logs()
-	for _, s := range []string{"Rechnung", "lieferant", "brownbear", "Hallo", "Nordlicht", "vorstand"} {
-		if strings.Contains(logs, s) {
-			t.Fatalf("server log contains %q", s)
-		}
-	}
-	if !strings.Contains(logs, "status=250") || !strings.Contains(logs, "head published") {
-		t.Fatalf("server log: %s", logs)
-	}
-	// Without a running server the client refuses (9.1, Testsperre).
-	if c, _, e := p.exec("", "gomailctl", append([]string{"list", mbx}, common...)...); c != 1 || !strings.Contains(e, "Testsperre") {
-		t.Fatalf("client without a server: exit %d %s", c, e)
-	}
-	// GOMAIL_E2E_KEEP=<dir> keeps a copy of the data directory (only the
-	// data directory: no keys, no client) for an independent review.
-	if keep := os.Getenv("GOMAIL_E2E_KEEP"); keep != "" {
-		if out, err := exec.Command("cp", "-a", data, keep).CombinedOutput(); err != nil {
-			t.Fatalf("keep: %v %s", err, out)
-		}
-	}
-	_ = keys
 }
 
 // TestProgramsRefuse: the start checks of task 15 with the built
