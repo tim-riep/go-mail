@@ -20,6 +20,9 @@ Paket `translogtest` mit `Unverified` (erfüllt `translog.Log`), importiert nur 
 ### E. Tests nach 10.1 (Pflicht)
 Baumkopf ohne Zeugensignatur; mit zu wenigen Zeugen; Quorumverletzung im Pin; Kopf älter als 24 h; Kopf keine Fortsetzung; Eintrag entfernt oder geändert (Inklusions- und Konsistenzbeweis scheitern); `tree.rec` zurückgesetzt (`Append` verweigert, nichts gelöscht); Doppelung; fremde Epochennummer (`ErrOrder`, Schlüssel nicht belegt); ungeloggte Unterzeichnergeneration (`ErrUnloggedSigner`); Adresse ohne und mit widersprüchlicher Zuordnung; widerrufene Generation vor und nach dem Widerruf; Kopf mit Größe über `MaxTreeSize`; zurückgehaltener eigener Eintrag (`ErrWithheld`) gegen Ausfall (`ErrStale`); Ingest-Rotation (erster Kopf der neuen Generation prüfbar); zwei Clients mit verschiedenen Köpfen gleicher Größe können nicht beide ein Quorum erhalten, solange weniger als `2·min − n` Zeugen kolludieren (Test mit 1 von 1 und 3 von 3). Fuzz-Ziele für Einträge, Köpfe, Beweise, Audit-Index je 3 Minuten. Absturz zwischen jedem Schritt von `Append` (Einspritzpunkt), danach `Open` und erneutes `Append` heilen.
 
+### F. Offene niedrige Funde der letzten Entwurfsprüfung (Pflicht, siehe `docs/QUESTIONS.md` Q10)
+(1) Konstante `MaxRevoked` für Pin-Feld 7 (nur dokumentiert) so, dass der größte Pin unter `MaxPinFile` bleibt; (3) `store.CreateUser` und `store.WriteEpoch` erhalten Varianten (oder ein Verhalten), bei denen eine vorhandene byte-gleiche Datei als erledigt gilt (`ErrExists` nur bei anderem Inhalt), für die Wiederaufnahme nach „Who writes“; (6) Wortlaut von `Refresh`: `Logged` und `Until` aus dem Audit-Index bis zum neuen Kopf, früher geloggte Zertifikate bleiben geloggt. (2), (4), (5) betreffen die Serverseite und gehen in Auftrag 11; dokumentiere sie in `doc.go` als Pflicht für 11.
+
 ## Nicht Teil des Auftrags
 Zeuge (08), Serverseite (`SignHead`/`PublishHead`/HTTP, 11), Zeremonie (10), Einbau in Client und Ingest (14, 15).
 
