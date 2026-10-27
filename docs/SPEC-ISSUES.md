@@ -17,6 +17,14 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Der Stand im Code bezieht sich auf den Arbeitszweig. Wo ein Punkt Auftrag 06b, 09 oder 10 nennt, liegt der Code noch in dessen Worktree und ist nicht zusammengeführt.
 - Zu prüfen: S34 (Quellen und Code widersprechen sich).
 
+## Stand Welle 4
+- Grundlage: weiter Version 1.4. Neu sind S70 bis S87 aus den Aufträgen 06b bis 06h, 10 und 15b, 15c und 15d, 16 bis 16c, aus Auftrag 14 (Nachtrag und Pflichtpunkte) sowie aus Q13, Q15, Q18 und Q19.
+- Zahl: 18 neue Punkte, davon 9 klarstellend und 9 offen.
+- Offen: S71 (Q13), S72 (Q15), S73 (Q18), S75 (ohne Frage), S76 (Q19), S77 (ohne Frage, `TODO(ask)`), S80 (ohne Frage), S83 (ohne Frage), S87 (ohne Frage).
+- Q16 und Q17 sind Haltepunkte zum Ablauf, keine Fragen an die Spezifikation; ihr fachlicher Inhalt steht in S70, S74 und S78.
+- Der Code zu S76, S77, S78 und S86 (Auftrag 15b) liegt noch in dessen Worktree (Commit 11259ef) und ist nicht zusammengeführt.
+- Präzisiert werden S24 (durch S76), S32 (S78), S56 (S79), S65 (S82 bis S84) und S67 (S86); dort steht jeweils ein Verweis.
+
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
 - Stelle: 3.1 Aufbau, 3.3 Regel 7.
@@ -192,6 +200,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Stand M1: Der Pin hat kein Feld 7 (`store.PlatformPinSchema`), `translog.Verifier.Revoked` bleibt leer, die Stellen tragen `TODO(ask)`.
 - Ergänzung aus der Prüfung von 03b: Feld 7 braucht neben `revoked_at_size` auch `revoked_at_time`, weil Köpfe einer Größe mit späteren Zeiten neu signiert werden und die Kopfzeit zu `revoked_at_size` sonst nicht eindeutig ist (`internal/translog/doc.go`, „Platform generations“).
 - Vorschlag: Wie Q8 (a) und (b), mit `revoked_at_time` als viertem Bestandteil von Feld 7.
+- Siehe S76 (Q19) für die Kompromittierung der Plattformidentität selbst.
 
 ## S25 Gültigkeitsende einer Plattformgeneration nach dem Wechsel
 - Art: offen (Q8).
@@ -248,6 +257,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: 2.3 nennt keine Regeln für Anzeige und Eingabe der Anteile.
 - Stand M1: Anteile erscheinen und werden eingegeben nur, wenn stdin und stdout ein Terminal mit abschaltbarem Echo sind; keine Eingabe aus Datei oder Pipe; nach jedem Schritt wird der Bildschirm samt Scrollback gelöscht; stderr muss kein Terminal sein, weil dort keine Geheimnisse erscheinen (`cmd/gomail-ceremony`: `isTerminal`, `errNoTerminal`, `clearScreen`, Auftrag 10). Betriebsregel im RUNBOOK: nur an der Linux-Konsole, kein tmux, screen, script oder Emulator mit eigenem Verlauf.
 - Vorschlag: Diese Regeln in 2.3 aufnehmen.
+- Siehe S78 (getrennte Terminals, Signale nach dem Commit).
 
 ## S33 Eingetippte Anteile bleiben im Speicher
 - Art: klarstellend (bekannte Grenze).
@@ -416,6 +426,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: 7 legt Zusatzfelder nur für `meta` fest; für `pending` schweigt die Spezifikation.
 - Stand M1: `extra` bleibt leer (`ingest.pendingSignedExtra`); Postfach, Epoche, Datei-ID und `created` sind über den Kopf im Hash der Datei gebunden.
 - Vorschlag: In 7 festhalten, dass `pending` nur Hash und Unterzeichner signiert.
+- Siehe S79 (Bedeutung von `created` bei `pending`).
 
 ## S57 Inhalt von `folders.gml`
 - Art: klarstellend.
@@ -479,6 +490,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: Läuft noch kein Client, kann der Server dessen Sperre nicht prüfen und dürfte nach dem Wortlaut nicht starten.
 - Stand M1: Der Client prüft die Sperre des laufenden Servers; der Server hält nur seine eigene Sperre und startet ohne Client (`store.Store.CheckPeerLock`, `ingest.Config.PeerCheck` standardmäßig aus; D70, D73). Das Verdrahten in den Programmen ist Auftrag 15.
 - Vorschlag: In 9.1 „Der Client prüft beim Start die Sperre des Servers“ schreiben.
+- Siehe S82 (`--require-client-lock`), S83 (kein Befehl hält die Client-Sperre) und S84 (keine Echtheit).
 
 ## S66 Mehrere Clients gleichzeitig
 - Art: klarstellend.
@@ -493,6 +505,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: Die Zeremonie läuft offline und kann das Log nicht schreiben; ein Wechsel der Identität (2.3) hat keinen Befehl.
 - Stand M1: Zusätzlich `succeed` (Nachfolge, `--compromised` für den Kompromissfall, bis zur Aufhebung von `TODO(task-07)` gesperrt) und `publish` (bringt den Export ins Datenverzeichnis und ins Log); Optionen `--out`, `--keys`, `--origin`, `--witness`, `--min-witnesses`, `--pin`, `--gen`, `--valid-from`, bei `publish` `--from`, `--data`, `--pin` (`cmd/gomail-ceremony`, D72 (11), Auftrag 10). Gedeckt durch M1-Kriterium C.
 - Vorschlag: Die Befehle und Optionen in 9.2 aufnehmen.
+- Siehe S86 (Form von `--witness`) und S77 (Zeugenwechsel über `succeed`).
 
 ## S68 Optionen des Zeugen
 - Art: klarstellend.
@@ -507,3 +520,129 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: 9.2 nennt keine Option für den Zeugen einer Entwicklungszeremonie (`init --dev`).
 - Stand M1: Ohne angegebene Zeugen erzeugt `ceremony.InitDev` einen Entwicklungszeugen (`gomail-dev-witness`, Schlüssel 0600 im Schlüsselverzeichnis) und pinnt ihn mit Quorum 1 aus 1.
 - Vorschlag: Entscheiden, ob die Entwicklungszeremonie einen eigenen Zeugen erzeugt oder Zeugen wie `init` verlangt.
+
+## S70 `device lost` erzeugt immer eine neue Generation
+- Art: klarstellend (Q16, D84).
+- Stelle: 2.2 „Generationen“ Punkt 2; 2.2 „Was der Benutzer selbst tun muss“ (`gomailctl device lost`, „erzeugt eine neue Generation“); 9.2.
+- Problem: Offen ist, was ein zweiter Aufruf bewirkt, wenn der erste die Neuausstellung nicht in allen Postfächern abgeschlossen hat. Auftrag 06b hat dafür einen Modus „nur fortsetzen“ gebaut: keine neue Generation, solange ein Postfach vorgemerkt ist, mit `ForceNewGeneration` als Ausweg. Die Angreifer-Prüfung von 06h zeigt, dass ein gepflanztes Postfach (Strohmann mit `member-added` ohne Verpackung) oder eine gebrochene fremde Kette den Befehl so dauerhaft festhält; die verlorene Generation wird dann nie widerrufen.
+- Stand Welle 4: Auf dem Arbeitszweig gilt noch der Fortsetzungsmodus (`client.DeviceLost`, `DeviceLostOptions.ForceNewGeneration` mit `TODO(ask)`). Auftrag 14 (Pflichtpunkt 1) baut die Lesart von 2.2: Jeder Aufruf erzeugt die nächste Generation; vorgemerkte Postfächer werden im selben Lauf fortgesetzt; scheitern sie weiter, bleibt die Marke und der Befehl endet mit `ErrPartial`; eine Marke in einem Postfach, in dem der Benutzer laut Kopf kein Benutzer-Mitglied ist, blockiert nichts.
+- Vorschlag: In 2.2 Punkt 2 festhalten: „Jeder Aufruf von `device lost` erzeugt eine neue Generation. Nicht abgeschlossene Neuausstellungen früherer Aufrufe setzt der Client im selben Lauf und bei jedem `sync` mit der neuen Generation fort.“
+
+## S71 Generation eines Unterzeichners sinkt in der Kette nicht
+- Art: offen (Q13).
+- Stelle: 2.2 „Generationen“ Punkt 4; K2 Regel 1.
+- Problem: Ohne Log lässt sich nicht prüfen, ob eine `epoch.rec` vor dem Widerruf der signierenden Generation entstand. Der Client ergänzt deshalb eine Schranke, die die Spezifikation nicht kennt: Eine Epoche, die mit einer niedrigeren Generation eines Benutzers signiert ist, als eine frühere Epoche derselben Kette für ihn nennt, ist ungültig. Der Server setzt die Regel nicht durch und verschlüsselt auch für eine solche Epoche.
+- Stand Welle 4: `client.checkSignerGen` (`internal/client/mailbox.go`, `TODO(ask)`), mit 06b zusammengeführt (D84 (1)). Auftrag 14 behält sie neben `CheckRevokedSignature` als lokale Schranke (`TODO(Q13)`).
+- Vorschlag: Wie Q13: entweder als Kettenregel in 2.4 aufnehmen (dann auch in `store.Chain.Add` und damit im Server) oder nach Auftrag 14 entfernen und nur die Logreihenfolge nach 2.2 Punkt 4 gelten lassen.
+
+## S72 Neuausstellung für Leser vergangener Zeiträume
+- Art: offen (Q15).
+- Stelle: 2.2 „Generationen“ Punkt 4 („Übernahme durch andere Mitglieder“) und Punkt 5; 2.5 (`mailbox share … --to`); K2 Regel 2.
+- Problem: Nach Punkt 5 verpacken die Clients „alle Epochen“ für die neue Generation neu. Für Mitglieder ist die signierte `epoch.rec` die Quelle; Leser vergangener Zeiträume stehen in keiner Mitgliederliste, ihre alte Verpackung ist der einzige Beleg. Die Angreifer-Prüfung von 06e zeigt, dass ein Dieb mit einem kolludierenden Strohmann diesen Beleg selbst herstellen kann, wenn eine Vorlage einer widerrufenen Mitgliedsgeneration genügt.
+- Stand Welle 4: Strengste Lesart (06f, D84 (1)): Neuausstellung für solche Leser nur, wenn die Vorlage von einer gültigen Generation eines Benutzer-Mitglieds signiert ist; sonst Warnung, der Teilende teilt erneut (`client.reissueTarget`, `TODO(Q15)`).
+- Vorschlag: Wie Q15: In 2.2 Punkt 5 die automatische Neuausstellung auf Empfänger aus der signierten Mitgliederliste beschränken; Leser vergangener Zeiträume erhalten nach einem Widerruf der Generation des Teilenden ein erneutes `share`.
+
+## S73 Alleiniges Mitglied ohne geprüfte Ordnerliste
+- Art: offen (Q18).
+- Stelle: 2.2 „Generationen“ Punkt 4 (nicht geprüfte Dateien werden nicht übernommen); 2.4 Grund `generation-revoked`; 4 (`folders.gml` je Epoche); K2 Regel 1.
+- Problem: Ist `folders.gml` der neuesten zugänglichen Epoche von der eigenen, inzwischen widerrufenen Generation signiert und fehlt der lokale Prüfvermerk (neues Gerät per `restore`, oder `mailbox.rec` fehlte während `device lost`), darf ein alleiniges Benutzer-Mitglied die Liste nicht übernehmen. Ohne Ordnerliste kann es die Epoche `generation-revoked` nicht anlegen, und kein anderes Mitglied kann helfen; `List`, `Rename` und `SetFolders` scheitern dauerhaft.
+- Stand Welle 4: Ablehnung ohne Ausweg (`ErrPartial`, D84 (3)). Auftrag 14 (Pflichtpunkt 3) korrigiert nur die gemeldete Ursache („keine geprüfte Ordnerliste; derzeit keine Abhilfe“); der Ausweg bleibt `TODO(Q18)`.
+- Vorschlag: Wie Q18: In 2.2 Punkt 4 eine Ausnahme für die Ordnerliste eines alleinigen Mitglieds festlegen (nach ausdrücklicher Bestätigung die ungeprüfte Liste übernehmen oder eine leere Liste schreiben; Standard bleibt die Ablehnung). Zur Auswahl der Ordnerliste siehe S59.
+
+## S74 Der lokale Zustand eines Postfachs wird nie kleiner
+- Art: klarstellend (Q16, D84 (2)).
+- Stelle: 2.4 „Schutz gegen Zurückspielen“; 2.7 erster Absatz („schützen nur einen Client, der seinen bisherigen Zustand kennt“); 2.2 Punkt 4 (Prüfvermerke in `state.json`); K1 Punkt 3.
+- Problem: Der Schutz gegen Zurückspielen stützt sich auf den lokalen Zustand, die Spezifikation sagt aber nicht, dass er nie verkleinert werden darf. In 06g löschte `device lost` den Zustand eines Postfachs, dessen `mailbox.rec` gerade fehlte (Fund hoch, Q16). Danach wurde eine ältere, echt signierte `mailbox.rec` ohne die Warnung aus 2.4 übernommen, und die Prüfvermerke für `folders.gml` waren verloren.
+- Stand Welle 4: Unveränderliche Regel seit 06h: Kein Pfad im Client verkleinert oder löscht `Epoch`/`EpochHash`, `Epochs`, `Checked`, `Recovery`, `Versions`, `Folders` oder `Mails` eines Postfachs; fehlt `mailbox.rec`, bleibt der Eintrag; `adoptMemberships` ersetzt nie einen vorhandenen Eintrag (D84 (2)). Einzige Ausnahme: `null`-Einträge in `state.json` werden entfernt (Auftrag 14, Pflichtpunkt 4).
+- Vorschlag: In 2.4 festhalten: „Der lokale Zustand eines Postfachs (höchste gesehene Epoche mit Hash, verworfene Epochen, Prüfvermerke, gesehene Versionen) wird nie verkleinert, auch nicht durch `device lost` oder eine fehlende `mailbox.rec`.“
+
+## S75 Erster Kontakt mit einem nie geöffneten Postfach
+- Art: offen (keine Frage in `QUESTIONS.md`; in D84 als offene Frage zur Spezifikation für AUDIT vermerkt).
+- Stelle: 2.7 erster Absatz; 2.2 „Generationen“ Punkt 4; 2.4.
+- Problem: Nach `restore` oder `device lost` übernimmt der Client Postfächer, die den Benutzer als Mitglied nennen und deren Kette gültig ist, ohne lokales Vorwissen (`adoptMemberships`). Das gilt auch für ein Postfach, das ein Dieb mit der gestohlenen Generation vor deren Widerruf angelegt hat; seine `epoch.rec` ist nach 2.2 Punkt 4 gültig, wenn sie vor dem Widerruf im Log stand. Die Spezifikation sagt nicht, ob der Client solche Postfächer kennzeichnet oder erst nach Bestätigung übernimmt.
+- Stand Welle 4: Übernahme beim ersten Kontakt ohne Rückfrage; in D84 als Grenze von Phase 2 vermerkt, die das Log (Auftrag 14) eingrenzen soll.
+- Vorschlag: Entscheiden, ob der Client neu gefundene Postfächer, deren Epochen von einer inzwischen widerrufenen eigenen Generation signiert sind, nur mit Warnung und nach Bestätigung übernimmt; andernfalls die Grenze in 2.7 festhalten.
+
+## S76 Nachfolge nach Kompromittierung der Plattformidentität
+- Art: offen (Q19).
+- Stelle: 2.3 „Wechsel der Identität“ (im Kompromissfall gilt der Vorgänger ab dem Logeintrag der Nachfolge als ungültig); 2.7; K8; Q8.
+- Problem: Kein Datensatz und kein Feld macht eine Generation der Plattformidentität ab einem Logeintrag ungültig: `platform-succ` hat kein Kennzeichen „kompromittiert“, der Pin hat kein Feld 7 (S24), `translog` kennt keine solche Regel. Wirksam ist nur die Zeitgrenze; ein Dieb mit dem alten Schlüssel kann bis dahin rückdatierte Zertifikate loggen lassen. Außerdem sagt 2.3 nicht, dass Admin- und Ingest-Zertifikate der kompromittierten Generation unter der neuen neu ausgestellt werden müssen, was neue Admin- und Ingest-Generationen verlangt (eine Admin-Rotation gibt es nicht, Q8 (d)).
+- Stand Welle 4: `gomail-ceremony succeed --compromised` schreibt den neuen Pin mit verlängerter Identitätsliste und `identity-<g>.pub`, aber keine Nachfolge-Signatur des Vorgängers; zwei `TODO(ask)` an `ceremony.Succeed` (Auftrag 15b, Worktree, Commit 11259ef, nicht zusammengeführt). Bis zur Antwort gilt die Betriebsregel aus Q19: nach `succeed --compromised` sofort `ingest-rotate` unter der neuen Identität.
+- Vorschlag: Wie Q19: ein Logeintrag `revocation-<g>.rec`, von der neuen Identität signiert, der alle danach geloggten Einträge der Generation g ungültig macht; dazu in 2.3 die Neuausstellung der Admin- und Ingest-Zertifikate festlegen.
+
+## S77 Geänderte Zeugen erreichen `witnesses.rec` nicht
+- Art: offen (keine Frage in `QUESTIONS.md`, `TODO(ask)`).
+- Stelle: 2.7 „Zeugen“; 4 (`witnesses.rec`); 9.2 (`gomail-ceremony succeed`, `publish`).
+- Problem: `succeed --witness` und `--min-witnesses` ändern Zeugen und Quorum im neuen Pin. `publish` vergleicht `witnesses.rec` des Datenverzeichnisses mit dem Pin und verweigert bei einer Abweichung, damit die Arbeitskopie nie still ersetzt wird (S49). Ein gewollter Wechsel der Zeugen hat damit keinen Weg in ein bestehendes Datenverzeichnis.
+- Stand Welle 4: Strengste Lesart: `publish` verweigert mit `ErrMismatch`, der Betreiber entscheidet (`ceremony.checkWitnessFile`, `TODO(ask)`; Auftrag 15b, Worktree, nicht zusammengeführt).
+- Vorschlag: Ein Schalter von `publish`, der `witnesses.rec` nach Bestätigung durch die Liste des Pins ersetzt (oder ein eigener Befehl des Servers); in 9.2 aufnehmen.
+
+## S78 Terminalregeln: getrennte Terminals, Signale nach dem Commit
+- Art: klarstellend (Q17, D82); präzisiert S32.
+- Stelle: 2.3 „Zeremonie“; 9.2 `gomail-ceremony`.
+- Problem: S32 verlangt Terminals für stdin und stdout, sagt aber nicht, ob es dasselbe sein muss und was ein Signal nach dem Schreiben der Ergebnisse bedeutet. Die letzte Prüfung von 10e (Q17) zeigte: Bei getrennten Terminals hält ein XOFF auf stdout Ausgabe und Signalhandler an; ein Signal zwischen Commit und Programmende beendet den Prozess mit Exit 130, obwohl Export und Schlüssel vollständig vorliegen.
+- Stand Welle 4: stdin und stdout dürfen verschiedene Terminals sein; die Software-Flusssteuerung (`IXON`/`IXOFF`/`IXANY`) ist auf beiden aus und wird danach wiederhergestellt; nach dem Commit werden Abbruchsignale bis zum Ende angenommen und verworfen. Exit 0 heißt vollständiger Export, Exit 130 heißt nichts geschrieben, nie ein Teilzustand (`CommitGuard`, D82 (2) und (3); Pflichtpunkte 0a–0c von Auftrag 15b, Worktree, nicht zusammengeführt).
+- Vorschlag: Bei den Terminalregeln in 2.3 (S32) ergänzen: Flusssteuerung auf allen beteiligten Terminals aus; Exit 0 nur bei vollständigem Ergebnis, Exit 130 nur ohne geschriebene Dateien; ein Signal nach dem Commit ändert das Ergebnis nicht.
+
+## S79 `created` bei Dateiart `pending`
+- Art: klarstellend.
+- Stelle: 3.1 Kopffeld 7 `created` („Bei Art `meta` immer die Empfangszeit der Mail“); 2.4 „Schutz gegen Zurückspielen“; 5.4.
+- Problem: Für Begriffslisten und Marker (`pending`) legt 3.1 nicht fest, welche Zeit `created` trägt. Davon hängt ab, gegen welche Zeit der Client die Epochenregel prüft: Eine Begriffsliste, die nach dem Beginn einer neueren Epoche geschrieben wird, enthält noch Mails, die vorher empfangen wurden.
+- Stand Welle 4: `created` ist die Empfangszeit der frühesten Mail, die die Datei erfasst; der Client wendet die Epochenregel darauf an (`ingest.sealPending`, `TODO(ask)`; gemeldet von der Prüfung von 15c).
+- Vorschlag: In 3.1 Feld 7 ergänzen: „Bei Art `pending` die früheste Empfangszeit der erfassten Mails.“
+
+## S80 Anlegen des Datenverzeichnisses
+- Art: offen (keine Frage in `QUESTIONS.md`).
+- Stelle: 4 (Aufbau des Datenverzeichnisses); 9.1 (Rechte 2770/0660); 9.2.
+- Problem: Kein Befehl in 9.2 legt das Datenverzeichnis an. Gebaut legt nur die Entwicklungszeremonie `gomail-ceremony init --dev` die Struktur nach Abschnitt 4 an (`store.Init`); `gomail-ceremony publish` und alle Befehle von `gomail-server` verlangen ein schon angelegtes Verzeichnis (`store.Open`). Auftrag 16 ging von einem `gomail-server init` aus, das es nicht gibt; der Zwei-Maschinen-Test nutzt deshalb die Entwicklungszeremonie.
+- Stand Welle 4: Mit Auftrag 15b wird `init --dev` nur noch mit dem Build-Tag `gomail_dev` übersetzt (Worktree, nicht zusammengeführt); ein Produktionsbuild hätte dann keinen Weg, ein Datenverzeichnis anzulegen.
+- Vorschlag: Einen Befehl festlegen, etwa `gomail-server init --data <verzeichnis>` (Struktur nach 4 einschließlich `locks/`, Rechte 2770, die Gruppe wählt der Betreiber), oder `publish` legt ein fehlendes Verzeichnis an; in 9.2 aufnehmen.
+
+## S81 Unbekannter freier Platz
+- Art: klarstellend.
+- Stelle: 5.1 („Sinkt der freie Platz im Datenverzeichnis unter 10 % … `452 4.3.1`“).
+- Problem: 5.1 nennt die Antwort nur für den gemessenen Fall. Auf Plattformen, auf denen das Paket `syscall` den freien Platz nicht liefert (NetBSD, Windows), lässt sich die Grenze nicht prüfen.
+- Stand Welle 4: Fail closed: Ist der freie Platz unbekannt, antwortet der Server mit `451 4.3.0` und nimmt nichts an, bis `Config.DiskSpace` gesetzt ist; `gomail-server` meldet das beim Start (`ingest.Accepting`, `disk_other.go`, D81 (5)). Die 10-%-Grenze ist nur in Testbuilds veränderbar (Build-Tag `gomail_test`, `GOMAIL_TEST_MIN_FREE`).
+- Vorschlag: In 5.1 ergänzen: „Lässt sich der freie Platz nicht bestimmen, antwortet der Server mit `451 4.3.0`.“
+
+## S82 Der Server prüft die Client-Sperre nur auf Verlangen
+- Art: klarstellend (D70, D81 (4)); präzisiert S65.
+- Stelle: 9.1 „Beim Start prüfen Server und Client, dass eine Testsperre von der jeweils anderen Seite wirksam ist, und verweigern andernfalls den Betrieb.“
+- Problem: Der Wortlaut verlangt die Prüfung in beide Richtungen bei jedem Start. Ein dauerhaft laufender Server kann beim Start keinen laufenden Client voraussetzen (S65); ohne jede Prüfung auf der Serverseite fehlt aber der Nachweis, dass die Sperre des Clients beim Server wirkt.
+- Stand Welle 4: `gomailctl` verlangt eine wirksame Serversperre (`CheckPeerLock(RoleServer)`, nur `inspect` ausgenommen). `gomail-server serve --require-client-lock` verlangt zusätzlich beim Start eine wirksame Client-Sperre (`ingest.Config.PeerCheck`, Auftrag 15c); Standard ist aus, dann meldet der Server nur, dass keine Client-Sperre gehalten wird. Der Zwei-Maschinen-Test schaltet ihn ein (D83).
+- Vorschlag: In 9.1 schreiben: „Der Client prüft bei jedem Start die Sperre des Servers. Der Server prüft die Sperre des Clients auf Verlangen (`--require-client-lock`); der Test auf zwei Maschinen weist damit beide Richtungen nach.“
+
+## S83 Kein Befehl hält die Client-Sperre
+- Art: offen (keine Frage in `QUESTIONS.md`).
+- Stelle: 9.1 (Testsperre); 9.2 (`gomailctl`).
+- Problem: `gomailctl` hält `locks/client` nur für die Dauer eines Befehls. Für `--require-client-lock` (S82) muss die Sperre beim Start des Servers bestehen, aber 9.2 nennt keinen Befehl, der sie hält. Der Zwei-Maschinen-Test behilft sich mit `gomailctl sync`, das an der Abfrage der Passphrase wartet (Eingabe über eine FIFO), während der Server startet.
+- Stand Welle 4: `scripts/two-host-test.sh` Schritt c (`holder.in`, D83); kein eigener Befehl.
+- Vorschlag: Entweder einen Befehl `gomailctl lock` aufnehmen (hält die Client-Sperre ohne Passphrase bis zum Ende der Eingabe oder bis zu einem Signal), oder in 9.1 festhalten, dass `--require-client-lock` nur dem Nachweis im Test dient und der Test die Sperre über einen wartenden Befehl hält.
+
+## S84 Die Testsperre weist keine Echtheit nach
+- Art: klarstellend (bekannte Grenze).
+- Stelle: 9.1 (Testsperre); 8 „Bedrohungsmodell“.
+- Problem: 9.1 sagt nicht, was die Testsperre nachweist. Eine wirksame Sperre zeigt nur, dass POSIX-Satzsperren über das Dateisystem wirken und irgendein Prozess mit Schreibzugriff auf `locks/` sie hält; sie authentifiziert weder Server noch Client.
+- Stand Welle 4: Für AUDIT vermerkt (D81 (4), Angreifer-Prüfung von 15c); das RUNBOOK sagt es seit Auftrag 15d ausdrücklich.
+- Vorschlag: In 9.1 ergänzen: „Die Testsperre weist die Wirksamkeit der Sperren nach, nicht die Echtheit der Gegenseite.“
+
+## S85 Befehle und Optionen von `gomail-server`
+- Art: klarstellend.
+- Stelle: 9.2 (`gomail-server serve --data ./data --listen :2525`, `invite create`, `address add <adresse> --mailbox <postfach-id>`).
+- Problem: Mit Log und Rollensperren braucht der Server Angaben, die 9.2 nicht nennt: Pin, Ingest- und Admin-Schlüssel außerhalb des Datenverzeichnisses, Adresse des Zeugenprotokolls. Für die Reparatur des Operator-Logs gibt es keinen Befehl.
+- Stand Welle 4: `serve` mit `--data`, `--listen` (Standard `127.0.0.1:2525`), `--ingest-key`, `--hostname`, `--isolated-test-network`, `--pin` und `--log-listen` (beide Pflicht), `--head-interval`, `--require-client-lock`; `invite create --data`; `address add <adresse> --data --mailbox --admin-key --pin`; `log repair --data --pin` (baut `tree.rec` nach einem Rückschritt neu, meldet verwaiste Einträge, löscht nichts); `--insecure-no-log` ist entfernt (`cmd/gomail-server`, D80, D81, `internal/translog/doc.go` „Additions to 9.2“).
+- Vorschlag: Die Befehle und Optionen in 9.2 aufnehmen, wie S67 und S68 für Zeremonie und Zeugen.
+
+## S86 Form der Zeugenangabe `--witness`
+- Art: klarstellend; präzisiert S67.
+- Stelle: 9.2 `gomail-ceremony` (die Option fehlt dort, siehe S67); 2.7 „Zeugen“ (Format `note`).
+- Problem: Offen ist, in welcher Form ein Zeuge bei `init` und `succeed` angegeben wird. Auftrag 15b sah `name=<öffentlicher Schlüssel hex>` vor; ein bloßer Schlüssel hat keine Prüfsumme gegen Tippfehler und keine Bindung an den Namen.
+- Stand Welle 4: `--witness <name>=<verifier-zeile>`, wiederholbar, mit der Zeile, die `gomail-witness keygen` ausgibt (`<name>+<hash>+<base64>` nach `note`); der Name muss dem der Zeile gleichen, der Hash wird nachgerechnet, höchstens 256 Byte (`parseWitness` in `cmd/gomail-ceremony`; Auftrag 15b, Worktree, nicht zusammengeführt).
+- Vorschlag: In 9.2 die Form `--witness <name>=<verifier-zeile>` festlegen.
+
+## S87 Adressen in Kommandozeilen
+- Art: offen (keine Frage in `QUESTIONS.md`).
+- Stelle: 9.2 (`gomail-server address add info@brownbear.de --mailbox <postfach-id>`); 8.
+- Problem: 9.2 legt die Adresse als Argument fest. Argumente sind auf der Server-Maschine für jeden lokalen Benutzer über `/proc/<pid>/cmdline` lesbar, auch für Benutzer außerhalb der Gruppe `gomail`, die `addresses.json` nicht lesen dürfen. Dasselbe gilt für Absender und Empfänger in der Kommandozeile von `curl` im Zwei-Maschinen-Test.
+- Stand Welle 4: Argumentform wie in 9.2; Hinweis für AUDIT (D83). Auftrag 14 (Nachtrag) stellt `address add` nur dann auf stdin um, wenn 9.2 die Argumentform nicht festlegt, sonst `TODO(ask)`.
+- Vorschlag: Entscheiden, ob `address add` die Adresse von stdin liest, oder die Grenze in 8 festhalten (Adressen sind für Benutzer der Server-Maschine sichtbar).
