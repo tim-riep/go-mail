@@ -117,7 +117,11 @@ func (w *Warnings) Take() []string {
 // Start is the default clock start: 2026-10-26 10:00 UTC.
 var Start = time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
 
-// New runs the development ceremony in a temporary directory. Clients
+// New runs the development ceremony in a temporary directory; it exists
+// only in a build with the tag gomail_dev (ceremony.InitDev), and
+// without the tag New and NewLogged skip the test (task 15b point 4: the
+// tests on a test platform run with "go test -tags
+// gomail_dev,gomail_test"). Clients
 // and the server of the environment use the accepting placeholder
 // translogtest.Unverified as their log; the certificates are in the
 // operator log of the data directory all the same (InitDev).
@@ -138,8 +142,20 @@ func NewLogged(t testing.TB) *Env {
 	return newEnv(t, true)
 }
 
+// RequireDev skips the test in a build without the tag gomail_dev, which
+// has no development ceremony (ceremony.DevBuild, task 15b point 4):
+// every test on a test platform needs it, also one that builds its
+// platform in a child process.
+func RequireDev(tb testing.TB) {
+	tb.Helper()
+	if !ceremony.DevBuild {
+		tb.Skip("needs the development ceremony (ceremony.InitDev): go test -tags gomail_dev,gomail_test")
+	}
+}
+
 func newEnv(t testing.TB, logged bool) *Env {
 	t.Helper()
+	RequireDev(t)
 	base := t.TempDir()
 	unv, err := translogtest.NewUnverified(true)
 	if err != nil {
@@ -166,7 +182,7 @@ func newEnv(t testing.TB, logged bool) *Env {
 		t.Fatal(err)
 	}
 	clock := &Clock{t: Start}
-	res, err := ceremony.InitDev(filepath.Join(base, "data"), filepath.Join(base, "keys"), clock.Now().Add(-time.Hour), nil, []witness.Key{wkey}, 1)
+	res, err := ceremony.InitDev(filepath.Join(base, "data"), filepath.Join(base, "keys"), clock.Now().Add(-time.Hour), []witness.Key{wkey}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

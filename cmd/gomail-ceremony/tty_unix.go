@@ -94,7 +94,7 @@ const flowFlags = syscall.IXON | syscall.IXOFF | syscall.IXANY
 // then; input typed ahead is dropped with it, as scrubInput drops it.
 func disableEcho(fd uintptr) (func() error, error) {
 	return clearModes(fd, func(t *syscall.Termios) { t.Lflag &^= quietFlags },
-		func(t *syscall.Termios) bool { return t.Lflag&quietFlags != 0 }, errEchoStays)
+		func(t *syscall.Termios) bool { return t.Lflag&quietFlags != 0 }, errEchoStays, ioctlSetTermiosFlush)
 }
 
 // disableFlow clears flowFlags on the terminal fd as disableEcho clears
@@ -103,15 +103,38 @@ func disableEcho(fd uintptr) (func() error, error) {
 // also restarts an output that an XOFF typed before had stopped.
 func disableFlow(fd uintptr) (func() error, error) {
 	return clearModes(fd, func(t *syscall.Termios) { t.Iflag &^= flowFlags },
-		func(t *syscall.Termios) bool { return t.Iflag&flowFlags != 0 }, errFlowStays)
+		func(t *syscall.Termios) bool { return t.Iflag&flowFlags != 0 }, errFlowStays, ioctlSetTermiosFlush)
+}
+
+// disableFlowOut clears flowFlags on the terminal fd of stdout when that
+// is another terminal than stdin (task 15b point 0b), as disableFlow
+// does; the restore sets the attributes read before without discarding
+// input or waiting for the output (ioctlSetTermios): nothing is read
+// from that terminal, and the abort path must not wait for an output
+// that does not drain.
+func disableFlowOut(fd uintptr) (func() error, error) {
+	return clearModes(fd, func(t *syscall.Termios) { t.Iflag &^= flowFlags },
+		func(t *syscall.Termios) bool { return t.Iflag&flowFlags != 0 }, errFlowStays, ioctlSetTermios)
+}
+
+// sameTerminal reports whether the files a and b are the same terminal:
+// character devices with the same device number. Two names of one
+// terminal (/dev/tty and /dev/pts/N) count as two; their flow control is
+// then switched on both, and restored in reverse order (restoreFlow).
+func sameTerminal(a, b uintptr) bool {
+	var sa, sb syscall.Stat_t
+	if syscall.Fstat(int(a), &sa) != nil || syscall.Fstat(int(b), &sb) != nil {
+		return false
+	}
+	return sa.Mode&syscall.S_IFMT == syscall.S_IFCHR && sb.Mode&syscall.S_IFMT == syscall.S_IFCHR && sa.Rdev == sb.Rdev
 }
 
 // clearModes applies off to the attributes of the terminal fd, reads
 // them back and fails with stays (the old attributes restored) when set
 // still reports a mode set; otherwise it returns the function that
-// restores the attributes read before, discarding the input not read
-// yet (ioctlSetTermiosFlush).
-func clearModes(fd uintptr, off func(*syscall.Termios), set func(*syscall.Termios) bool, stays error) (func() error, error) {
+// restores the attributes read before with the request restoreReq
+// (ioctlSetTermiosFlush: discarding the input not read yet).
+func clearModes(fd uintptr, off func(*syscall.Termios), set func(*syscall.Termios) bool, stays error, restoreReq uintptr) (func() error, error) {
 	var old syscall.Termios
 	if err := ioctl(fd, ioctlGetTermios, unsafe.Pointer(&old)); err != nil {
 		return nil, err
@@ -121,7 +144,7 @@ func clearModes(fd uintptr, off func(*syscall.Termios), set func(*syscall.Termio
 	if err := ioctl(fd, ioctlSetTermios, unsafe.Pointer(&t)); err != nil {
 		return nil, err
 	}
-	restore := func() error { return ioctl(fd, ioctlSetTermiosFlush, unsafe.Pointer(&old)) }
+	restore := func() error { return ioctl(fd, restoreReq, unsafe.Pointer(&old)) }
 	var now syscall.Termios
 	err := ioctl(fd, ioctlGetTermios, unsafe.Pointer(&now))
 	if err == nil && set(&now) {
@@ -137,11 +160,15 @@ func clearModes(fd uintptr, off func(*syscall.Termios), set func(*syscall.Termio
 // flushInput discards the input that the terminal fd received and the
 // program has not read yet (task 10e finding 4): the attributes are read
 // and set again unchanged with ioctlSetTermiosFlush (TCSETSF, TIOCSETAF),
-// which discards the input queue first.
+// which discards the input queue first; then flushPending discards the
+// input that the terminal has received but not processed yet (Linux).
 func flushInput(fd uintptr) error {
 	var t syscall.Termios
 	if err := ioctl(fd, ioctlGetTermios, unsafe.Pointer(&t)); err != nil {
 		return err
 	}
-	return ioctl(fd, ioctlSetTermiosFlush, unsafe.Pointer(&t))
+	if err := ioctl(fd, ioctlSetTermiosFlush, unsafe.Pointer(&t)); err != nil {
+		return err
+	}
+	return flushPending(fd)
 }

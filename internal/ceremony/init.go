@@ -10,6 +10,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
+	"github.com/tim-riep/go-mail/internal/witness"
 )
 
 // Paths inside an export directory ("/"-separated, relative to Out).
@@ -149,7 +150,7 @@ func runInit(opts InitOptions) (*Result, error) {
 	if err := commit(out, files, keyDir, []keyFile{adminKey, ingestKey}, guardOf(opts.Prompter)); err != nil {
 		return nil, err
 	}
-	return &Result{KeyDir: keyDir, IdentityPub: idPub, Pin: pin, Out: out, Identities: ids}, nil
+	return &Result{KeyDir: keyDir, IdentityPub: idPub, Pin: pin, Out: out}, nil
 }
 
 func runRotate(opts RotateOptions) (*RotateResult, error) {
@@ -226,19 +227,54 @@ func runReshare(opts ReshareOptions) error {
 	return splitAndProbe(seed, opts.Shares, int(oldID), randOrDefault(opts.Rand), opts.Prompter, opts.Display, opts.IdentityGen, opts.IdentityPub)
 }
 
+// succeedTrust returns origin, witnesses and quorum of the new pin: those
+// of the current pin, the witnesses and the quorum replaced only where
+// opts sets them (an explicit change); a different origin is ErrOptions
+// (the origin of a log never changes; a new origin is a new log, Q10
+// point 4).
+func succeedTrust(opts *SucceedOptions) (string, []witness.Key, int, error) {
+	origin := opts.Pin.Origin
+	if opts.Origin != "" && opts.Origin != origin {
+		return "", nil, 0, fmt.Errorf("%w: the origin of the log does not change with a succession", ErrOptions)
+	}
+	ws, min := pinWitnesses(opts.Pin), opts.Pin.MinWitnesses
+	if opts.Witnesses != nil {
+		ws = opts.Witnesses
+	}
+	if opts.MinWitnesses != 0 {
+		min = opts.MinWitnesses
+	}
+	return origin, ws, min, nil
+}
+
 func runSucceed(opts SucceedOptions) (*Result, error) {
+	// TODO(Q19): the compromise case is locked before anything else
+	// (task 15f point 1); the code for it below stays, unreachable.
+	if opts.Compromised {
+		return nil, ErrCompromised
+	}
+	if opts.Pin == nil {
+		return nil, fmt.Errorf("%w: no pin", ErrOptions)
+	}
+	ids, err := PinIdentities(opts.Pin)
+	if err != nil {
+		return nil, err
+	}
+	origin, witnesses, minWitnesses, err := succeedTrust(&opts)
+	if err != nil {
+		return nil, err
+	}
 	// The quorum rule of InitOptions applies, first.
-	if _, err := checkTrust(opts.Origin, opts.Witnesses, opts.MinWitnesses); err != nil {
+	if _, err := checkTrust(origin, witnesses, minWitnesses); err != nil {
 		return nil, err
 	}
 	if err := checkUnlock(&opts.UnlockOptions); err != nil {
 		return nil, err
 	}
-	cur := translog.Identity{Gen: opts.IdentityGen, Pub: opts.IdentityPub}
-	if err := translog.CheckIdentities(opts.Identities, cur); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrIdentity, err)
+	if opts.Pin.Gen != opts.IdentityGen || !opts.Pin.Pub.Equal(opts.IdentityPub) {
+		return nil, fmt.Errorf("%w: the pin is not the one of the current identity", ErrIdentity)
 	}
-	if opts.IdentityGen == math.MaxUint32 || len(opts.Identities) >= translog.MaxIdentities {
+	if opts.IdentityGen == math.MaxUint32 || len(ids) >= translog.MaxIdentities {
 		return nil, fmt.Errorf("%w: no further identity generation", ErrIdentity)
 	}
 	out, _, err := checkDirs(opts.Out, "")
@@ -255,7 +291,7 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 	p := keys.DerivePlatform(seed)
 	defer p.Zero()
 	// Every generation of the list derives from this root.
-	for _, id := range opts.Identities {
+	for _, id := range ids {
 		k, err := p.IdentityKey(id.Gen)
 		if err != nil {
 			return nil, err
@@ -279,16 +315,15 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 	defer keys.Wipe(next)
 	nextPub := pubOf(next)
 
-	ids := make([]translog.Identity, 0, len(opts.Identities)+1)
-	for _, id := range opts.Identities {
-		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: bytes.Clone(id.Pub)})
-	}
-	ids = append(ids, translog.Identity{Gen: g, Pub: nextPub})
-	pin, pinBytes, err := newPin(&pinData{Identities: ids, Origin: opts.Origin, Witnesses: opts.Witnesses, MinWitnesses: opts.MinWitnesses})
+	// The new list: the list of the current pin plus the new generation
+	// (translog doc.go "Pin", store.CheckPinIdentities).
+	ids = append(ids, translog.Identity{Gen: g, Pub: bytes.Clone(nextPub)})
+	pin, pinBytes, err := newPin(&pinData{Identities: ids, Origin: origin, Witnesses: witnesses, MinWitnesses: minWitnesses})
 	if err != nil {
 		return nil, err
 	}
-	files := map[string][]byte{exportPin(g): pinBytes}
+	files := map[string][]byte{exportPin(g): pinBytes, exportPlatform("identity", g, "pub"): nextPub}
+	// Always true while the compromise case is locked (ErrCompromised).
 	if !opts.Compromised {
 		s, err := keys.NewPlatformSuccession(prev, g, nextPub, now().UnixMilli())
 		if err != nil {
@@ -298,11 +333,10 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		files[exportPlatform("identity", g, "pub")] = nextPub
 		files[exportPlatform("identity", g, "succ")] = sd
 	}
 	if err := commit(out, files, "", nil, guardOf(opts.Prompter)); err != nil {
 		return nil, err
 	}
-	return &Result{IdentityPub: nextPub, Pin: pin, Out: out, Identities: ids}, nil
+	return &Result{IdentityPub: nextPub, Pin: pin, Out: out}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,10 @@ func newLogSetup(t *testing.T) *logSetup {
 	dir := t.TempDir()
 	s := &logSetup{dir: dir, data: filepath.Join(dir, "data"), keys: filepath.Join(dir, "keys")}
 	// InitDev logs the certificates and writes witnesses.rec (task 15).
-	res, err := ceremony.InitDev(s.data, s.keys, time.Now().Add(-time.Hour), nil, nil, 0)
+	res, err := ceremony.InitDev(s.data, s.keys, time.Now().Add(-time.Hour), nil, 0)
+	if errors.Is(err, ceremony.ErrDev) {
+		t.Skip("needs the development ceremony (ceremony.InitDev): go test -tags gomail_dev,gomail_test")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

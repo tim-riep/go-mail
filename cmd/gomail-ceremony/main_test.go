@@ -21,33 +21,8 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
-	"github.com/tim-riep/go-mail/internal/translog/translogtest"
+	"github.com/tim-riep/go-mail/internal/witness"
 )
-
-func TestRunDev(t *testing.T) {
-	dir := t.TempDir()
-	var out, errb bytes.Buffer
-	for _, args := range [][]string{nil, {"x"}, {"init", "--bogus"}, {"init", "--data", "a", "--keys", "b"}, {"init", "--dev"},
-		{"init", "--dev", "--data", "a", "--keys", "b", "extra"}, {"init", "--dev", "--data", "a", "--keys", "b", "--shares", "3-of-5"}} {
-		if run(args, nil, &out, &errb) != 2 {
-			t.Fatalf("%v accepted", args)
-		}
-	}
-	data, keys := filepath.Join(dir, "data"), filepath.Join(dir, "keys")
-	if run([]string{"init", "--dev", "--data", data, "--keys", keys}, nil, &out, &errb) != 1 {
-		t.Fatal("without --insecure-no-log")
-	}
-	errb.Reset()
-	if run([]string{"init", "--dev", "--data", data, "--keys", keys, "--insecure-no-log"}, nil, &out, &errb) != 0 {
-		t.Fatal(errb.String())
-	}
-	if !strings.Contains(errb.String(), "WARNUNG") || !strings.Contains(out.String(), "ingest-1.key") {
-		t.Fatal("output")
-	}
-	if run([]string{"init", "--dev", "--data", data, "--keys", keys, "--insecure-no-log"}, nil, &out, &errb) != 1 {
-		t.Fatal("second ceremony")
-	}
-}
 
 // tty plays the operator and the share holders: it answers every prompt
 // the tool writes to stderr, from the shares the tool showed on stdout.
@@ -111,6 +86,7 @@ func (t ttyIn) disableFlow() (func() error, error) {
 	t.flowOff = true
 	return func() error {
 		t.flowOff = false
+		t.events = append(t.events, "flow-restore")
 		return nil
 	}, nil
 }
@@ -284,7 +260,11 @@ func shareLines(m map[int]string) []string {
 	return l
 }
 
+// run runs the command in this process. After close the abort signals
+// stay taken in and discarded (task 15b point 0a); the test process gets
+// their default back afterwards.
 func (t *tty) run(args ...string) int {
+	defer signal.Reset(abortSignals...)
 	return run(args, ttyIn{t}, ttyOut{t}, ttyErr{t})
 }
 
@@ -311,20 +291,6 @@ func filesHold(t *testing.T, dir, s string) bool {
 		return nil
 	})
 	return found
-}
-
-type recLog struct {
-	*translogtest.Unverified
-	names []string
-}
-
-func (l *recLog) Append(k translog.Kind, c []byte) (int64, error) {
-	key, err := translog.KeyOf(k, c)
-	if err != nil {
-		return 0, err
-	}
-	l.names = append(l.names, string(key.Subject))
-	return translogtest.NoIndex, nil
 }
 
 func TestCeremony(t *testing.T) {
@@ -397,59 +363,114 @@ func TestCeremony(t *testing.T) {
 	tt.checkConfirm(t)
 	newShares := tt.shares
 
+	// succeed takes origin, witnesses and quorum from the pin; --origin
+	// is only a check and must not differ.
 	succ := filepath.Join(base, "succ")
 	tt = newTTY()
 	tt.queue = []string{newShares[3], newShares[1]}
-	if code := tt.run("succeed", "--pin", pinPath, "--out", succ, "--origin", "go-mail.test/log", "--witness", w1, "--min-witnesses", "1"); code != 0 {
+	if code := tt.run("succeed", "--pin", pinPath, "--out", succ, "--origin", "another.test/log"); code != 1 ||
+		!strings.Contains(tt.msgs.String(), "Origin") || len(tt.typed) != 0 {
+		t.Fatalf("succeed with another origin: %d\n%s", code, tt.msgs.String())
+	}
+	tt = newTTY()
+	tt.queue = []string{newShares[3], newShares[1]}
+	if code := tt.run("succeed", "--pin", pinPath, "--out", succ); code != 0 {
 		t.Fatalf("succeed: %d\n%s", code, tt.msgs.String())
 	}
 	checkScreen(t, tt.screen.String(), shareLines(newShares), 2+1)
 	tt.checkConfirm(t)
+	if !strings.Contains(tt.msgs.String(), "Uhr dieses Rechners: 2026-10-01T12:00:00Z") {
+		t.Fatalf("no clock before the first prompt: %q", tt.msgs.String())
+	}
 	data, _ = os.ReadFile(filepath.Join(succ, "platform", "identity-2.succ"))
 	s, err := keys.DecodePlatformSuccession(data)
 	if err != nil || s.Verify(pin.Pub, 1) != nil {
 		t.Fatal("succession")
 	}
+	pin2Path := filepath.Join(succ, "identity-2.pin")
+	pin2, err := ceremony.ReadPin(pin2Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin2.Gen != 2 || !pin2.Pub.Equal(s.Pub) || pin2.Origin != pin.Origin || pin2.MinWitnesses != pin.MinWitnesses ||
+		len(pin2.Witnesses) != 1 || pin2.Witnesses[0].Name != "w1" || !pin2.Witnesses[0].Pub.Equal(pin.Witnesses[0].Pub) ||
+		len(pin2.Identities) != 2 || !pin2.Identities[0].Pub.Equal(pin.Pub) || !pin2.Identities[1].Pub.Equal(s.Pub) {
+		t.Fatalf("pin 2 %+v", pin2)
+	}
 
-	// publish all three exports.
+	// publish into the operator log of the data directory: init and
+	// ingest-rotate with pin 1; the succession needs pin 2 (Q10 point 5).
 	dataDir := filepath.Join(base, "data")
 	if _, err := store.Init(dataDir); err != nil {
 		t.Fatal(err)
 	}
-	log := &recLog{}
-	openLog = func(o translog.Options) (translog.Log, error) {
-		if len(o.Identities) != 1 || o.Store == nil {
-			return nil, errors.New("options")
-		}
-		return log, nil
-	}
-	defer func() { openLog = translog.Open }()
-	for _, from := range []string{out, rot, succ} {
+	for _, from := range []string{out, rot} {
 		tt = newTTY()
 		if code := tt.run("publish", "--from", from, "--data", dataDir, "--pin", pinPath); code != 0 {
 			t.Fatalf("publish %s: %d\n%s", from, code, tt.msgs.String())
 		}
+		if !strings.Contains(tt.out.String(), "Server jetzt mit diesem Pin starten") {
+			t.Fatalf("publish: %q", tt.out.String())
+		}
 	}
-	if fmt.Sprint(log.names) != "[admin-1.cert ingest-1.cert ingest-2.cert identity-2.succ]" {
-		t.Fatalf("log %v", log.names)
+	tt = newTTY()
+	if code := tt.run("publish", "--from", succ, "--data", dataDir, "--pin", pinPath); code != 1 || !strings.Contains(tt.msgs.String(), "install the new pin") {
+		t.Fatalf("succession with the old pin: %d %s", code, tt.msgs.String())
 	}
-	// Without a log publish fails. translog.Open exists since the merge
-	// of task 07, so the missing log is simulated here; publish over the
-	// real log is task 15b.
-	openLog = func(translog.Options) (translog.Log, error) { return nil, translog.ErrNoLog }
+	tt = newTTY()
+	if code := tt.run("publish", "--from", succ, "--data", dataDir, "--pin", pin2Path); code != 0 {
+		t.Fatalf("publish %s: %d\n%s", succ, code, tt.msgs.String())
+	}
+	if got := logNames(t, dataDir, pin2); fmt.Sprint(got) != "[admin-1.cert ingest-1.cert ingest-2.cert identity-2.succ]" {
+		t.Fatalf("log %v", got)
+	}
+	// From now on platform/ names generation 2: the old pin is refused.
 	tt = newTTY()
 	if tt.run("publish", "--from", out, "--data", dataDir, "--pin", pinPath) != 1 {
-		t.Fatal("publish without log")
+		t.Fatal("publish with the old pin after the succession")
 	}
-	openLog = translog.Open
-	// The pin of generation 2 carries no identity list yet.
+	// While a server holds the server lock, publish refuses.
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := st.HoldRoleLock(store.RoleServer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tt = newTTY()
-	if tt.run("publish", "--from", out, "--data", dataDir, "--pin", filepath.Join(succ, "identity-2.pin")) != 1 {
-		t.Fatal("publish with pin 2")
+	if code := tt.run("publish", "--from", out, "--data", dataDir, "--pin", pin2Path); code != 1 || !strings.Contains(tt.msgs.String(), "Server läuft") {
+		t.Fatalf("publish beside a server: %d %s", code, tt.msgs.String())
 	}
+	release()
 	tt = newTTY()
 	if tt.run("publish", "--from", out, "--data", filepath.Join(base, "nodata"), "--pin", pinPath) != 1 {
 		t.Fatal("publish without data directory")
+	}
+}
+
+// logNames returns the subjects of the entries of the operator log of
+// the data directory dir, in log order.
+func logNames(t *testing.T, dir string, pin *store.PlatformPin) []string {
+	t.Helper()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := ceremony.OpenLog(st, pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for i := int64(0); ; i++ {
+		e, err := l.Entry(i)
+		if errors.Is(err, translog.ErrNotInLog) {
+			return names
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, string(e.Key.Subject))
 	}
 }
 
@@ -580,9 +601,11 @@ func TestUsage(t *testing.T) {
 		{2, []string{"reshare", "--pin", devPin}},
 		{2, []string{"reshare", "--pin", devPin, "--shares", "5-of-3"}},
 		{1, []string{"reshare", "--pin", devPin, "--shares", "2-of-3"}},
-		{2, []string{"succeed", "--pin", devPin, "--out", o}},
-		{1, []string{"succeed", "--pin", devPin, "--out", o, "--origin", "o", "--witness", w1, "--min-witnesses", "1", "--compromised"}},
+		{2, []string{"succeed", "--pin", devPin}},
+		{1, []string{"succeed", "--pin", devPin, "--out", o}},
 		{1, []string{"succeed", "--pin", devPin, "--out", o, "--origin", "o", "--witness", w1, "--min-witnesses", "1"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised"}},
+		{2, []string{"publish", "--from", o, "--replace-witnesses"}},
 		{2, []string{"publish", "--from", o}},
 		{1, []string{"publish", "--from", o, "--data", base, "--pin", devPin}},
 		{2, []string{"bogus"}},
@@ -1007,29 +1030,195 @@ func TestScrubInput(t *testing.T) {
 	}
 }
 
-// TestSucceedCompromised: refused until task 07 is merged.
+// TestSucceedCompromised: succeed --compromised is locked (task 15f
+// point 1, Q19 stopping point 2): a usage error with exit code 2 and the
+// fixed text, before the terminal is checked, a share is asked or the
+// clock is shown; nothing is written, with or without the other flags.
 func TestSucceedCompromised(t *testing.T) {
+	fixClock(t)
 	base := t.TempDir()
-	w1 := witnessArg(t, "w1")
-	out := filepath.Join(base, "out")
+	w1, w2, w3 := witnessArg(t, "w1"), witnessArg(t, "w2"), witnessArg(t, "w3")
+	out, kd := filepath.Join(base, "out"), filepath.Join(base, "keys")
 	tt := newTTY()
-	if code := tt.run("init", "--shares", "2-of-2", "--out", out, "--keys", filepath.Join(base, "keys"), "--origin", "o", "--witness", w1, "--min-witnesses", "1"); code != 0 {
+	if code := tt.run("init", "--shares", "2-of-2", "--out", out, "--keys", kd, "--origin", "o", "--witness", w1, "--min-witnesses", "1"); code != 0 {
 		t.Fatal(tt.msgs.String())
 	}
 	shares := tt.shares
+	pin1 := filepath.Join(out, "identity-1.pin")
+	succ := filepath.Join(base, "succ")
+	const fixed = "noch nicht verfügbar: Widerruf einer Plattformgeneration ist nicht festgelegt (Q19)"
+	for _, args := range [][]string{
+		{"succeed", "--pin", pin1, "--out", succ, "--compromised"},
+		{"succeed", "--pin", pin1, "--out", succ, "--witness", w1, "--witness", w2, "--witness", w3, "--min-witnesses", "2", "--compromised"},
+		{"succeed", "--compromised"},
+		{"succeed", "--compromised", "--pin", filepath.Join(base, "missing"), "--out", succ},
+	} {
+		tt = newTTY()
+		tt.queue = []string{shares[1], shares[2]}
+		code := tt.run(args...)
+		if code != exitUsage || !strings.Contains(tt.msgs.String(), fixed) {
+			t.Fatalf("%v: %d %s", args, code, tt.msgs.String())
+		}
+		if len(tt.typed) != 0 || tt.reads != 0 || tt.prompts != 0 || tt.echoOff || tt.flowOff || tt.out.Len() != 0 ||
+			strings.Contains(tt.msgs.String(), "Uhr dieses Rechners") {
+			t.Fatalf("%v: the terminal was used: %q", args, tt.screen.String())
+		}
+		if _, err := os.Stat(succ); err == nil {
+			t.Fatalf("%v: export written", args)
+		}
+	}
+	// Without the stand-in terminal it is the same usage error.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"succeed", "--pin", pin1, "--out", succ, "--compromised"}, strings.NewReader(""), &stdout, &stderr); code != exitUsage ||
+		!strings.Contains(stderr.String(), fixed) {
+		t.Fatalf("plain run: %d %s", code, stderr.String())
+	}
+	// The library refuses it too (ceremony.ErrCompromised), before any
+	// share is asked.
+	pin, err := ceremony.ReadPin(pin1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &countingPrompter{}
+	if _, err := ceremony.Succeed(ceremony.SucceedOptions{UnlockOptions: ceremony.UnlockOptions{IdentityGen: 1, IdentityPub: pin.Pub, Prompter: p},
+		Out: succ, Pin: pin, Compromised: true}); !errors.Is(err, ceremony.ErrCompromised) {
+		t.Fatalf("library: %v", err)
+	}
+	if _, err := os.Stat(succ); err == nil || p.calls != 0 {
+		t.Fatal("library: export written or share asked")
+	}
+}
+
+// countingPrompter counts the calls of a ceremony and gives no share.
+type countingPrompter struct{ calls int }
+
+func (p *countingPrompter) Handover(int, int) error { p.calls++; return nil }
+
+func (p *countingPrompter) AskShare(int) ([]string, error) {
+	p.calls++
+	return nil, errNoInput
+}
+
+// TestPublishReplaceWitnesses (task 15f points 2 and 4): a regular
+// succession that changes the witnesses on purpose (succeed --witness
+// --min-witnesses) shows the clock before the first prompt; publish with
+// the new pin refuses the data directory's witnesses.rec of pin 1
+// without --replace-witnesses (nothing written or logged) and replaces
+// it with the flag, naming the old and the new quorum and witnesses.
+// Publishing again with the flag changes nothing.
+func TestPublishReplaceWitnesses(t *testing.T) {
+	fixClock(t)
+	base := t.TempDir()
+	w1, w2, w3 := witnessArg(t, "w1"), witnessArg(t, "w2"), witnessArg(t, "w3")
+	out, kd := filepath.Join(base, "out"), filepath.Join(base, "keys")
+	tt := newTTY()
+	if code := tt.run("init", "--shares", "2-of-2", "--out", out, "--keys", kd, "--origin", "o", "--witness", w1, "--min-witnesses", "1"); code != 0 {
+		t.Fatal(tt.msgs.String())
+	}
+	shares := tt.shares
+	pin1Path := filepath.Join(out, "identity-1.pin")
+	dataDir := filepath.Join(base, "data")
+	if _, err := store.Init(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	tt = newTTY()
+	if code := tt.run("publish", "--from", out, "--data", dataDir, "--pin", pin1Path); code != 0 {
+		t.Fatal(tt.msgs.String())
+	}
+	before := mustRead(t, filepath.Join(dataDir, "platform", "witnesses.rec"))
+
 	tt = newTTY()
 	tt.queue = []string{shares[1], shares[2]}
 	succ := filepath.Join(base, "succ")
-	if code := tt.run("succeed", "--pin", filepath.Join(out, "identity-1.pin"), "--out", succ, "--origin", "o", "--witness", w1,
-		"--min-witnesses", "1", "--compromised"); code != 1 || !strings.Contains(tt.msgs.String(), "--compromised ist noch nicht verfügbar") {
+	if code := tt.run("succeed", "--pin", pin1Path, "--out", succ, "--witness", w1, "--witness", w2,
+		"--witness", w3, "--min-witnesses", "2"); code != 0 {
 		t.Fatalf("%d %s", code, tt.msgs.String())
 	}
-	if len(tt.typed) != 0 {
-		t.Fatal("shares asked")
+	// Point 4: a succession is signed, so the clock is shown, before the
+	// first prompt.
+	msgs := tt.msgs.String()
+	if i, j := strings.Index(msgs, "Uhr dieses Rechners: 2026-10-01T12:00:00Z"), strings.Index(msgs, "Anteil eingeben"); i < 0 || j >= 0 && j < i {
+		t.Fatalf("no clock before the first prompt: %q", msgs)
 	}
-	if _, err := os.Lstat(succ); err == nil {
-		t.Fatal("export written")
+	if got := listFiles(t, succ); got != "[identity-2.pin platform/identity-2.pub platform/identity-2.succ]" {
+		t.Fatalf("export %s", got)
 	}
+	pin2Path := filepath.Join(succ, "identity-2.pin")
+	pin2, err := ceremony.ReadPin(pin2Path)
+	if err != nil || pin2.MinWitnesses != 2 || len(pin2.Witnesses) != 3 || pin2.Origin != "o" {
+		t.Fatalf("pin 2 %+v %v", pin2, err)
+	}
+
+	// Without the flag: refused, nothing written or logged.
+	tt = newTTY()
+	if code := tt.run("publish", "--from", succ, "--data", dataDir, "--pin", pin2Path); code != exitFail ||
+		!strings.Contains(tt.msgs.String(), "witnesses.rec differs") || !strings.Contains(tt.msgs.String(), "--replace-witnesses") {
+		t.Fatalf("publish with other witnesses: %d %s", code, tt.msgs.String())
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "platform", "identity-2.succ")); err == nil {
+		t.Fatal("succession copied")
+	}
+	if !bytes.Equal(mustRead(t, filepath.Join(dataDir, "platform", "witnesses.rec")), before) {
+		t.Fatal("witnesses.rec replaced without the flag")
+	}
+	// With the flag: replaced, and the message names both.
+	tt = newTTY()
+	if code := tt.run("publish", "--from", succ, "--data", dataDir, "--pin", pin2Path, "--replace-witnesses"); code != 0 {
+		t.Fatal(tt.msgs.String())
+	}
+	if o := tt.out.String(); !strings.Contains(o, "bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3)") {
+		t.Fatalf("message %q", o)
+	}
+	w, err := witness.DecodeWitnesses(mustRead(t, filepath.Join(dataDir, "platform", "witnesses.rec")))
+	if err != nil || w.Min != 2 || len(w.List) != 3 {
+		t.Fatalf("witnesses.rec %+v %v", w, err)
+	}
+	for i, k := range w.List {
+		if k.Name != pin2.Witnesses[i].Name || !k.Pub.Equal(pin2.Witnesses[i].Pub) {
+			t.Fatalf("witness %d is not the pin's", i)
+		}
+	}
+	if got := logNames(t, dataDir, pin2); fmt.Sprint(got) != "[admin-1.cert ingest-1.cert identity-2.succ]" {
+		t.Fatalf("log %v", got)
+	}
+	// Again with the flag: nothing to replace, no message.
+	tt = newTTY()
+	if code := tt.run("publish", "--from", succ, "--data", dataDir, "--pin", pin2Path, "--replace-witnesses"); code != 0 ||
+		strings.Contains(tt.out.String(), "ersetzt") {
+		t.Fatalf("again: %d %s %s", code, tt.out.String(), tt.msgs.String())
+	}
+	// The old pin knows no generation 2: the flag does not help it.
+	tt = newTTY()
+	if code := tt.run("publish", "--from", out, "--data", dataDir, "--pin", pin1Path, "--replace-witnesses"); code != exitFail ||
+		!strings.Contains(tt.msgs.String(), "install the new pin") {
+		t.Fatalf("old pin with the flag: %d %s", code, tt.msgs.String())
+	}
+	if w, _ := witness.DecodeWitnesses(mustRead(t, filepath.Join(dataDir, "platform", "witnesses.rec"))); w == nil || w.Min != 2 {
+		t.Fatal("witnesses.rec replaced by the old pin")
+	}
+}
+
+// listFiles returns the regular files below dir, relative and sorted.
+func listFiles(t *testing.T, dir string) string {
+	t.Helper()
+	var l []string
+	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err == nil && fi.Mode().IsRegular() {
+			rel, _ := filepath.Rel(dir, p)
+			l = append(l, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return fmt.Sprint(l)
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestEchoOffFailsClosed: a term whose stdin has no echo switch (only
@@ -1121,5 +1310,33 @@ func TestCloseSignal(t *testing.T) {
 	}
 	if _, err := ceremony.ReadPin(filepath.Join(out, "identity-1.pin")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestAbortOrder: the abort path clears the screen before it restores
+// the flow control, in the order in which a command ends (finish
+// clears, close restores; task 15b point 0c): while the clear is
+// written, an XOFF typed on the terminal cannot stop it.
+func TestAbortOrder(t *testing.T) {
+	const share = "abandon ability able about above absent absorb abstract absurd abuse"
+	codes := stubExit(t)
+	in := newTTY()
+	e := newEnv(ttyIn{in}, ttyOut{in}, ttyErr{in})
+	tm, err := e.openTerm()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signal.Stop(tm.sig)
+	in.events = nil
+	fmt.Fprintf(display{tm}, "Anteil 1/2: %s\n", share)
+	tm.sig <- os.Interrupt
+	if code := <-codes; code != exitAbort {
+		t.Fatalf("exit code %d", code)
+	}
+	if got := strings.Join(in.events, " "); got != "share clear flow-restore" {
+		t.Fatalf("events %q, want \"share clear flow-restore\"", got)
+	}
+	if in.flowOff || in.echoOff {
+		t.Fatalf("flow control off %v, echo off %v", in.flowOff, in.echoOff)
 	}
 }

@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/mod/sumdb/note"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
@@ -17,26 +20,43 @@ import (
 	"github.com/tim-riep/go-mail/internal/witness"
 )
 
-// recLog records the names of the platform entries appended.
+// recLog records the names of the platform entries appended; Lookup
+// finds the platform entries appended without failure (it judges no
+// validity: every append counts).
 type recLog struct {
 	*translogtest.Unverified
-	names []string
-	fail  error
+	names  []string
+	logged map[string][]byte
+	fail   error
 }
 
-func (l *recLog) Append(k translog.Kind, content []byte) (int64, error) {
-	key, err := translog.KeyOf(k, content)
+func (l *recLog) Lookup(kind translog.Kind, subject []byte) ([]translog.Entry, error) {
+	c, ok := l.logged[string(subject)]
+	if kind != translog.KindPlatform || !ok {
+		return nil, nil
+	}
+	return []translog.Entry{{Key: translog.Key{Kind: kind, Subject: bytes.Clone(subject)}, Content: c}}, nil
+}
+
+func (l *recLog) AppendPlatform(name string, content []byte) error {
+	key, err := translog.KeyOf(translog.KindPlatform, content)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	if k != translog.KindPlatform {
-		return 0, fmt.Errorf("kind %v", k)
+	if string(key.Subject) != name {
+		return fmt.Errorf("%s logged as %s", key.Subject, name)
 	}
-	l.names = append(l.names, string(key.Subject))
+	l.names = append(l.names, name)
 	if l.fail != nil {
-		return 0, l.fail
+		return l.fail
 	}
-	return translogtest.NoIndex, nil
+	if l.logged == nil {
+		l.logged = map[string][]byte{}
+	}
+	if _, ok := l.logged[name]; !ok {
+		l.logged[name] = bytes.Clone(content)
+	}
+	return nil
 }
 
 func newLog(t *testing.T) *recLog {
@@ -106,6 +126,25 @@ func (f *fixture) succ(t *testing.T, gen uint32) (pub, succ []byte) {
 	return pubOf(next), sd
 }
 
+// pinN returns the pin of identity generation n of the fixture's root,
+// with the identity list 1..n and origin, witnesses and quorum of pin 1.
+func (f *fixture) pinN(t *testing.T, n uint32) *store.PlatformPin {
+	t.Helper()
+	p := *f.res.Pin
+	p.Identities = nil
+	for g := uint32(1); g <= n; g++ {
+		p.Identities = append(p.Identities, store.PlatformIdentity{Gen: g, Pub: identityOf(t, f.root[:], g)})
+	}
+	p.Gen, p.Pub = n, p.Identities[n-1].Pub
+	if _, err := p.Encode(); err != nil {
+		t.Fatal(err)
+	}
+	return &p
+}
+
+// pin2 returns the pin of identity generation 2 with its identity list.
+func (f *fixture) pin2(t *testing.T) *store.PlatformPin { return f.pinN(t, 2) }
+
 func TestPublish(t *testing.T) {
 	f := newFixture(t)
 	st := newData(t, filepath.Join(f.base, "data"))
@@ -154,49 +193,146 @@ func TestPublish(t *testing.T) {
 	if fmt.Sprint(log.names) != "[ingest-2.cert]" {
 		t.Fatalf("log %v", log.names)
 	}
-	// witnesses.rec is the server's working copy and is replaced.
-	ws := &witness.Witnesses{List: f.w[:1], Min: 1}
-	wrec, _ := ws.Encode()
+	// witnesses.rec, the server's working copy, must be the pin's: the
+	// same in the export goes through, another one is refused, in the
+	// export as in the data directory, and never replaced silently.
+	wrec, _ := (&witness.Witnesses{List: f.w, Min: 2}).Encode()
 	wdir := writeExport(t, filepath.Join(f.base, "w"), map[string][]byte{WitnessesFile: wrec})
 	if err := Publish(PublishOptions{From: wdir, Data: st, Log: log, Pin: f.res.Pin}); err != nil {
 		t.Fatal(err)
 	}
+	other, _ := (&witness.Witnesses{List: f.w[:1], Min: 1}).Encode()
+	odir := writeExport(t, filepath.Join(f.base, "wo"), map[string][]byte{WitnessesFile: other})
+	if err := Publish(PublishOptions{From: odir, Data: st, Log: log, Pin: f.res.Pin}); !errors.Is(err, translog.ErrMismatch) {
+		t.Fatalf("other witnesses in the export: %v", err)
+	}
+	otherPin := *f.res.Pin
+	otherPin.Witnesses, otherPin.MinWitnesses = []store.Witness{{Name: f.w[0].Name, Pub: f.w[0].Pub}}, 1
+	if err := Publish(PublishOptions{From: rot, Data: st, Log: log, Pin: &otherPin}); !errors.Is(err, translog.ErrMismatch) {
+		t.Fatalf("pin with other witnesses than the data directory: %v", err)
+	}
 	if got, _ := st.ReadPlatformFile(WitnessesFile); !bytes.Equal(got, wrec) {
-		t.Fatal("witnesses.rec not replaced")
+		t.Fatal("witnesses.rec replaced")
 	}
 
-	// Succession: published with the old pin, or with the new pin and
-	// its identity list.
+	// Succession: refused with the old pin, which does not know
+	// generation 2 (Q10 point 5); published with the new pin.
 	u, _ = f.unlock(3, 4, 5)
 	succ := filepath.Join(f.base, "succ")
-	res2, err := Succeed(SucceedOptions{UnlockOptions: u, Out: succ, Identities: f.res.Identities, Origin: "o", Witnesses: f.w[:1], MinWitnesses: 1})
+	res2, err := Succeed(SucceedOptions{UnlockOptions: u, Out: succ, Pin: f.res.Pin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Publish(PublishOptions{From: succ, Data: st, Log: log, Pin: res2.Pin}); !errors.Is(err, ErrIdentity) {
-		t.Fatalf("pin of generation 2 without identity list: %v", err)
-	}
 	log.names = nil
-	if err := Publish(PublishOptions{From: succ, Data: st, Log: log, Pin: res2.Pin, Identities: res2.Identities}); err != nil {
+	if err := Publish(PublishOptions{From: succ, Data: st, Log: log, Pin: f.res.Pin}); !errors.Is(err, translog.ErrMismatch) || len(log.names) != 0 {
+		t.Fatalf("succession with the old pin: %v", err)
+	}
+	if err := Publish(PublishOptions{From: succ, Data: st, Log: log, Pin: res2.Pin}); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(log.names) != "[identity-2.succ]" {
 		t.Fatalf("log %v", log.names)
 	}
-	log.names = nil
-	if err := Publish(PublishOptions{From: succ, Data: st, Log: log, Pin: f.res.Pin}); err != nil {
-		t.Fatal(err)
+	// From now on data/platform/ names generation 2: the old pin is
+	// refused whatever the export.
+	if err := Publish(PublishOptions{From: rot, Data: st, Log: log, Pin: f.res.Pin}); !errors.Is(err, translog.ErrMismatch) {
+		t.Fatalf("old pin after the succession: %v", err)
 	}
-	// With the old pin, a certificate of generation 2 verifies through
-	// the succession now in the data directory.
+	// A certificate of identity generation 2 verifies with the new pin.
 	pub, cd := f.cert(t, 2, keys.RoleAdmin, 2)
 	dir := writeExport(t, filepath.Join(f.base, "a2"), map[string][]byte{"admin-2.pub": pub, "admin-2.cert": cd})
 	log.names = nil
-	if err := Publish(PublishOptions{From: dir, Data: st, Log: log, Pin: f.res.Pin}); err != nil {
+	if err := Publish(PublishOptions{From: dir, Data: st, Log: log, Pin: res2.Pin}); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(log.names) != "[admin-2.cert]" {
 		t.Fatalf("log %v", log.names)
+	}
+
+	// While a server runs (it holds locks/server), publish refuses
+	// before it reads anything.
+	release, err := st.HoldRoleLock(store.RoleServer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Publish(PublishOptions{From: dir, Data: st, Log: log, Pin: res2.Pin}); !errors.Is(err, ErrServer) || !errors.Is(err, store.ErrLocked) {
+		t.Fatalf("beside a server: %v", err)
+	}
+	release()
+	if err := Publish(PublishOptions{From: dir, Data: st, Log: log, Pin: res2.Pin}); err != nil {
+		t.Fatalf("after the server: %v", err)
+	}
+}
+
+// TestPublishLog: publish into the operator log of the data directory
+// (PublishOptions.Log nil, OpenLog): the certificates and the succession
+// are entries of kind platform, valid against the pin (CheckPlatform),
+// and the server signs a head over them (Operator.SignHead with the
+// ingest key). After the succession the log opens only with the new pin
+// for publish, and the server signs with it.
+func TestPublishLog(t *testing.T) {
+	f := newFixture(t)
+	st := newData(t, filepath.Join(f.base, "data"))
+	if err := Publish(PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := f.unlock(3, 4, 5)
+	succ := filepath.Join(f.base, "succ")
+	res2, err := Succeed(SucceedOptions{UnlockOptions: u, Out: succ, Pin: f.res.Pin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Publish(PublishOptions{From: succ, Data: st, Pin: res2.Pin}); err != nil {
+		t.Fatal(err)
+	}
+	ingest, _, err := ReadKey(filepath.Join(f.base, "keys", "ingest-1.key"), store.KeyRoleIngest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := translog.NewLogSigner(ingest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	{
+		pin := res2.Pin
+		ids, err := PinIdentities(pin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wvs, err := (&witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}).Verifiers()
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin, Known: note.VerifierList(wvs...),
+			Witnesses: wvs, MinWitnesses: pin.MinWitnesses})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, name := range []string{"admin-1.cert", "ingest-1.cert", "identity-2.succ"} {
+			e, err := l.Entry(int64(i))
+			if err != nil || e.Key.Kind != translog.KindPlatform || string(e.Key.Subject) != name {
+				t.Fatalf("entry %d: %v %+v", i, err, e)
+			}
+			raw, err := st.ReadPlatformFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.CheckPlatform(name, raw); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		}
+		h, err := l.(translog.Operator).SignHead(signer, testNow.Add(time.Minute))
+		if err != nil || h.Size != 3 {
+			t.Fatalf("head: %v %+v", err, h)
+		}
+	}
+	// The log opens with the old pin for nobody: it does not know
+	// generation 2 of platform/.
+	if err := Publish(PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin}); !errors.Is(err, translog.ErrMismatch) {
+		t.Fatalf("old pin: %v", err)
+	}
+	if _, err := OpenLog(st, &store.PlatformPin{Gen: 1, Pub: f.res.IdentityPub, Dev: true}); !errors.Is(err, ErrIdentity) {
+		t.Fatalf("development pin: %v", err)
 	}
 }
 
@@ -228,7 +364,7 @@ func TestPublishOrder(t *testing.T) {
 	}
 	dir := writeExport(t, filepath.Join(f.base, "x"), files)
 	log.names = nil
-	if err := Publish(PublishOptions{From: dir, Data: st, Log: log, Pin: f.res.Pin}); err != nil {
+	if err := Publish(PublishOptions{From: dir, Data: st, Log: log, Pin: f.pinN(t, 3)}); err != nil {
 		t.Fatal(err)
 	}
 	if got := fmt.Sprint(log.names); got != "[identity-2.succ identity-3.succ admin-2.cert ingest-2.cert ingest-3.cert]" {
@@ -260,6 +396,12 @@ func TestPublishRefuses(t *testing.T) {
 	otherSucc, _ := keys.NewPlatformSuccession(foreign, 2, foreign.Public().(ed25519.PublicKey), 0)
 	otherSuccData, _ := otherSucc.Encode()
 	badW := []byte("not a record")
+	otherW, _ := (&witness.Witnesses{List: f.w[:1], Min: 1}).Encode()
+	devPin := *pin
+	devPin.Dev = true
+	listPin := *pin
+	listPin.Identities = f.pin2(t).Identities
+	usePin2 := func(o *PublishOptions) { o.Pin = f.pin2(t) }
 
 	n := 0
 	for name, c := range map[string]struct {
@@ -267,34 +409,35 @@ func TestPublishRefuses(t *testing.T) {
 		mod   func(*PublishOptions)
 		errs  []error
 	}{
-		"forged certificate":        {map[string][]byte{"admin-1.pub": admin1Pub, "admin-1.cert": forgedCert}, nil, []error{translog.ErrOrder, keys.ErrSignature}},
-		"forged succession":         {map[string][]byte{"identity-2.succ": forgedSucc}, nil, []error{translog.ErrOrder}},
-		"succession against pin":    {map[string][]byte{"identity-2.succ": otherSuccData}, func(o *PublishOptions) { o.Pin, o.Identities = f.pin2(t) }, []error{translog.ErrMismatch}},
-		"forged listed succession":  {map[string][]byte{"identity-2.succ": forgedSucc}, func(o *PublishOptions) { o.Pin, o.Identities = f.pin2(t) }, []error{translog.ErrOrder}},
-		"gap in ingest generations": {map[string][]byte{"ingest-3.pub": ingest3Pub, "ingest-3.cert": ingest3}, nil, []error{translog.ErrPrerequisite}},
-		"gap in successions":        {map[string][]byte{"identity-3.succ": succ3}, nil, []error{translog.ErrPrerequisite}},
-		"unknown identity":          {map[string][]byte{"admin-1.pub": cert3Pub, "admin-1.cert": cert3}, nil, []error{translog.ErrPrerequisite}},
-		"identity pub unknown":      {map[string][]byte{"identity-2.pub": succ2Pub}, nil, []error{translog.ErrPrerequisite}},
-		"identity pub differs":      {map[string][]byte{"identity-1.pub": succ2Pub}, nil, []error{ErrIdentity}},
-		"cert without pub":          {map[string][]byte{"ingest-2.cert": ingest2}, nil, []error{ErrOutDir}},
-		"pub without cert":          {map[string][]byte{"ingest-2.pub": ingest2Pub}, nil, []error{ErrOutDir}},
-		"pub of another key":        {map[string][]byte{"ingest-2.pub": admin1Pub, "ingest-2.cert": ingest2}, nil, []error{ErrOutDir}},
-		"cert under wrong name":     {map[string][]byte{"ingest-3.pub": ingest2Pub, "ingest-3.cert": ingest2}, nil, []error{ErrOutDir}},
-		"succession wrong name":     {map[string][]byte{"identity-3.succ": succ2}, nil, []error{ErrOutDir}},
-		"malformed cert":            {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": []byte("x")}, nil, []error{keys.ErrCert}},
-		"malformed succession":      {map[string][]byte{"identity-2.succ": []byte("x")}, nil, []error{keys.ErrCert}},
-		"unknown file":              {map[string][]byte{"identity-1.pin": []byte("x")}, nil, []error{ErrOutDir}},
-		"non-canonical name":        {map[string][]byte{"ingest-02.cert": ingest2}, nil, []error{ErrOutDir}},
-		"bad witnesses.rec":         {map[string][]byte{WitnessesFile: badW}, nil, []error{witness.ErrWitnesses}},
-		"no options":                {map[string][]byte{}, func(o *PublishOptions) { o.Log = nil }, []error{ErrOptions}},
-		"development pin":           {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1, Pub: idPub, Dev: true} }, []error{ErrIdentity}},
-		"development pin with list": {map[string][]byte{}, func(o *PublishOptions) {
-			o.Pin = &store.PlatformPin{Gen: 1, Pub: idPub, Dev: true}
-			o.Identities = f.res.Identities
-		}, []error{ErrIdentity}},
-		"list against pin": {map[string][]byte{}, func(o *PublishOptions) { _, o.Identities = f.pin2(t) }, []error{ErrIdentity, translog.ErrPin}},
-		"invalid pin":      {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1} }, []error{ErrIdentity}},
-		"log refuses":      {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": ingest2}, func(o *PublishOptions) { o.Log.(*recLog).fail = translog.ErrOrder }, []error{translog.ErrOrder}},
+		"forged certificate":         {map[string][]byte{"admin-1.pub": admin1Pub, "admin-1.cert": forgedCert}, nil, []error{translog.ErrOrder, keys.ErrSignature}},
+		"succession above the pin":   {map[string][]byte{"identity-2.succ": succ2}, nil, []error{translog.ErrMismatch}},
+		"forged succession":          {map[string][]byte{"identity-2.succ": forgedSucc}, nil, []error{translog.ErrMismatch}},
+		"succession against pin":     {map[string][]byte{"identity-2.succ": otherSuccData}, usePin2, []error{translog.ErrMismatch}},
+		"forged listed succession":   {map[string][]byte{"identity-2.succ": forgedSucc}, usePin2, []error{translog.ErrOrder}},
+		"succession of generation 1": {map[string][]byte{"identity-1.succ": succ2}, nil, []error{ErrOutDir}},
+		"gap in ingest generations":  {map[string][]byte{"ingest-3.pub": ingest3Pub, "ingest-3.cert": ingest3}, nil, []error{translog.ErrPrerequisite}},
+		"successions above the pin":  {map[string][]byte{"identity-3.succ": succ3}, usePin2, []error{translog.ErrMismatch}},
+		"unknown identity":           {map[string][]byte{"admin-1.pub": cert3Pub, "admin-1.cert": cert3}, nil, []error{translog.ErrMismatch}},
+		"identity pub unknown":       {map[string][]byte{"identity-2.pub": succ2Pub}, nil, []error{translog.ErrMismatch}},
+		"identity pub differs":       {map[string][]byte{"identity-1.pub": succ2Pub}, nil, []error{ErrIdentity}},
+		"cert without pub":           {map[string][]byte{"ingest-2.cert": ingest2}, nil, []error{ErrOutDir}},
+		"pub without cert":           {map[string][]byte{"ingest-2.pub": ingest2Pub}, nil, []error{ErrOutDir}},
+		"pub of another key":         {map[string][]byte{"ingest-2.pub": admin1Pub, "ingest-2.cert": ingest2}, nil, []error{ErrOutDir}},
+		"cert under wrong name":      {map[string][]byte{"ingest-3.pub": ingest2Pub, "ingest-3.cert": ingest2}, nil, []error{ErrOutDir}},
+		"succession wrong name":      {map[string][]byte{"identity-3.succ": succ2}, f.withPin(t, 3), []error{ErrOutDir}},
+		"malformed cert":             {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": []byte("x")}, nil, []error{keys.ErrCert}},
+		"malformed succession":       {map[string][]byte{"identity-2.succ": []byte("x")}, usePin2, []error{keys.ErrCert}},
+		"unknown file":               {map[string][]byte{"identity-1.pin": []byte("x")}, nil, []error{ErrOutDir}},
+		"non-canonical name":         {map[string][]byte{"ingest-02.cert": ingest2}, nil, []error{ErrOutDir}},
+		"bad witnesses.rec":          {map[string][]byte{WitnessesFile: badW}, nil, []error{witness.ErrWitnesses}},
+		"other witnesses.rec":        {map[string][]byte{WitnessesFile: otherW}, nil, []error{translog.ErrMismatch}},
+		"no options":                 {map[string][]byte{}, func(o *PublishOptions) { o.From = "" }, []error{ErrOptions}},
+		"no pin":                     {map[string][]byte{}, func(o *PublishOptions) { o.Pin = nil }, []error{ErrOptions}},
+		"development pin":            {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &devPin }, []error{ErrIdentity}},
+		"list against pin":           {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &listPin }, []error{ErrIdentity, translog.ErrPin}},
+		"invalid pin":                {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1} }, []error{ErrIdentity}},
+		"short pin":                  {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1, Pub: idPub} }, []error{ErrIdentity}},
+		"log refuses":                {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": ingest2}, func(o *PublishOptions) { o.Log.(*recLog).fail = translog.ErrOrder }, []error{translog.ErrOrder}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			n++
@@ -325,12 +468,30 @@ func TestPublishRefuses(t *testing.T) {
 			}
 		})
 	}
+	// A data directory that names a generation the pin does not know, or
+	// contradicts its list, is refused before the export is read.
+	for name, files := range map[string]map[string][]byte{
+		"identity-2.pub":  {"identity-2.pub": succ2Pub},
+		"identity-2.succ": {"identity-2.succ": succ2},
+		"cert of 3":       {"admin-1.cert": cert3},
+		"other pub of 1":  {"identity-1.pub": succ2Pub},
+	} {
+		n++
+		st := newData(t, filepath.Join(f.base, fmt.Sprint("data", n)))
+		for fn, b := range files {
+			if err := st.WritePlatformFile(fn, b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := Publish(PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Log: newLog(t), Pin: pin}); !errors.Is(err, translog.ErrMismatch) {
+			t.Fatalf("%s in the data directory: %v", name, err)
+		}
+	}
 }
 
-// pin2 returns a pin of identity generation 2 with its identity list.
-func (f *fixture) pin2(t *testing.T) (*store.PlatformPin, []translog.Identity) {
-	pub2 := identityOf(t, f.root[:], 2)
-	return &store.PlatformPin{Gen: 2, Pub: pub2}, []translog.Identity{f.res.Identities[0], {Gen: 2, Pub: pub2}}
+// withPin returns a modifier that publishes with the pin of generation n.
+func (f *fixture) withPin(t *testing.T, n uint32) func(*PublishOptions) {
+	return func(o *PublishOptions) { o.Pin = f.pinN(t, n) }
 }
 
 func TestPublishExisting(t *testing.T) {
@@ -354,11 +515,17 @@ func TestPublishExisting(t *testing.T) {
 	if got := listDir(t, filepath.Join(st.Root, "platform")); fmt.Sprint(got) != "[ingest-1.cert]" || len(log.names) != 0 {
 		t.Fatalf("written %v", got)
 	}
-	// A public key with other content.
+	// A public key with other content; an identity key that is not the
+	// pin's contradicts the pin (the start check of the server).
 	st2 := newData(t, filepath.Join(f.base, "data2"))
-	st2.WritePlatformFile("identity-1.pub", make([]byte, 32))
+	st2.WritePlatformFile("admin-1.pub", make([]byte, 32))
 	if err := Publish(PublishOptions{From: out, Data: st2, Log: log, Pin: f.res.Pin}); !errors.Is(err, store.ErrExists) || errors.Is(err, translog.ErrDuplicate) {
 		t.Fatalf("existing key: %v", err)
+	}
+	st2b := newData(t, filepath.Join(f.base, "data2b"))
+	st2b.WritePlatformFile("identity-1.pub", make([]byte, 32))
+	if err := Publish(PublishOptions{From: out, Data: st2b, Log: log, Pin: f.res.Pin}); !errors.Is(err, translog.ErrMismatch) {
+		t.Fatalf("existing identity key: %v", err)
 	}
 	// A file that appears while Publish writes: identical content is
 	// fine, other content is refused.

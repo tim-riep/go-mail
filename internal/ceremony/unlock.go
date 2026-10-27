@@ -45,14 +45,16 @@ func pick(r io.Reader, k, n int) ([]int, error) {
 }
 
 // readShare asks for a share and decodes it strictly after the lenient
-// normalization of the command line (words.Normalize, idempotent); want
-// is the index asked for or 0 for any. Errors name word positions only.
+// normalization of the command line (words.List, idempotent); want is
+// the index asked for or 0 for any. Errors name word positions only.
 func readShare(p Prompter, want int) (*shamir.Share, error) {
 	ws, err := p.AskShare(want)
 	if err != nil {
 		return nil, err
 	}
-	ws = words.Normalize(strings.Join(ws, " "))
+	if ws, err = words.List(ws); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrShares, err)
+	}
 	s, err := shamir.ShareFromWords(ws)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrShares, err)

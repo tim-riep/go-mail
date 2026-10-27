@@ -257,9 +257,19 @@ func TestInit(t *testing.T) {
 	if fi, _ := os.Stat(kd); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("key directory mode %v", fi.Mode())
 	}
-	if f.res.Out != out || f.res.KeyDir != kd || len(f.res.Identities) != 1 || f.res.Identities[0].Gen != 1 ||
-		!f.res.Identities[0].Pub.Equal(f.res.IdentityPub) {
+	if f.res.Out != out || f.res.KeyDir != kd || len(f.res.Pin.Identities) != 1 || f.res.Pin.Identities[0].Gen != 1 ||
+		!f.res.Pin.Identities[0].Pub.Equal(f.res.IdentityPub) {
 		t.Fatal("result")
+	}
+	// The pin file holds fields 1 to 6 and 8, byte for byte the encoding
+	// of store.PlatformPin (task 15b point 1).
+	want1 := &store.PlatformPin{Gen: 1, Pub: f.res.IdentityPub, Origin: "go-mail.test/log", MinWitnesses: 2,
+		Identities: []store.PlatformIdentity{{Gen: 1, Pub: f.res.IdentityPub}}}
+	for _, w := range f.w {
+		want1.Witnesses = append(want1.Witnesses, store.Witness{Name: w.Name, Pub: w.Pub})
+	}
+	if enc, err := want1.Encode(); err != nil || !bytes.Equal(enc, mustReadFile(t, filepath.Join(out, "identity-1.pin"))) {
+		t.Fatalf("pin file is not the encoding of fields 1 to 6 and 8: %v", err)
 	}
 
 	// The certificates verify against identity-1.pub of the export, and
@@ -806,7 +816,7 @@ func TestSucceed(t *testing.T) {
 	f := newFixture(t)
 	out := filepath.Join(f.base, "succ")
 	u, _ := f.unlock(1, 4, 5)
-	opts := SucceedOptions{UnlockOptions: u, Out: out, Identities: f.res.Identities, Origin: "go-mail.test/log", Witnesses: f.w[:1], MinWitnesses: 1}
+	opts := SucceedOptions{UnlockOptions: u, Out: out, Pin: f.res.Pin}
 	res, err := Succeed(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -826,34 +836,61 @@ func TestSucceed(t *testing.T) {
 	if !res.IdentityPub.Equal(ed25519.PublicKey(pub)) {
 		t.Fatal("identity-2.pub")
 	}
-	// The pin carries both generations.
-	if len(res.Identities) != 2 || res.Identities[0].Gen != 1 || !res.Identities[0].Pub.Equal(f.res.IdentityPub) ||
-		res.Identities[1].Gen != 2 || !res.Identities[1].Pub.Equal(res.IdentityPub) {
-		t.Fatal("identity list")
+	// The pin carries both generations (the list of pin 1 plus the new
+	// one) and origin, witnesses and quorum of pin 1, byte for byte the
+	// encoding of store.PlatformPin.
+	want := *f.res.Pin
+	want.Gen, want.Pub = 2, res.IdentityPub
+	want.Identities = append(append([]store.PlatformIdentity(nil), f.res.Pin.Identities...), store.PlatformIdentity{Gen: 2, Pub: res.IdentityPub})
+	enc, err := want.Encode()
+	if err != nil || !bytes.Equal(enc, mustReadFile(t, filepath.Join(out, "identity-2.pin"))) {
+		t.Fatalf("pin 2 is not the encoding of fields 1 to 6 and 8: %v", err)
 	}
-	if err := translog.CheckIdentities(res.Identities, translog.Identity{Gen: res.Pin.Gen, Pub: res.Pin.Pub}); err != nil {
-		t.Fatal(err)
+	ids, err := PinIdentities(res.Pin)
+	if err != nil || len(ids) != 2 || !ids[0].Pub.Equal(f.res.IdentityPub) || !ids[1].Pub.Equal(res.IdentityPub) {
+		t.Fatalf("identity list: %v", err)
 	}
 	pin, err := ReadPin(filepath.Join(out, "identity-2.pin"))
 	if err != nil || pin.Gen != 2 || pin.Dev || !pin.Pub.Equal(res.IdentityPub) {
 		t.Fatalf("pin: %v", err)
 	}
 
-	// From generation 2 on: the whole list goes into the next pin.
+	// A compromise of generation 2 is locked (task 15f point 1, Q19):
+	// ErrCompromised before any share is asked, nothing written.
+	u, p := f.unlock(2, 3, 4)
+	u.IdentityGen, u.IdentityPub = 2, res.IdentityPub
+	locked := SucceedOptions{UnlockOptions: u, Out: filepath.Join(f.base, "succ3c"), Pin: res.Pin, Compromised: true,
+		Origin: f.res.Pin.Origin, Witnesses: f.w[:1], MinWitnesses: 1}
+	if _, err := Succeed(locked); !errors.Is(err, ErrCompromised) {
+		t.Fatalf("compromise: %v", err)
+	}
+	if len(p.asked) != 0 || len(p.handovers) != 0 {
+		t.Fatalf("compromise asked shares: %v", p.asked)
+	}
+	assertNothing(t, locked.Out, "")
+
+	// From generation 2 on: the whole list goes into the next pin; here a
+	// regular succession of generation 2 with the witnesses changed on
+	// purpose.
 	u, _ = f.unlock(2, 3, 4)
 	u.IdentityGen, u.IdentityPub = 2, res.IdentityPub
-	opts3 := opts
-	opts3.UnlockOptions, opts3.Out, opts3.Identities, opts3.Compromised = u, filepath.Join(f.base, "succ3"), res.Identities, true
+	opts3 := SucceedOptions{UnlockOptions: u, Out: filepath.Join(f.base, "succ3"), Pin: res.Pin,
+		Origin: f.res.Pin.Origin, Witnesses: f.w[:1], MinWitnesses: 1}
 	res3, err := Succeed(opts3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Compromise: no succession, only the pin.
-	if got := listDir(t, opts3.Out); fmt.Sprint(got) != "[identity-3.pin]" {
-		t.Fatalf("compromise export %v", got)
+	if got := listDir(t, opts3.Out); fmt.Sprint(got) != "[identity-3.pin platform/identity-3.pub platform/identity-3.succ]" {
+		t.Fatalf("export 3 %v", got)
 	}
-	if len(res3.Identities) != 3 || !res3.Identities[2].Pub.Equal(identityOf(t, f.root[:], 3)) {
-		t.Fatal("list of three")
+	s3, err := keys.DecodePlatformSuccession(mustReadFile(t, filepath.Join(opts3.Out, "platform", "identity-3.succ")))
+	if err != nil || s3.Verify(res.IdentityPub, 2) != nil || !s3.Pub.Equal(res3.IdentityPub) {
+		t.Fatalf("succession 3: %v", err)
+	}
+	p3 := res3.Pin
+	if len(p3.Identities) != 3 || !p3.Identities[2].Pub.Equal(identityOf(t, f.root[:], 3)) || !p3.Identities[1].Pub.Equal(res.IdentityPub) ||
+		p3.MinWitnesses != 1 || len(p3.Witnesses) != 1 || p3.Witnesses[0].Name != "w1" || p3.Origin != f.res.Pin.Origin {
+		t.Fatalf("pin 3 %+v", p3)
 	}
 
 	fail := func(mod func(*SucceedOptions)) error {
@@ -864,14 +901,25 @@ func TestSucceed(t *testing.T) {
 		_, err := Succeed(o)
 		return err
 	}
-	if err := fail(func(o *SucceedOptions) { o.MinWitnesses = 2 }); !errors.Is(err, translog.ErrWitness) {
-		t.Fatal("quorum")
+	if err := fail(func(o *SucceedOptions) { o.MinWitnesses = 1 }); !errors.Is(err, translog.ErrWitness) {
+		t.Fatal("quorum 1 of 3")
 	}
-	if err := fail(func(o *SucceedOptions) { o.Identities = nil }); !errors.Is(err, ErrIdentity) {
-		t.Fatal("no identity list")
+	if err := fail(func(o *SucceedOptions) { o.Witnesses, o.MinWitnesses = f.w[:2], 1 }); !errors.Is(err, translog.ErrWitness) {
+		t.Fatal("quorum 1 of 2")
 	}
-	if err := fail(func(o *SucceedOptions) { o.Identities = res.Identities }); !errors.Is(err, ErrIdentity) {
-		t.Fatal("list does not end with the current identity")
+	if err := fail(func(o *SucceedOptions) { o.Origin = "another.test/log" }); !errors.Is(err, ErrOptions) {
+		t.Fatal("origin changed")
+	}
+	if err := fail(func(o *SucceedOptions) { o.Pin = nil }); !errors.Is(err, ErrOptions) {
+		t.Fatal("no pin")
+	}
+	if err := fail(func(o *SucceedOptions) { o.Pin = res.Pin }); !errors.Is(err, ErrIdentity) {
+		t.Fatal("pin of another generation than the identity unlocked")
+	}
+	dev := *f.res.Pin
+	dev.Dev = true
+	if err := fail(func(o *SucceedOptions) { o.Pin = &dev }); !errors.Is(err, ErrIdentity) {
+		t.Fatal("development pin")
 	}
 	if err := fail(func(o *SucceedOptions) { o.Out = out }); !errors.Is(err, ErrOutDir) {
 		t.Fatal("used export directory")
@@ -882,16 +930,25 @@ func TestSucceed(t *testing.T) {
 	if err := fail(func(o *SucceedOptions) { o.IdentityGen = 0 }); !errors.Is(err, ErrIdentity) {
 		t.Fatal("generation 0")
 	}
-	// A list whose earlier generation does not derive from the root.
+	// A pin whose earlier generation does not derive from the root.
 	u, _ = f.unlock(2, 3, 4)
 	u.IdentityGen, u.IdentityPub = 2, res.IdentityPub
-	forged := []translog.Identity{{Gen: 1, Pub: f.w[0].Pub}, res.Identities[1]}
-	if _, err := Succeed(SucceedOptions{UnlockOptions: u, Out: filepath.Join(f.base, "bad"), Identities: forged,
-		Origin: "o", Witnesses: f.w[:1], MinWitnesses: 1}); !errors.Is(err, ErrIdentity) {
+	forged := *res.Pin
+	forged.Identities = []store.PlatformIdentity{{Gen: 1, Pub: f.w[0].Pub}, res.Pin.Identities[1]}
+	if _, err := Succeed(SucceedOptions{UnlockOptions: u, Out: filepath.Join(f.base, "bad"), Pin: &forged}); !errors.Is(err, ErrIdentity) {
 		t.Fatalf("forged list: %v", err)
 	}
 	if err := fail(func(o *SucceedOptions) { o.Prompter.(*prompter).queue = nil }); err == nil {
 		t.Fatal("no shares")
 	}
 	assertNothing(t, filepath.Join(f.base, "bad"), "")
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

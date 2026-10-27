@@ -38,3 +38,12 @@ func disableFlow(uintptr) (func() error, error) {
 func flushInput(uintptr) error {
 	return errors.New("input cannot be discarded on this system")
 }
+
+// disableFlowOut is unreachable as disableEcho is; it fails closed.
+func disableFlowOut(uintptr) (func() error, error) {
+	return nil, errors.New("flow control cannot be switched off on this system")
+}
+
+// sameTerminal is unreachable (no file is a terminal here); it reports
+// true, so that the flow control of stdout is never switched.
+func sameTerminal(uintptr, uintptr) bool { return true }

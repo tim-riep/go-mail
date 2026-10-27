@@ -183,7 +183,7 @@ func TestCommitPointRefused(t *testing.T) {
 	u, p = f.unlock(1, 2, 3)
 	g.prompter = p
 	u.Prompter = g
-	_, err = Succeed(SucceedOptions{UnlockOptions: u, Out: g.out, Identities: f.res.Identities, Origin: "o", Witnesses: f.w[:1], MinWitnesses: 1})
+	_, err = Succeed(SucceedOptions{UnlockOptions: u, Out: g.out, Pin: f.res.Pin})
 	check("succeed", g, err)
 }
 

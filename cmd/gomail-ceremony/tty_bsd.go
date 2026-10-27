@@ -12,3 +12,7 @@ const (
 	ioctlSetTermios      = syscall.TIOCSETA
 	ioctlSetTermiosFlush = syscall.TIOCSETAF
 )
+
+// flushPending has nothing left to discard: these systems hand input on
+// to the line discipline when it arrives, and TIOCSETAF discarded it.
+func flushPending(uintptr) error { return nil }

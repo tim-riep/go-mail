@@ -36,14 +36,9 @@ func checkTrust(origin string, ws []witness.Key, min int) ([]byte, error) {
 	return (&witness.Witnesses{List: ws, Min: min}).Encode()
 }
 
-// newPin checks d and returns the pin and its encoding.
-//
-// Since the merge of task 07 (task 10f) store.PlatformPin carries
-// origin, witnesses, min_witnesses and identities (fields 4 to 6 and 8),
-// and they are set from d here; nothing else in this package writes a
-// pin. TODO(task-15b): the other TODO(task-07) places of this package
-// and of gomail-ceremony still use Result.Identities and the flags
-// instead of the pin's fields.
+// newPin checks d and returns the pin and its encoding, fields 1 to 6
+// and 8 (store.PlatformPin.Encode); it is the only place of this package
+// that makes a pin.
 func newPin(d *pinData) (*store.PlatformPin, []byte, error) {
 	if len(d.Identities) == 0 {
 		return nil, nil, fmt.Errorf("%w: empty identity list", translog.ErrPin)
@@ -69,16 +64,10 @@ func newPin(d *pinData) (*store.PlatformPin, []byte, error) {
 	return p, b, nil
 }
 
-// PinIdentities returns the identity list (field 8) of a pin of the real
-// ceremony.
-//
-// TODO(task-07): return a copy of the pin's field 8 once
-// store.PlatformPin has it. Today's pin carries only its current
-// generation, so the list is known only for generation 1, where it is
-// that one element; for a later generation PinIdentities reports
-// ErrIdentity and the caller has to pass the list itself
-// (PublishOptions.Identities, Result.Identities). A development pin (dev
-// = 1, InitDev) is never an anchor of the real ceremony (ErrIdentity).
+// PinIdentities returns a copy of the identity list (field 8) of a pin
+// of the real ceremony, checked against fields 1 and 2
+// (translog.CheckIdentities). A development pin (dev = 1, InitDev) is
+// never an anchor of the real ceremony (ErrIdentity).
 func PinIdentities(p *store.PlatformPin) ([]translog.Identity, error) {
 	if p == nil || len(p.Pub) != ed25519.PublicKeySize || p.Gen == 0 {
 		return nil, fmt.Errorf("%w: invalid pin", ErrIdentity)
@@ -86,8 +75,39 @@ func PinIdentities(p *store.PlatformPin) ([]translog.Identity, error) {
 	if p.Dev {
 		return nil, fmt.Errorf("%w: development pin", ErrIdentity)
 	}
-	if p.Gen != 1 {
-		return nil, fmt.Errorf("%w: the pin of generation %d carries no identity list yet", ErrIdentity, p.Gen)
+	ids := make([]translog.Identity, 0, len(p.Identities))
+	for _, id := range p.Identities {
+		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: bytes.Clone(id.Pub)})
 	}
-	return []translog.Identity{{Gen: 1, Pub: bytes.Clone(p.Pub)}}, nil
+	if err := translog.CheckIdentities(ids, translog.Identity{Gen: p.Gen, Pub: p.Pub}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrIdentity, err)
+	}
+	return ids, nil
+}
+
+// pinWitnesses returns the witnesses of a pin (field 5).
+func pinWitnesses(p *store.PlatformPin) []witness.Key {
+	ws := make([]witness.Key, 0, len(p.Witnesses))
+	for _, w := range p.Witnesses {
+		ws = append(ws, witness.Key{Name: w.Name, Pub: bytes.Clone(w.Pub)})
+	}
+	return ws
+}
+
+// sameWitnesses reports whether a and b are the same witnesses with the
+// same quorum, in any order.
+func sameWitnesses(a []witness.Key, minA int, b []witness.Key, minB int) bool {
+	if minA != minB || len(a) != len(b) {
+		return false
+	}
+	for _, x := range a {
+		found := false
+		for _, y := range b {
+			found = found || (x.Name == y.Name && x.Pub.Equal(y.Pub))
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

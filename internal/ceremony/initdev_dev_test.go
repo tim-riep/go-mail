@@ -1,3 +1,5 @@
+//go:build gomail_dev
+
 package ceremony
 
 import (
@@ -12,16 +14,14 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
-	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 	"github.com/tim-riep/go-mail/internal/witness"
 )
 
 func TestInitDev(t *testing.T) {
-	log, _ := translogtest.NewUnverified(true)
 	base := t.TempDir()
 	data, kd := filepath.Join(base, "data"), filepath.Join(base, "keys")
 	now := time.Unix(1_800_000_000, 0)
-	res, err := InitDev(data, kd, now, log, nil, 0)
+	res, err := InitDev(data, kd, now, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,33 +84,29 @@ func TestInitDev(t *testing.T) {
 		return nil
 	})
 	// A second run into the same key directory is refused.
-	if _, err := InitDev(filepath.Join(base, "data2"), kd, now, log, nil, 0); !errors.Is(err, ErrKeyDir) {
+	if _, err := InitDev(filepath.Join(base, "data2"), kd, now, nil, 0); !errors.Is(err, ErrKeyDir) {
 		t.Fatal("second ceremony into the same key directory")
 	}
 	// The key directory must not be inside the data directory, nor the
 	// other way round.
-	if _, err := InitDev(data, filepath.Join(data, "keys"), now, log, nil, 0); !errors.Is(err, ErrKeyDir) {
+	if _, err := InitDev(data, filepath.Join(data, "keys"), now, nil, 0); !errors.Is(err, ErrKeyDir) {
 		t.Fatal("key directory inside the data directory")
 	}
-	if _, err := InitDev(filepath.Join(base, "k2", "data"), filepath.Join(base, "k2"), now, log, nil, 0); !errors.Is(err, ErrKeyDir) {
+	if _, err := InitDev(filepath.Join(base, "k2", "data"), filepath.Join(base, "k2"), now, nil, 0); !errors.Is(err, ErrKeyDir) {
 		t.Fatal("data directory inside the key directory")
 	}
 }
 
 // TestInitDevLog: InitDev appends both certificates to the operator log
-// of the new data directory, where they are valid against the pin's
-// identity list, passes them to a given log as well, and writes
-// platform/witnesses.rec with the pinned witnesses (task 15).
+// of the new data directory, admin before ingest, where they are valid
+// against the pin's identity list, and writes platform/witnesses.rec
+// with the pinned witnesses (task 15; task 15b: no other log).
 func TestInitDevLog(t *testing.T) {
 	base := t.TempDir()
 	data := filepath.Join(base, "data")
-	rec := &recordingLog{}
-	res, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), rec, nil, 0)
+	res, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), nil, 0)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(rec.names) != 2 || rec.names[0] != "admin-1.cert" || rec.names[1] != "ingest-1.cert" {
-		t.Fatalf("given log: %v", rec.names)
 	}
 	st, err := store.Open(data)
 	if err != nil {
@@ -120,7 +116,10 @@ func TestInitDevLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"admin-1.cert", "ingest-1.cert"} {
+	for i, name := range []string{"admin-1.cert", "ingest-1.cert"} {
+		if e, err := l.Entry(int64(i)); err != nil || string(e.Key.Subject) != name {
+			t.Fatalf("entry %d: %v", i, err)
+		}
 		raw, err := st.ReadPlatformFile(name)
 		if err != nil {
 			t.Fatal(err)
@@ -139,34 +138,22 @@ func TestInitDevLog(t *testing.T) {
 	}
 }
 
-// recordingLog records the names AppendPlatform received.
-type recordingLog struct {
-	translogtest.Unverified
-	names []string
-}
-
-func (r *recordingLog) AppendPlatform(name string, _ []byte) error {
-	r.names = append(r.names, name)
-	return nil
-}
-
 // TestInitDevWitnesses: the pin carries origin, witnesses, quorum and
 // identity list (translog doc.go "Pin"); an inadmissible quorum is
 // refused before anything is written.
 func TestInitDevWitnesses(t *testing.T) {
-	log, _ := translogtest.NewUnverified(true)
 	base := t.TempDir()
 	pub, _, _ := ed25519.GenerateKey(nil)
 	pub2, _, _ := ed25519.GenerateKey(nil)
 	ws := []witness.Key{{Name: "w1", Pub: pub}, {Name: "w2", Pub: pub2}}
 	data := filepath.Join(base, "data")
-	if _, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), log, ws, 1); !errors.Is(err, store.ErrRecord) {
+	if _, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), ws, 1); !errors.Is(err, store.ErrRecord) {
 		t.Fatalf("1 of 2: %v", err)
 	}
 	if _, err := os.Stat(data); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("data directory written despite the refused quorum")
 	}
-	res, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), log, ws, 2)
+	res, err := InitDev(data, filepath.Join(base, "keys"), time.Now(), ws, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +163,7 @@ func TestInitDevWitnesses(t *testing.T) {
 		t.Fatalf("pin %+v", p)
 	}
 	// Without witnesses a development witness is created and pinned.
-	res, err = InitDev(filepath.Join(base, "d2"), filepath.Join(base, "k2"), time.Now(), log, nil, 0)
+	res, err = InitDev(filepath.Join(base, "d2"), filepath.Join(base, "k2"), time.Now(), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

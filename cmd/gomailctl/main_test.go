@@ -11,14 +11,14 @@ import (
 
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/store"
-	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
 func TestUsageAndConfig(t *testing.T) {
 	dir := t.TempDir()
 	data, keys := filepath.Join(dir, "data"), filepath.Join(dir, "keys")
-	log, _ := translogtest.NewUnverified(true)
-	ceremony.InitDev(data, keys, time.Now(), log, nil, 0)
+	if _, err := ceremony.InitDev(data, keys, time.Now(), nil, 0); errors.Is(err, ceremony.ErrDev) {
+		t.Skip("needs the development ceremony (ceremony.InitDev): go test -tags gomail_dev,gomail_test")
+	}
 	var out, errb bytes.Buffer
 	for _, args := range [][]string{nil, {"bogus"}, {"list"}, {"read", "x"}, {"mailbox", "delete", "x"}, {"register"}, {"keygen", "--nope"}} {
 		if run(args, strings.NewReader(""), &out, &errb) != 2 {
@@ -87,7 +87,9 @@ func TestUsageAndConfig(t *testing.T) {
 func TestPeerLock(t *testing.T) {
 	dir := t.TempDir()
 	data, keys := filepath.Join(dir, "data"), filepath.Join(dir, "keys")
-	if _, err := ceremony.InitDev(data, keys, time.Now(), nil, nil, 0); err != nil {
+	if _, err := ceremony.InitDev(data, keys, time.Now(), nil, 0); errors.Is(err, ceremony.ErrDev) {
+		t.Skip("needs the development ceremony (ceremony.InitDev): go test -tags gomail_dev,gomail_test")
+	} else if err != nil {
 		t.Fatal(err)
 	}
 	st, err := store.Open(data)

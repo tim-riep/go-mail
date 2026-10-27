@@ -99,8 +99,8 @@ rawfile="$work/raw.txt"
 run() {
 	local bt="$1" re="$2"
 	echo "group-benchtime: $bt" >>"$rawfile"
-	echo "bench.sh: go test -run '^\$' -bench '$re' -benchtime=$bt -count=$count ./internal/bench" >&2
-	go test -run '^$' -bench "$re" -benchtime="$bt" -count="$count" -timeout 0 ./internal/bench | tee -a "$rawfile" >&2
+	echo "bench.sh: go test -tags gomail_dev -run '^\$' -bench '$re' -benchtime=$bt -count=$count ./internal/bench" >&2
+	go test -tags gomail_dev -run '^$' -bench "$re" -benchtime="$bt" -count="$count" -timeout 0 ./internal/bench | tee -a "$rawfile" >&2
 }
 
 run "$benchtime" '^BenchmarkReceive$'
@@ -212,7 +212,7 @@ render() {
 				vals = vals (u > 1 ? ", " : "") num(sum[key] / cnt[key]) " " units[s, u]
 			}
 			disp = s; sub(/^Benchmark/, "", disp)
-			cmd = envfor(s) "go test -run '\''^$'\'' -bench '\''" regex(s) "'\'' -benchtime=" btof[s] " ./internal/bench"
+			cmd = envfor(s) "go test -tags gomail_dev -run '\''^$'\'' -bench '\''" regex(s) "'\'' -benchtime=" btof[s] " ./internal/bench"
 			printf "| %s | %s | %s | `%s` |\n", point(s), disp, vals, cmd
 		}
 	}' "$rawfile"

@@ -19,6 +19,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/ingest"
 	"github.com/tim-riep/go-mail/internal/smtpd"
+	"github.com/tim-riep/go-mail/internal/testenv"
 )
 
 // memSample is one reading of the process's memory.
@@ -220,6 +221,7 @@ func TestMemLoadChild(t *testing.T) {
 // a process of its own (runMemLoadChild), so every run, also with
 // -count, starts from the same state; run it with -benchtime=1x.
 func BenchmarkServerMemory(b *testing.B) {
+	testenv.RequireDev(b) // the platform of every run comes from testenv
 	mails := envInt(b, "GOMAIL_BENCH_MEM_MAILS", 1000)
 	conns, err := memConns()
 	if err != nil {
@@ -287,6 +289,7 @@ func TestServerMemory(t *testing.T) {
 // separate processes spread by less than 0.2 MiB, a carried run rose by
 // 1.5 MiB. A carried HeapInuse below 5 MiB goes unnoticed.
 func TestServerMemoryRuns(t *testing.T) {
+	testenv.RequireDev(t) // the benchmark it runs needs the tag as well
 	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkServerMemory$/^size=1MiB$",
 		"-test.benchtime=1x", "-test.count=3")
 	cmd.Env = append(os.Environ(), "GOMAIL_BENCH_MEM_MAILS=20", memConnsEnv+"=20")

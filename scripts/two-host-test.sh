@@ -138,7 +138,8 @@ Aufruf:
              das Skript schreibt sie (0600) und löscht sie am Ende (außer mit --keep)
   --log-helper  Testprogramm aus internal/e2e (go test -c -tags gomail_test ./internal/e2e),
              trägt bis Auftrag 14 user.rec und epoch.rec ins Log ein
-  --bin      Verzeichnis der Programme auf beiden Hosts (Standard: PATH; lokal: wird gebaut)
+  --bin      Verzeichnis der Programme auf beiden Hosts (Standard: PATH; lokal: wird gebaut),
+             gebaut mit -tags gomail_dev,gomail_test (gomail-ceremony init --dev)
   --workdir  darunter legt das Skript auf jedem Host sein eigenes Verzeichnis two-host.XXXXXX
              an, außerhalb von Export und Mount (Standard /tmp, lokal $TMPDIR oder /tmp)
   --out      Verzeichnis für das Protokoll (protokoll.md, darf noch nicht existieren)
@@ -614,8 +615,8 @@ if [ "$LOCAL" = 1 ]; then
 		BUILD=$RW/bin
 		mkdir "$BUILD"
 		BIN=${BIN:-$BUILD}
-		say "Baue Programme und Log-Helfer (-tags gomail_test) nach $BUILD"
-		(cd "$ROOT" && go build -tags gomail_test -o "$BUILD/" ./cmd/...)
+		say "Baue Programme (-tags gomail_dev,gomail_test) und Log-Helfer (-tags gomail_test) nach $BUILD"
+		(cd "$ROOT" && go build -tags gomail_dev,gomail_test -o "$BUILD/" ./cmd/...)
 		if [ -z "$LOG_HELPER" ]; then
 			(cd "$ROOT" && go test -c -tags gomail_test -o "$BUILD/e2e.test" ./internal/e2e)
 			LOG_HELPER=$BUILD/e2e.test
@@ -725,7 +726,7 @@ DATA_OURS=1
 if [ -z "$WITNESS" ]; then
 	must server "umask 077 && mkdir $(q "$(dirname "$WKEY")") && echo angelegt"
 fi
-must server "$CER init --dev --data $(q "$SDATA") --keys $(q "$KEYS") --insecure-no-log"
+must server "$CER init --dev --data $(q "$SDATA") --keys $(q "$KEYS")"
 if [ "$LOCAL" = 0 ]; then
 	must server "chgrp -R $(q "$GROUP") $(q "$SDATA") && echo $(q "Gruppe $GROUP gesetzt")"
 fi

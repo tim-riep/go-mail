@@ -81,6 +81,7 @@ func TestBuildPlatform(t *testing.T) {
 // show up in this process's memory. The clock stands at testenv.Start.
 func newPlatformRig(tb testing.TB) *rig {
 	tb.Helper()
+	testenv.RequireDev(tb) // the child builds the platform with testenv
 	dir := tb.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBuildPlatform$", "-test.count=1")
 	cmd.Env = append(os.Environ(), platformEnv+"="+dir)

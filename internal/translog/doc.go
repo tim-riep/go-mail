@@ -985,8 +985,8 @@
 //     Refresh returned, before it relies on the log (Log.Refresh).
 //   - 15: the server, ingest, ceremony and store sites below; the
 //     server's pin (--pin, Options.Identities, finding 03d-2).
-//     Built by task 15 (the ceremony part, point 3 of the task, is
-//     deferred to task 15b): ingest checks before every delivery
+//     Built by task 15 (the ceremony part, point 3 of the task, was
+//     built by task 15b, Publish): ingest checks before every delivery
 //     CheckEpoch for the whole chain up to the head of mailbox.rec and
 //     refuses a head below the newest valid epoch entry of the mailbox
 //     (Lookup(KindEpoch), ingest.ErrRollback: the residual risk of D71),
@@ -1088,8 +1088,10 @@
 // log of the new data directory, which also gets witnesses.rec): 25
 // sites, internal/client 14 (task 14) and translogtest 11. gomail-server
 // has no --insecure-no-log any more and imports no translogtest;
-// gomailctl keeps the switch until task 14 builds the client log, and
-// gomail-ceremony until task 15b takes the ceremony to the log.
+// gomailctl keeps the switch until task 14 builds the client log.
+// gomail-ceremony lost it with task 15b, which takes the ceremony to the
+// log: Publish appends to the operator log of the data directory, and
+// init --dev (InitDev) exists only in a build with the tag gomail_dev.
 //
 //	file, function                         check today            replaced by (new interface)                          task
 //	client/client.go Open                  CheckFresh             Refresh(now), head into state.json, CheckFresh       14
@@ -1108,8 +1110,8 @@
 //	ingest/delivery.go userKey             CheckGeneration        CheckGeneration (operator log)                       15 (done)
 //	ingest/delivery.go userKey             CheckRevokedSignature  CheckRevokedSignature (operator log)                 15 (done)
 //	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc) (done by task 11)            11
-//	ceremony/ceremony.go InitDev           AppendPlatform         Append(KindPlatform, data) to the operator log        15 (done);
-//	                                                              real ceremony: Publish                                15b (10)
+//	ceremony/initdev_dev.go InitDev        AppendPlatform         Append(KindPlatform, data) to the operator log        15 (done)
+//	ceremony/publish.go Publish            AppendPlatform         AppendPlatform to the operator log (OpenLog, D80)    15b (done)
 //	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15
 //
 // Not a tagged site, but changed by this design:

@@ -129,6 +129,10 @@ type pty struct {
 
 	shownAt []int // output offsets just behind every share line shown
 	sentAt  []int // output offsets at which input was sent
+
+	// afterType, when set, is called by converse once the n-th share
+	// is typed (sent with Enter).
+	afterType func(n int)
 }
 
 // typing is a share typed at output offset off.
@@ -137,7 +141,9 @@ type typing struct {
 	lines []string
 }
 
-func openPTY(t *testing.T) *pty {
+// rawPTY opens a pseudo terminal from /dev/ptmx and returns its master
+// and slave side and the path of the slave; nobody reads the master.
+func rawPTY(t *testing.T) (m, s *os.File, name string) {
 	t.Helper()
 	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
@@ -153,11 +159,18 @@ func openPTY(t *testing.T) *pty {
 		m.Close()
 		t.Skip("TIOCSPTLCK:", err)
 	}
-	s, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|syscall.O_NOCTTY, 0)
+	name = fmt.Sprintf("/dev/pts/%d", n)
+	s, err = os.OpenFile(name, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		m.Close()
 		t.Skip("pts:", err)
 	}
+	return m, s, name
+}
+
+func openPTY(t *testing.T) *pty {
+	t.Helper()
+	m, s, _ := rawPTY(t)
 	p := &pty{t: t, master: m, slave: s, eof: make(chan struct{}), exited: make(chan struct{}), shown: map[int]string{}}
 	p.lflag0 = p.lflag()
 	if p.lflag0&quiet != quiet {
@@ -437,6 +450,9 @@ func (p *pty) converse(queue []string) {
 		lines := []string{strings.ToUpper(strings.Join(ws[:12], " ")), strings.Join(ws[12:], " ")}
 		p.typed = append(p.typed, typing{off: len(p.output()), lines: lines})
 		p.send(lines[0] + "\n" + lines[1] + "\n")
+		if p.afterType != nil {
+			p.afterType(len(p.typed))
+		}
 	}
 }
 

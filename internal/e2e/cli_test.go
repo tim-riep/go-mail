@@ -51,9 +51,14 @@ func TestMain(m *testing.M) {
 // space of the host (452 below the 10 % of 5.1).
 const testMinFree = "GOMAIL_TEST_MIN_FREE=0.000001"
 
-// programs builds the four programs once, with the tag gomail_test (the
-// hidden test switch of gomail-server, cmd/gomail-server/
-// testconfig_tagged.go), and returns their directory.
+// buildTags are the tags of the programs of these tests: gomail_test,
+// the hidden test switch of gomail-server (cmd/gomail-server/
+// testconfig_tagged.go), and gomail_dev, the development ceremony
+// "gomail-ceremony init --dev" (task 15b point 4).
+const buildTags = "gomail_dev,gomail_test"
+
+// programs builds the four programs once, with buildTags, and returns
+// their directory.
 func programs(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
@@ -66,7 +71,7 @@ func programs(t *testing.T) string {
 			return
 		}
 		binDir = dir
-		build := exec.Command("go", "build", "-tags", "gomail_test", "-o", dir+string(os.PathSeparator), "github.com/tim-riep/go-mail/cmd/...")
+		build := exec.Command("go", "build", "-tags", buildTags, "-o", dir+string(os.PathSeparator), "github.com/tim-riep/go-mail/cmd/...")
 		build.Env = os.Environ()
 		if out, err := build.CombinedOutput(); err != nil {
 			binErr = errors.New(err.Error() + "\n" + string(out))
@@ -83,6 +88,10 @@ type platform struct {
 	t                     *testing.T
 	bin, dir, data, keys  string
 	pin, ingestKey, admin string
+	// witnessKey and origin are the note signer key file of the pinned
+	// witness and the log origin; empty, those of the development
+	// ceremony (keys/witness-dev.key, gomail-dev).
+	witnessKey, origin string
 }
 
 func newPlatform(t *testing.T) *platform {
@@ -90,9 +99,9 @@ func newPlatform(t *testing.T) *platform {
 	dir := t.TempDir()
 	p := &platform{t: t, bin: programs(t), dir: dir, data: filepath.Join(dir, "data"), keys: filepath.Join(dir, "keys")}
 	p.pin, p.ingestKey, p.admin = filepath.Join(p.keys, "identity-1.pin"), filepath.Join(p.keys, "ingest-1.key"), filepath.Join(p.keys, "admin-1.key")
-	// TODO(task-15b): the ceremony program still needs --insecure-no-log;
-	// InitDev writes the certificates into the log of the data directory.
-	p.run("", "gomail-ceremony", "init", "--dev", "--data", p.data, "--keys", p.keys, "--insecure-no-log")
+	// InitDev writes the certificates into the log of the data directory;
+	// gomail-ceremony has no --insecure-no-log any more (task 15b).
+	p.run("", "gomail-ceremony", "init", "--dev", "--data", p.data, "--keys", p.keys)
 	return p
 }
 
@@ -189,13 +198,26 @@ func (p *platform) startServer() *serverProc {
 	return s
 }
 
-// startWitness starts gomail-witness with the development witness key of
-// the ceremony against the log side of s.
+// startWitness starts gomail-witness with the witness key of the
+// platform (that of the development ceremony unless witnessKey is set)
+// against the log side of s, which signs with ingest generation 1.
 func (p *platform) startWitness(s *serverProc) {
 	p.t.Helper()
-	ipub, err := os.ReadFile(filepath.Join(p.data, "platform", "ingest-1.pub"))
+	p.startWitnessGen(s, 1)
+}
+
+// startWitnessGen is startWitness for a log side that signs with ingest
+// generation gen; it returns the function that stops the witness (it
+// stops at the end of the test in any case).
+func (p *platform) startWitnessGen(s *serverProc, gen uint32) (stop func()) {
+	p.t.Helper()
+	ipub, err := os.ReadFile(filepath.Join(p.data, "platform", store.PlatformFileName("ingest", gen, "pub")))
 	if err != nil {
 		p.t.Fatal(err)
+	}
+	wkey, origin := filepath.Join(p.keys, "witness-dev.key"), "gomail-dev"
+	if p.witnessKey != "" {
+		wkey, origin = p.witnessKey, p.origin
 	}
 	vkey, err := note.NewEd25519VerifierKey(translog.LogSignerName, ed25519.PublicKey(ipub))
 	if err != nil {
@@ -203,47 +225,28 @@ func (p *platform) startWitness(s *serverProc) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, filepath.Join(p.bin, "gomail-witness"), "serve", "--log", "http://"+s.log, "--log-key", vkey,
-		"--origin", "gomail-dev", "--key", filepath.Join(p.keys, "witness-dev.key"), "--state", filepath.Join(p.dir, "witness-state"),
+		"--origin", origin, "--key", wkey, "--state", filepath.Join(p.dir, "witness-state"),
 		"--interval", "1s")
 	if err := cmd.Start(); err != nil {
 		p.t.Fatal(err)
 	}
-	p.t.Cleanup(func() {
-		cmd.Process.Signal(os.Interrupt)
-		cmd.Wait()
-		cancel()
-	})
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cmd.Process.Signal(os.Interrupt)
+			cmd.Wait()
+			cancel()
+		})
+	}
+	p.t.Cleanup(stop)
+	return stop
 }
 
-// logAsClient appends records to the operator log of the data directory
-// as the client will do itself. TODO(task-14): gomailctl appends user,
-// epochs and the signer's user.rec to the log; until then it runs with
-// --insecure-no-log, and the test logs what it wrote.
-func (p *platform) logAsClient(kind translog.Kind, files ...string) {
-	p.t.Helper()
-	if _, err := appendAsClient(p.data, p.pin, kind, files...); err != nil {
-		p.t.Fatal(err)
-	}
-}
-
-// TestRunbook builds the programs and runs the steps of docs/RUNBOOK.md:
-// ceremony, server with the transparency log and a witness, keygen,
-// invite, register, mailbox, address, mail via SMTP, list, read,
-// inspect, sync.
-func TestRunbook(t *testing.T) {
-	p := newPlatform(t)
-	data, keys, alice := p.data, p.keys, filepath.Join(p.dir, "alice")
-	run := p.run
-	common := []string{"--data", data, "--dir", alice, "--platform", p.pin, "--insecure-no-log"}
-
-	// 2. Server, only with the log; then the witness.
-	if code, _, _ := p.exec("", "gomail-server", "serve", "--data", data, "--ingest-key", p.ingestKey); code != 2 {
-		t.Fatalf("server without --pin: exit %d", code)
-	}
-	srv := p.startServer()
-	p.startWitness(srv)
-
-	// 3. keygen: answer the three questions from the words shown.
+// keygen runs "gomailctl keygen" with the arguments common and answers
+// the three questions from the words shown.
+func (p *platform) keygen(common []string) {
+	t := p.t
+	t.Helper()
 	kg := exec.Command(filepath.Join(p.bin, "gomailctl"), append([]string{"keygen"}, common...)...)
 	kg.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple")
 	stdin, _ := kg.StdinPipe()
@@ -280,6 +283,38 @@ func TestRunbook(t *testing.T) {
 	if err := kg.Wait(); err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
+}
+
+// logAsClient appends records to the operator log of the data directory
+// as the client will do itself. TODO(task-14): gomailctl appends user,
+// epochs and the signer's user.rec to the log; until then it runs with
+// --insecure-no-log, and the test logs what it wrote.
+func (p *platform) logAsClient(kind translog.Kind, files ...string) {
+	p.t.Helper()
+	if _, err := appendAsClient(p.data, p.pin, kind, files...); err != nil {
+		p.t.Fatal(err)
+	}
+}
+
+// TestRunbook builds the programs and runs the steps of docs/RUNBOOK.md:
+// ceremony, server with the transparency log and a witness, keygen,
+// invite, register, mailbox, address, mail via SMTP, list, read,
+// inspect, sync.
+func TestRunbook(t *testing.T) {
+	p := newPlatform(t)
+	data, keys, alice := p.data, p.keys, filepath.Join(p.dir, "alice")
+	run := p.run
+	common := []string{"--data", data, "--dir", alice, "--platform", p.pin, "--insecure-no-log"}
+
+	// 2. Server, only with the log; then the witness.
+	if code, _, _ := p.exec("", "gomail-server", "serve", "--data", data, "--ingest-key", p.ingestKey); code != 2 {
+		t.Fatalf("server without --pin: exit %d", code)
+	}
+	srv := p.startServer()
+	p.startWitness(srv)
+
+	// 3. keygen: answer the three questions from the words shown.
+	p.keygen(common)
 
 	// 4. Invitation and registration.
 	code := strings.TrimSpace(run("", "gomail-server", "invite", "create", "--data", data))

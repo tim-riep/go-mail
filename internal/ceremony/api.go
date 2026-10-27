@@ -2,7 +2,7 @@ package ceremony
 
 // Interface of the real ceremony (2.3 "Zeremonie", task 03), implemented
 // by task 10 (init.go, unlock.go, files.go, pin.go, publish.go). InitDev
-// (ceremony.go) stays the development ceremony.
+// (initdev_dev.go, tag gomail_dev) stays the development ceremony.
 //
 // # Where the ceremony runs and what it writes
 //
@@ -13,10 +13,10 @@ package ceremony
 //     directory: Out/platform/<file> with the names of section 4;
 //   - the client pin into Out/identity-<gen>.pin (not under platform/:
 //     the pin reaches clients with a client update, never through the
-//     data directory, D58). TODO(task-07): store.PlatformPin has only
-//     fields 1 to 3 so far; newPin (pin.go) checks fields 4 to 6 and 8
-//     and returns the identity list in Result.Identities, but writes
-//     them only once task 07 has added them to store;
+//     data directory, D58), with fields 1 to 6 and 8 of
+//     store.PlatformPin (newPin, pin.go; the origin, the witnesses with
+//     their quorum and the identity list 1..gen; field 7 only if Q8 is
+//     decided as proposed);
 //   - private admin and ingest keys into KeyDir (gomail/v1/rec/platform-key,
 //     rights 0600, directory 0700, exclusive create, file names
 //     <role>-<gen>.key as in D58). KeyDir must not be inside Out and Out
@@ -47,9 +47,10 @@ package ceremony
 // (a new ceremony into the same KeyDir refuses with ErrKeyDir until he
 // has).
 //
-// Publish (online, no secret involved) copies an export directory into
-// the data directory and appends every certificate and succession to the
-// log (translog: the ceremony is the writer of platform entries).
+// Publish (online, no secret involved, while no server runs) copies an
+// export directory into the data directory and appends every
+// certificate and succession to the operator log of the data directory
+// (translog: the ceremony is the writer of platform entries).
 // Additions to 9.2: 9.2 names only init, ingest-rotate and reshare;
 // "gomail-ceremony publish --from <out> --data <dir>" (an offline
 // ceremony cannot append to the server's log) and "gomail-ceremony
@@ -65,21 +66,29 @@ package ceremony
 //	Reshare       nothing (new shares on Display only)
 //	Succeed       Out/platform/identity-<g>.pub, identity-<g>.succ;
 //	              Out/identity-<g>.pin with the whole identity list 1..g
-//	Publish       data/platform/<files of Out/platform> (exclusive, except
-//	              witnesses.rec, the server's working copy, which is
-//	              replaced) and one log entry per .cert and .succ, in the
-//	              order successions by generation, then certificates by
-//	              role and generation (translog doc.go "Validity rules")
+//	              (the compromise case is locked, ErrCompromised, Q19)
+//	Publish       data/platform/<files of Out/platform> (exclusive;
+//	              witnesses.rec, the server's working copy, only when the
+//	              data directory has none, and it must equal the pin's
+//	              witnesses and quorum; replaced by the pin's only with
+//	              ReplaceWitnesses) and one log entry per .cert and
+//	              .succ, in the order successions by generation, then
+//	              certificates by role and generation (translog doc.go
+//	              "Validity rules"); a succession of data/platform/ that
+//	              the export depends on and that is not logged yet is
+//	              logged first
 //
 // # --dev from now on
 //
-// "gomail-ceremony init --dev" (InitDev) stays for tests:
-// root without Shamir in an INSECURE file, pin with the development flag
-// (dev = 1). A client accepts a pin with dev = 1 only when its Config has
+// "gomail-ceremony init --dev" (InitDev) stays for tests, and only in a
+// build with the tag gomail_dev (task 15b point 4): root without Shamir
+// in an INSECURE file, pin with the development flag (dev = 1). A
+// client accepts a pin with dev = 1 only when its Config has
 // AllowDevIdentity set; only tests set it, there is no command line flag
 // for it (task 14). So gomailctl never accepts a development identity,
-// with or without a log, --insecure-no-log disappears (task 15) and the
-// RUNBOOK moves to the real ceremony (task 19).
+// with or without a log, --insecure-no-log disappears (task 15; task 15b
+// for gomail-ceremony) and the RUNBOOK moves to the real ceremony (task
+// 19).
 
 import (
 	"crypto/ed25519"
@@ -112,6 +121,14 @@ var (
 	// ErrOutDir: the export directory is not new or empty, or overlaps
 	// the key directory.
 	ErrOutDir = errors.New("ceremony: unusable export directory")
+	// ErrCompromised: a succession after a compromise
+	// (SucceedOptions.Compromised) is locked until the revocation of a
+	// platform generation is specified. TODO(Q19): without a mark in the
+	// pin, the succession or the log, the compromised generation would
+	// go on issuing certificates that Publish, the log and clients
+	// accept (2.3 asks that clients reject every signature of it from
+	// the update on). Nothing is asked or written.
+	ErrCompromised = errors.New("ceremony: not available yet: the revocation of a platform generation is not specified (Q19)")
 )
 
 // MaxShareCount is the largest n of "k-of-n" (shamir allows 255; a
@@ -258,11 +275,12 @@ type InitOptions struct {
 //  5. only then the files of the table above are written; the root, the
 //     shares and all private keys are wiped
 //
-// Result.Pin is the pin written to Out/identity-1.pin (dev = 0), with
-// the identity list (pin field 8, translog doc.go "Pin") holding the one
-// element (1, identity 1); until task 07 extends store.PlatformPin the
-// list is in Result.Identities and the pin file carries fields 1 to 3
-// only (TODO(task-07), pin.go).
+// Result.Pin is the pin written to Out/identity-1.pin (dev = 0): Origin,
+// Witnesses and MinWitnesses of the options (fields 4 to 6) and the
+// identity list (pin field 8, translog doc.go "Pin") holding the one
+// element (1, identity 1). The certificates are valid from Now (the clock
+// of the ceremony computer, which the command line shows before the
+// first prompt).
 func Init(opts InitOptions) (*Result, error) { return runInit(opts) }
 
 // UnlockOptions are the options shared by the ceremonies that need the
@@ -375,15 +393,22 @@ type SucceedOptions struct {
 	UnlockOptions
 	Out string
 	// Compromised marks IdentityGen as compromised (2.3: the succession
-	// chain is useless then). TODO(ask): see Succeed.
+	// chain is useless then). Locked: Succeed refuses it with
+	// ErrCompromised before anything else (TODO(Q19), see Succeed).
 	Compromised bool
-	// Identities is the identity list of the current pin (pin field 8),
-	// ending with IdentityGen and IdentityPub (translog.CheckIdentities);
-	// the new pin carries it plus the new generation.
-	Identities []translog.Identity
-	// Origin, Witnesses and MinWitnesses are copied into the new pin;
-	// the quorum rule of InitOptions applies.
-	Origin       string
+	// Pin is the pin of the current identity: generation and key equal to
+	// IdentityGen and IdentityPub (ErrIdentity otherwise), not a
+	// development pin. The new pin carries its identity list (field 8)
+	// plus the new generation, and its origin, witnesses and quorum
+	// (fields 4 to 6) unless changed below.
+	Pin *store.PlatformPin
+	// Origin, when set, must equal the origin of Pin (ErrOptions): the
+	// origin of a log does not change (a new origin is a new log, Q10
+	// point 4).
+	Origin string
+	// Witnesses and MinWitnesses, when set (not nil, not 0), replace
+	// those of Pin in the new pin: a change only when asked for. The
+	// quorum rule of InitOptions applies to the result.
 	Witnesses    []witness.Key
 	MinWitnesses int
 }
@@ -399,33 +424,62 @@ type SucceedOptions struct {
 //     Out/identity-<g>.pin; existing clients follow the succession from
 //     the log (translog.Log.CheckPlatform on identity-<g>.succ) and
 //     remember the new generation;
-//   - compromise (Compromised): no succession (the attacker could sign
-//     one himself); only the pin Out/identity-<g>.pin for a client update,
-//     listing IdentityGen as revoked only if Q8 is decided as proposed
-//     (translog doc.go "Pin", field 7, TODO(ask) Q8: (role, gen,
-//     revoked_at_size), revoked_at_size the committed log size the
-//     operator reads before the ceremony).
-//     TODO(ask): certificates of admin and ingest keys issued by the
+//   - compromise (Compromised, gomail-ceremony succeed --compromised):
+//     LOCKED (task 15f point 1, Q19 stopping point 2): Succeed returns
+//     ErrCompromised before it checks or asks anything, and the command
+//     line refuses the flag as a usage error. TODO(Q19): the compromised
+//     generation stays in the identity list of the new pin (old
+//     certificates must stay verifiable), and nothing in the pin, the
+//     succession or the log marks it: its owner could go on issuing
+//     ingest-<n>.cert and admin-<n>.cert that Publish copies, the
+//     operator log takes as valid and clients with the new pin accept
+//     (the test TestVerifyCompromisedIdentityStillIssues documents it,
+//     skipped until Q19 is answered). The code below the lock stays as
+//     task 15b built it and is unreachable: no succession (the attacker
+//     could sign one himself); the pin Out/identity-<g>.pin for a client
+//     update and the public key Out/platform/identity-<g>.pub, which
+//     Publish copies into the data directory (no log entry: a public key
+//     is none). Generation g is valid by the pin alone (translog doc.go
+//     "Validity rules": generations of the list need no logged
+//     succession).
+//     TODO(Q19): task 15b asks for a succession that carries a mark
+//     "compromised", after whose log entry (not only after its
+//     valid_from) the predecessor is invalid, handled by clients and
+//     server as translog does it. Neither exists: the succession
+//     gomail/v1/rec/platform-succ (package keys, phase 0) has no such
+//     field, the pin has no field 7 (Q8 is open: (role, gen,
+//     revoked_at_size), translog doc.go "Pin"), Verifier.Revoked stays
+//     empty, and no rule of translog makes a generation invalid from a
+//     log entry on. A new field or record is not built here (strictest
+//     reading: the compromised generation stays valid for everything the
+//     log holds; only what the new generation signs is new). Until then
+//     the compromised ingest key is replaced by IngestRotate under the
+//     new identity: from valid_from of that certificate, once it is
+//     logged, the old ingest generation signs nothing validly (translog
+//     doc.go "Platform generations"; the server refuses it,
+//     ingest.ErrSuperseded).
+//     TODO(Q19): certificates of admin and ingest keys issued by the
 //     compromised generation must be reissued by the new one, which needs
 //     new admin and ingest generations (a certificate file per role and
-//     generation exists only once); the specification does not say so.
+//     generation exists only once; there is no admin rotation, Q8 (d));
+//     the specification does not say so.
 //
-// In both cases the new pin carries the whole identity list (pin field
-// 8): the list of the old pin (passed in Identities, ending with
-// IdentityGen and IdentityPub) plus (IdentityGen+1, new key), so that a
-// new device can check certificates issued by every earlier generation
-// (translog.CheckIdentities, task 03c finding 3; Reading). The operator
-// installs the new pin on the server as well (gomail-server --pin,
-// translog Options.Identities, task 03d finding 2). After a compromise
-// generation IdentityGen+1 has no succession in the log; a later
-// regular succession identity-<IdentityGen+2>.succ is valid against
-// every pin whose list holds IdentityGen+1, because generations of the
-// list need no logged succession (translog doc.go "Validity rules").
+// The new pin carries the whole identity list (pin field 8): the list
+// of Pin (ending with IdentityGen and IdentityPub) plus
+// (IdentityGen+1, new key), so that a new device can check certificates
+// issued by every earlier generation (translog.CheckIdentities, task 03c
+// finding 3; Reading), and origin, witnesses and quorum of Pin unless
+// the options change witnesses or quorum. The operator installs the new
+// pin on the server as well (gomail-server --pin, translog
+// Options.Identities, task 03d finding 2) before Publish (Q10 point 5).
+// Publish requires the succession of the predecessor for a succession
+// of generation 3 or higher (task 15f point 3), so a chain without a gap
+// reaches the log; after a compromise (locked) generation IdentityGen+1
+// would have no succession and the next regular one would need a way
+// around that check (Q19).
 //
-// Every generation of Identities must derive from the rebuilt root
-// (ErrIdentity otherwise). Result.Identities is the new list; the pin
-// file carries it only once task 07 has extended store.PlatformPin
-// (TODO(task-07), pin.go).
+// Every generation of the list must derive from the rebuilt root
+// (ErrIdentity otherwise). Result.Pin is the new pin.
 func Succeed(opts SucceedOptions) (*Result, error) { return runSucceed(opts) }
 
 // PublishOptions configures Publish.
@@ -434,40 +488,99 @@ type PublishOptions struct {
 	From string
 	// Data is the data directory of the server.
 	Data *store.Store
-	// Log receives one Append(translog.KindPlatform, ...) per certificate
-	// and succession.
-	Log translog.Log
-	// Pin is the identity the files must verify against: certificates
-	// signed by an identity generation of the pin's identity list (field
-	// 8) or of a succession above it. The log's anchor is the whole
-	// identity list of this pin (translog Options.Identities, task 03d
-	// finding 2, which replaces the reading of task 03c finding 8f), the
-	// same list the clients and the server judge with.
+	// Pin is the pin the server runs with, with the identity list of
+	// field 8; after a succession the new one (Q10 point 5: the operator
+	// installs the new pin on the server before Publish). The files must
+	// verify against its identity list only: every identity generation
+	// the export or data/platform/ names must be in the list. The log's
+	// anchor is the same list (translog Options.Identities, task 03d
+	// finding 2), the one the clients and the server judge with.
 	Pin *store.PlatformPin
-	// Identities is the identity list of Pin (field 8). TODO(task-07):
-	// store.PlatformPin carries no field 8 yet; until it does, the caller
-	// passes the list here (Result.Identities of Init or Succeed), and
-	// nil means the list of PinIdentities(Pin), which exists only for a
-	// pin of generation 1. It must end with Pin's generation and key
-	// (translog.CheckIdentities).
-	Identities []translog.Identity
+	// Log receives one AppendPlatform per certificate and succession. Nil
+	// (the command line) opens the operator log of Data against Pin as
+	// gomail-server does (OpenLog); tests pass their own.
+	Log translog.Log
+	// ReplaceWitnesses (gomail-ceremony publish --replace-witnesses, task
+	// 15f point 2) replaces platform/witnesses.rec of Data, the server's
+	// working copy, by the witnesses and the quorum of Pin when they
+	// differ, instead of refusing with translog.ErrMismatch: the way a
+	// change made on purpose with succeed --witness/--min-witnesses
+	// reaches a data directory. The replacement is atomic, under the
+	// server lock, and only after every other check passed (in
+	// particular: the pin knows every identity generation of
+	// data/platform/ and of the log). A witnesses.rec in the export must
+	// still equal the pin's.
+	//
+	// The pin file is not signed (store.PlatformPin): with
+	// ReplaceWitnesses the witnesses and the quorum the server will
+	// trust rest on the authenticity of the pin file alone, which the
+	// operator takes from the ceremony computer as his trust anchor,
+	// exactly as for the start of gomail-server. Publish only refuses a
+	// pin that contradicts data/platform/ or the log (an old pin, a
+	// foreign identity); it cannot tell a forged pin of the right
+	// identity list with other witnesses (task 15g point 4).
+	ReplaceWitnesses bool
+	// WitnessesReplaced, when not nil, is called once witnesses.rec was
+	// replaced, with the working copy before and after (for the message
+	// of the command line). It is not called when nothing was replaced.
+	WitnessesReplaced func(before, after *witness.Witnesses)
 }
 
 // Publish copies Out/platform/ of a ceremony into the data directory and
-// logs its certificates and successions (see the table at the top). Every
-// certificate and succession is verified against Pin before anything is
-// written; files that already exist with the same content are skipped,
-// with other content they are store.ErrExists (for a certificate or
-// succession also translog.ErrDuplicate). A certificate <role>-<g>.cert
-// with g > 1 whose predecessor <role>-<g-1>.cert is neither in the
-// export nor in data/platform/ is translog.ErrPrerequisite, as Append
-// would report it (translog doc.go "Validity rules"); a certificate or
-// succession whose signature fails is translog.ErrOrder.
+// logs its certificates and successions (see the table at the top). It
+// holds the server lock locks/server for its whole run (9.1, D70): while
+// a server runs on the data directory it refuses with ErrServer, and no
+// server starts meanwhile. Before anything is written it checks
+//
+//   - platform/ of the data directory against Pin as gomail-server does
+//     at its start (Q10 point 5): an identity generation above the pin's
+//     (identity-<g>.pub, identity-<g>.succ, a certificate issued by it)
+//     or a contradiction to its identity list is translog.ErrMismatch;
+//     so is a succession or a certificate there whose signature does not
+//     verify with the pin's list (task 15g point 2b; the operator
+//     removes such a file on purpose), and a valid succession in the log
+//     above the pin's generation (task 15g point 3, also when its files
+//     are gone from platform/);
+//   - witnesses.rec of the export and of the data directory against the
+//     witnesses and the quorum of Pin (fields 5 and 6): a difference is
+//     translog.ErrMismatch, the working copy is never replaced silently;
+//     it is written from the pin when the data directory has none, and
+//     replaced by the pin's only with ReplaceWitnesses (the export's
+//     must equal the pin's in any case);
+//   - the operator log (OpenLog, when Log is nil): tiles against
+//     tree.rec, the newest published head, if any, with a valid log
+//     signature;
+//   - every certificate and succession against the identity list of Pin:
+//     a generation above it is translog.ErrMismatch, a succession of a
+//     listed generation must name the list's key (translog.ErrMismatch);
+//     files that already exist with the same content are skipped, with
+//     other content they are store.ErrExists (for a certificate or
+//     succession also translog.ErrDuplicate). A certificate
+//     <role>-<g>.cert with g > 1 whose predecessor <role>-<g-1>.cert is
+//     neither in the export nor in data/platform/ is
+//     translog.ErrPrerequisite, as Append would report it (translog
+//     doc.go "Validity rules"). The succession identity-<g>.succ of
+//     every generation g >= 2 that the export depends on (an
+//     identity-<g>.pub, the predecessor of identity-<g+1>.succ, the
+//     issuer of a certificate; tasks 15f point 3 and 15g points 1 and 2)
+//     must be in the export or a valid entry of the log; one that is
+//     only in data/platform/ (a crash before its log entry) counts only
+//     if it verifies against the pin, and Publish then logs it first;
+//     otherwise translog.ErrPrerequisite (a client with an older pin
+//     could not follow the chain; there is no flag around it, the
+//     compromise case that would leave such a gap is locked, Q19); a
+//     certificate or succession whose signature fails is
+//     translog.ErrOrder.
 //
 // Order (translog doc.go "Who writes", later entries: record first, then
-// log entry): all files are written first, then the log entries are
-// appended. A crash in between leaves certificates in platform/ that are
-// not logged, which gives nobody anything (translog doc.go "Platform
-// generations"); running Publish again skips the identical files and
-// appends again (Append is idempotent).
+// log entry, and the head last): all files are written first, then the
+// log entries are appended (translog.Log.AppendPlatform), always in the
+// order of the chain: successions by generation (g-1 before g), then
+// certificates; the head that covers them is signed by the server once
+// it runs again, with the pin it must be started with (gomail-server
+// checks platform/ against it). A crash in between leaves certificates
+// and successions in platform/ that are not logged, which gives nobody
+// anything (translog doc.go "Platform generations"; nothing counts a
+// file of platform/ as logged); running Publish again skips the
+// identical files and appends again (Append is idempotent).
 func Publish(opts PublishOptions) error { return runPublish(opts) }
