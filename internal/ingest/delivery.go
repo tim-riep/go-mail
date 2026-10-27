@@ -36,13 +36,6 @@ func monthIndex(t time.Time) int {
 	return t.Year()*12 + int(t.Month()) - 1
 }
 
-// ImmediateLead is how far before its begin the server already uses an
-// epoch with immediate effect (2.4 lead time rule 2): as soon as it sees
-// the epoch under the mailbox lock, even if its begin is up to five
-// minutes in the future by the server's clock. Planned epochs are used
-// only from their begin on.
-const ImmediateLead = 5 * time.Minute
-
 // target is one recipient mailbox of a delivery.
 type target struct {
 	mbx       *store.Mailbox
@@ -61,40 +54,58 @@ type target struct {
 // verifyChain reads and verifies the epoch chain of a mailbox from epoch
 // 1 to the head of mailbox.rec like the client does it (store.Chain:
 // links, members, discards; signatures by members; log). It returns the
-// chain and the SHA-256 of the head epoch.rec. Epochs beyond the head of
-// mailbox.rec are not used; one that exists is noted in the log (only
-// IDs). The caller holds the mailbox lock (K8).
+// chain and the SHA-256 of the head epoch.rec. A chain verified before is
+// taken from the cache only if every file it was verified from is
+// unchanged (chainCache). Epochs beyond the head of mailbox.rec are not
+// used; one that exists is noted in the log (only IDs). The caller holds
+// the mailbox lock (K8).
 func (in *Ingest) verifyChain(mbx *store.Mailbox) (*store.Chain, [32]byte, error) {
-	var head [32]byte
-	links := store.NewChain()
-	for n := uint32(1); n <= mbx.Epoch; n++ {
-		e, data, err := in.st.ReadEpoch(mbx.ID, n)
+	links, head, ok := in.cachedChain(mbx)
+	if !ok {
+		entry, err := in.verifyChainFull(mbx)
 		if err != nil {
+			in.chains.drop(mbx.ID)
 			return nil, head, err
 		}
-		if err := links.Add(e, data); err != nil {
-			return nil, head, err
-		}
-		pub, err := in.userKey(e.SignerID, e.SignerGen, data)
-		if err != nil {
-			return nil, head, err
-		}
-		if err := e.VerifySignature(pub); err != nil {
-			return nil, head, err
-		}
-		// TODO(phase3-translog): epoch.rec included in the log (2.7).
-		if err := in.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
-			return nil, head, err
-		}
-		head = store.EpochHash(data)
-	}
-	if links.Head() == nil {
-		return nil, head, fmt.Errorf("ingest: no epoch")
+		in.chains.put(mbx.ID, entry)
+		links, head = entry.chain, entry.headHash
 	}
 	if _, err := os.Lstat(in.st.EpochFile(mbx.ID, mbx.Epoch+1)); err == nil {
 		in.log.Info("ingest ignored an epoch beyond the head of mailbox.rec", "mailbox", mbx.ID.String(), "head", mbx.Epoch, "epoch", mbx.Epoch+1)
 	}
 	return links, head, nil
+}
+
+// verifyChainFull verifies the chain without the cache and returns it
+// with what the verification relied on.
+func (in *Ingest) verifyChainFull(mbx *store.Mailbox) (*chainEntry, error) {
+	entry := &chainEntry{head: mbx.Epoch, chain: store.NewChain()}
+	for n := uint32(1); n <= mbx.Epoch; n++ {
+		e, data, err := in.st.ReadEpoch(mbx.ID, n)
+		if err != nil {
+			return nil, err
+		}
+		if err := entry.chain.Add(e, data); err != nil {
+			return nil, err
+		}
+		uk, err := in.userKey(e.SignerID, e.SignerGen, data)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.VerifySignature(uk.pub); err != nil {
+			return nil, err
+		}
+		// TODO(phase3-translog): epoch.rec included in the log (2.7).
+		if err := in.cfg.Log.CheckEpoch(e.MailboxID, e.Number, data); err != nil {
+			return nil, err
+		}
+		entry.headHash = store.EpochHash(data)
+		entry.epochs = append(entry.epochs, epochCheck{hash: entry.headHash, signer: e.SignerID, gen: e.SignerGen, userHash: uk.hash, revoked: uk.revoked})
+	}
+	if entry.chain.Head() == nil {
+		return nil, fmt.Errorf("ingest: no epoch")
+	}
+	return entry, nil
 }
 
 // usableAt reports whether the server may encrypt a mail received at ms
@@ -103,7 +114,7 @@ func (in *Ingest) verifyChain(mbx *store.Mailbox) (*store.Chain, [32]byte, error
 // minutes before its begin on.
 func usableAt(e *store.Epoch, ms int64) bool {
 	if e.Reason.Immediate() {
-		return e.Begin-ImmediateLead.Milliseconds() <= ms
+		return e.Begin-store.ImmediateLead.Milliseconds() <= ms
 	}
 	return e.Begin <= ms
 }
@@ -179,32 +190,42 @@ func (d *delivery) stillValid(t *target) error {
 	return nil
 }
 
+// userKeyResult is the identity key of a signer and what it came from.
+type userKeyResult struct {
+	pub     []byte
+	hash    [32]byte // SHA-256 of user.rec
+	revoked bool     // the generation is not the current one
+}
+
 // userKey returns the identity key of generation gen of a user for the
 // signature of a logged record.
-func (in *Ingest) userKey(id store.ID, gen uint32, logged []byte) ([]byte, error) {
+func (in *Ingest) userKey(id store.ID, gen uint32, logged []byte) (userKeyResult, error) {
+	var res userKeyResult
 	u, raw, err := in.st.ReadUser(id)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	// TODO(phase3-translog): user.rec included in the log (2.7).
 	if err := in.cfg.Log.CheckUser(id, raw); err != nil {
-		return nil, err
+		return res, err
 	}
 	g := u.Generation(gen)
 	if g == nil {
-		return nil, fmt.Errorf("ingest: unknown generation %d", gen)
+		return res, fmt.Errorf("ingest: unknown generation %d", gen)
 	}
 	// TODO(phase3-translog): generation valid only from its log entry on (2.2 rule 3).
 	if err := in.cfg.Log.CheckGeneration(id, gen); err != nil {
-		return nil, err
+		return res, err
 	}
 	if gen != u.Current().Gen {
+		res.revoked = true
 		// TODO(phase3-translog): logged before the revocation (2.2 rule 4, S13).
 		if err := in.cfg.Log.CheckRevokedSignature(id, gen, logged); err != nil {
-			return nil, err
+			return res, err
 		}
 	}
-	return g.IdentityPub, nil
+	res.pub, res.hash = g.IdentityPub, sha256.Sum256(raw)
+	return res, nil
 }
 
 // delivery is one message being received.
@@ -619,8 +640,9 @@ func (d *delivery) writeMeta(t *target, f *headerFields, parsed bool) error {
 	if err != nil {
 		return smtpd.ErrTemporary
 	}
+	hdr := envelope.Header{Kind: envelope.KindMeta, MailboxID: t.mbx.ID, Epoch: t.epoch.Number, FileID: t.mailID, Created: d.received.UnixMilli(), Version: m.Version}
 	data, err := envelope.Seal(
-		envelope.Header{Kind: envelope.KindMeta, MailboxID: t.mbx.ID, Epoch: t.epoch.Number, FileID: t.mailID, Created: d.received.UnixMilli(), Version: m.Version},
+		hdr,
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: t.mbx.ID, Gen: t.epoch.Number, PublicKey: t.epoch.MetaPub}},
 		plain,
 		&envelope.SealOptions{Signer: d.in.ingestSigner(extra)},
@@ -628,8 +650,17 @@ func (d *delivery) writeMeta(t *target, f *headerFields, parsed bool) error {
 	if err != nil {
 		return smtpd.ErrTemporary
 	}
-	if err := store.CreateFileAtomic(filepath.Join(t.dir, "meta.gml"), data); err != nil {
+	path := filepath.Join(t.dir, "meta.gml")
+	if err := store.CreateFileAtomic(path, data); err != nil {
 		return diskErr(err)
+	}
+	if crash("meta-written") {
+		return errCrashed
+	}
+	// Section 7: the server checks its own signature on the bytes written,
+	// without keys, before the mail goes anywhere near the journal.
+	if err := d.in.selfCheck(path, hdr, t.mailHash); err != nil {
+		return fmt.Errorf("%w: %w", smtpd.ErrTemporary, err)
 	}
 	return nil
 }
@@ -637,12 +668,20 @@ func (d *delivery) writeMeta(t *target, f *headerFields, parsed bool) error {
 // writeMarker seals the "unprocessed" marker for pending/ (5.2 step 3).
 func (d *delivery) writeMarker(t *target) error {
 	p := &store.Pending{MailboxID: t.mbx.ID, Epoch: t.epoch.Number, Entries: []store.PendingEntry{{MailID: t.mailID, Unprocessed: true}}}
-	data, err := d.in.sealPending(p, t.mailID, t.epoch, d.received.UnixMilli())
+	data, hdr, err := d.in.sealPending(p, t.mailID, t.epoch, d.received.UnixMilli())
 	if err != nil {
 		return smtpd.ErrTemporary
 	}
-	if err := store.CreateFileAtomic(filepath.Join(t.dir, "marker.gml"), data); err != nil {
+	path := filepath.Join(t.dir, "marker.gml")
+	if err := store.CreateFileAtomic(path, data); err != nil {
 		return diskErr(err)
+	}
+	if crash("marker-written") {
+		return errCrashed
+	}
+	// Section 7: self-check of the marker's signature, as for the metadata.
+	if err := d.in.selfCheck(path, hdr, [32]byte{}); err != nil {
+		return fmt.Errorf("%w: %w", smtpd.ErrTemporary, err)
 	}
 	return nil
 }
@@ -651,23 +690,26 @@ func (in *Ingest) ingestSigner(extra []byte) *envelope.Signer {
 	return &envelope.Signer{Type: envelope.SignerIngest, Gen: in.cfg.IngestGen, Key: in.signer, Extra: extra}
 }
 
-// sealPending seals a term list or marker with file ID id. created is the
-// receipt of the (earliest) mail the file covers: the client applies the
-// epoch rule of 2.4 to it, and a term list written after a newer epoch
-// began is still valid for mails received before (TODO(ask): 3.1 does not
-// define created for kind pending; this is the reading the client checks).
-func (in *Ingest) sealPending(p *store.Pending, id store.ID, e *store.Epoch, created int64) ([]byte, error) {
+// sealPending seals a term list or marker with file ID id and returns it
+// with the header it sealed. created is the receipt of the (earliest)
+// mail the file covers: the client applies the epoch rule of 2.4 to it,
+// and a term list written after a newer epoch began is still valid for
+// mails received before (TODO(ask): 3.1 does not define created for kind
+// pending; this is the reading the client checks).
+func (in *Ingest) sealPending(p *store.Pending, id store.ID, e *store.Epoch, created int64) ([]byte, envelope.Header, error) {
+	hdr := envelope.Header{Kind: envelope.KindPending, MailboxID: p.MailboxID, Epoch: p.Epoch, FileID: id, Created: created}
 	plain, err := p.Encode()
 	if err != nil {
-		return nil, err
+		return nil, hdr, err
 	}
 	defer wipe(plain)
-	return envelope.Seal(
-		envelope.Header{Kind: envelope.KindPending, MailboxID: p.MailboxID, Epoch: p.Epoch, FileID: id, Created: created},
+	data, err := envelope.Seal(
+		hdr,
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: p.MailboxID, Gen: p.Epoch, PublicKey: e.MetaPub}},
 		plain,
-		&envelope.SealOptions{Signer: in.ingestSigner(nil)},
+		&envelope.SealOptions{Signer: in.ingestSigner(pendingSignedExtra(hdr))},
 	)
+	return data, hdr, err
 }
 
 // noteFallback records that the last epoch was used past its month

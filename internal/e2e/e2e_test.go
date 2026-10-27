@@ -390,9 +390,10 @@ func TestNoPlaintext(t *testing.T) {
 	search("after reading")
 	// Aborted receipt (size limit) leaves no trace either.
 	big := msg + strings.Repeat(marker+"\r\n", 1000)
-	s2 := startServer(t, env)
-	s2.srv.Close()
-	srv := smtpd.NewServer(smtpd.Config{MaxSize: 2000, Logger: slog.New(slog.NewTextHandler(s.logs, nil))}, s2.in)
+	// The same backend behind a second SMTP server with a small size
+	// limit: a second backend cannot start while s holds the server lock
+	// (9.1).
+	srv := smtpd.NewServer(smtpd.Config{MaxSize: 2000, Logger: slog.New(slog.NewTextHandler(s.logs, nil))}, s.in)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	go srv.Serve(ln)
 	defer srv.Close()

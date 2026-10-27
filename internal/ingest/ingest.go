@@ -62,6 +62,13 @@ type Config struct {
 	// BatchSize and BatchAge decide when a term list is written (5.4).
 	BatchSize int
 	BatchAge  time.Duration
+	// PeerCheck makes New check, after taking the server lock, that a
+	// client holds its lock on locks/client and that this lock is in
+	// force here (9.1, "Testsperre"); without a running client New fails
+	// with store.ErrPeerLock. The default false only takes the server
+	// lock. Whether the server requires a running client is decided by
+	// the program (gomail-server), not by this package.
+	PeerCheck bool
 }
 
 // Ingest is the backend of the SMTP server.
@@ -71,12 +78,18 @@ type Ingest struct {
 	log    *slog.Logger
 	now    func() time.Time
 	signer ed25519.PrivateKey
+	pub    ed25519.PublicKey // of ingest-<gen>.cert, for the self-check (section 7)
 
 	addrMu    sync.Mutex
 	addrStamp addrStamp
 	addrs     store.Addresses
 
 	queue *queue
+
+	chains chainCache
+
+	releaseOnce sync.Once
+	release     func() // the server lock of 9.1, held from New to Close
 }
 
 type addrStamp struct {
@@ -92,6 +105,12 @@ var ErrConfig = errors.New("ingest: invalid configuration")
 // data directory and returns the backend. The key file lives outside the
 // data directory (section 4). Call Recover before serving and Start to
 // run the preprocessing.
+//
+// New takes the server lock locks/server (9.1) without waiting and holds
+// it until Close; a second server on the same data directory fails with
+// store.ErrLocked. With Config.PeerCheck it then requires the lock of a
+// running client (store.CheckPeerLock) and fails with store.ErrPeerLock
+// otherwise, releasing its own lock.
 func New(cfg Config) (*Ingest, error) {
 	if cfg.Store == nil || cfg.Log == nil {
 		return nil, fmt.Errorf("%w: store and log are required", ErrConfig)
@@ -130,9 +149,21 @@ func New(cfg Config) (*Ingest, error) {
 	if cfg.BatchAge == 0 {
 		cfg.BatchAge = DefaultBatchAge
 	}
-	in := &Ingest{cfg: cfg, st: cfg.Store, log: cfg.Logger, now: cfg.Now, signer: cfg.IngestKey}
+	release, err := cfg.Store.HoldRoleLock(store.RoleServer)
+	if err != nil {
+		return nil, fmt.Errorf("ingest: server lock: %w", err)
+	}
+	if cfg.PeerCheck {
+		if err := cfg.Store.CheckPeerLock(store.RoleClient); err != nil {
+			release()
+			return nil, fmt.Errorf("ingest: client lock: %w", err)
+		}
+	}
+	in := &Ingest{cfg: cfg, st: cfg.Store, log: cfg.Logger, now: cfg.Now, signer: cfg.IngestKey, pub: cert.Pub, release: release}
+	in.chains.init()
 	q, err := newQueue(in)
 	if err != nil {
+		release()
 		return nil, err
 	}
 	in.queue = q
@@ -220,8 +251,16 @@ func (in *Ingest) rollback(txnDir string) error {
 func (in *Ingest) Start() { in.queue.start() }
 
 // Close flushes open term lists and stops the worker. The ephemeral key
-// is wiped; spilled entries in work/ become unreadable.
-func (in *Ingest) Close() error { return in.queue.close() }
+// is wiped; spilled entries in work/ become unreadable. Then the server
+// lock is released. Close may be called more than once.
+func (in *Ingest) Close() error {
+	err := in.queue.close()
+	in.releaseLock()
+	return err
+}
+
+// releaseLock releases the server lock once.
+func (in *Ingest) releaseLock() { in.releaseOnce.Do(in.release) }
 
 // Flush writes all open term lists now (tests, shutdown).
 func (in *Ingest) Flush() error { return in.queue.flushAll() }

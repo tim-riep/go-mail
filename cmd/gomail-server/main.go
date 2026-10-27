@@ -136,6 +136,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	defer keys.Wipe(key)
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	logger.Warn("running without transparency log (--insecure-no-log)")
+	// TODO(task-15): HoldRoleLock(RoleClient)/CheckPeerLock in gomailctl and PeerCheck here (9.1).
 	in, err := ingest.New(ingest.Config{Store: st, Log: tlog, IngestKey: key, IngestGen: gen, Logger: logger})
 	if err != nil {
 		return fail(stderr, err)

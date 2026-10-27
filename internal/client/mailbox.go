@@ -31,15 +31,8 @@ const SupplyMonths = 3
 // that window would be encrypted for the old epoch after the new one began
 // and the client would reject it (DECISIONS D50, which now holds only for
 // planned epochs). Epochs with immediate effect have no delay; the server
-// and the client allow ImmediateLead instead (K8).
+// and the client allow store.ImmediateLead instead (K8).
 const ImmediateDelay = 5 * time.Minute
-
-// ImmediateLead is how far before its begin an epoch with immediate
-// effect is already used (2.4 lead time rules 2 and 3): the server uses
-// it as soon as it sees it under the mailbox lock even if its begin is up
-// to five minutes in the future, and the client accepts a mail for it
-// whose receipt lies up to five minutes before its begin.
-const ImmediateLead = 5 * time.Minute
 
 // InboxName is the folder name of the inbox in folders.gml.
 const InboxName = "INBOX"
@@ -439,7 +432,7 @@ func (c *Client) verifyChain(id store.ID) (*chain, error) {
 //
 //	(a) e is not discarded (rule 3);
 //	(b) e has begun at receipt: Begin(e) <= received, for an epoch with
-//	    immediate effect Begin(e) - ImmediateLead <= received (lead time
+//	    immediate effect Begin(e) - store.ImmediateLead <= received (lead time
 //	    rule 3);
 //	(c) no later epoch k that is not discarded had begun at receipt:
 //	    Begin(k) <= received rejects the file, whatever the reason of k
@@ -456,7 +449,7 @@ func (c *Client) checkEpochRule(ch *chain, e *store.Epoch, received int64) error
 	}
 	begin := e.Begin
 	if e.Reason.Immediate() {
-		begin -= ImmediateLead.Milliseconds()
+		begin -= store.ImmediateLead.Milliseconds()
 	}
 	if begin > received {
 		return fmt.Errorf("%w: epoch %d began after the receipt", ErrStaleEpoch, e.Number)

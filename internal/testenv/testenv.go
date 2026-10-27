@@ -198,8 +198,16 @@ func (e *Env) Mailbox(u *User, name string, addrs ...string) store.ID {
 // of mailbox.rec as the only folder, discards naming every epoch of the
 // chain up to the head of mailbox.rec that is not discarded and begins
 // after begin (2.4 rule 1), epoch.rec in the log and mailbox.rec pointing
-// to the new epoch. u is the only member of the new epoch. It holds the
-// mailbox lock while it writes. Clients do not create such epochs yet;
+// to the new epoch. It holds the mailbox lock while it writes.
+//
+// It serves every reason with immediate effect alike (member-added,
+// member-removed, delegation-ended, recovery-changed, generation-revoked):
+// reason is written into epoch.rec as given and changes nothing else, so
+// the member list is always u alone, whatever the reason says about the
+// members. The reason regular is planned and discards nothing (2.4 rule
+// 2): if discards would not be empty, the epoch record is refused and the
+// test fails; otherwise the result is a planned epoch beginning at begin.
+// Clients do not create epochs with immediate effect yet;
 // tests use it to check how client and server treat them.
 func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason store.Reason, name string) *store.Epoch {
 	e.T.Helper()

@@ -403,6 +403,8 @@ func TestDiskSpaceAndErrors(t *testing.T) {
 	if err := in.Accepting(); err != nil {
 		t.Fatal("exactly 10 % is enough")
 	}
+	// A second server needs the server lock (9.1) of the first.
+	in.releaseLock()
 	in2 := newIngest(t, env, func(c *Config) {
 		c.DiskSpace = func(string) (uint64, uint64, error) { return 0, 0, errors.New("x") }
 	})

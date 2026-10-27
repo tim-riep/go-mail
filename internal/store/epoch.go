@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
+	"time"
 
 	"github.com/tim-riep/go-mail/internal/envelope"
 	"github.com/tim-riep/go-mail/internal/keys"
@@ -31,6 +32,15 @@ func (r Reason) valid() bool { return r >= ReasonRegular && r <= ReasonGeneratio
 // or immediate" in 2.4; M1 builds only the immediate form (QUESTIONS Q5).
 // Only an immediate epoch may discard epochs of the supply.
 func (r Reason) Immediate() bool { return r.valid() && r != ReasonRegular }
+
+// ImmediateLead is how far before its begin an epoch with immediate
+// effect is already used (2.4 lead time rules 2 and 3): the server uses it
+// as soon as it sees it under the mailbox lock even if its begin is up to
+// five minutes in the future by its clock, and the client accepts a mail
+// for it whose receipt lies up to five minutes before its begin. Planned
+// epochs have no such lead: they are used from their begin on. Server
+// (ingest) and client share this one value.
+const ImmediateLead = 5 * time.Minute
 
 // MemberKind distinguishes users, the recovery recipient and delegates
 // (2.4, 2.5).

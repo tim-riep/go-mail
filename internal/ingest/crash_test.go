@@ -49,7 +49,7 @@ func checkAllOrNothing(t *testing.T, env *testenv.Env, u *testenv.User, mbxs []s
 }
 
 func TestCrashDuringReceipt(t *testing.T) {
-	points := []string{"data", "spooled", "journal", "moved-1", "moved-2", "moved-3", "moved-4", "moved-5", "moved-6", "committed"}
+	points := []string{"data", "meta-written", "marker-written", "spooled", "journal", "moved-1", "moved-2", "moved-3", "moved-4", "moved-5", "moved-6", "committed"}
 	for _, p := range points {
 		t.Run(p, func(t *testing.T) {
 			env := testenv.New(t)
@@ -63,6 +63,7 @@ func TestCrashDuringReceipt(t *testing.T) {
 			}
 			crashHook = nil
 			// Restart.
+			kill(in)
 			in2 := newIngest(t, env)
 			checkAllOrNothing(t, env, u, []store.ID{a, b}, p == "committed")
 			// The server keeps working.
@@ -88,6 +89,7 @@ func TestCrashDuringPreprocessing(t *testing.T) {
 			setCrash(t, p)
 			in.Flush()
 			crashHook = nil
+			kill(in)
 			newIngest(t, env)
 			list, _ := u.Client.List(mbx, store.ID{})
 			if len(list) != 2 {

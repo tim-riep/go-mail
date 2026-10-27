@@ -329,12 +329,17 @@ func (q *queue) flushLocked(k batchKey) error {
 		return err
 	}
 	p := &store.Pending{MailboxID: k.mailbox, Epoch: k.epoch, Entries: b.entries}
-	data, err := in.sealPending(p, id, &store.Epoch{MetaPub: b.metaPub}, b.received)
+	data, hdr, err := in.sealPending(p, id, &store.Epoch{MetaPub: b.metaPub}, b.received)
 	for i := range b.entries {
 		b.entries[i].Terms = nil
 	}
 	if err != nil {
 		in.log.Info("ingest could not seal a term list", "mailbox", k.mailbox.String(), "entries", len(p.Entries))
+		return err
+	}
+	// Section 7: a term list whose signature does not verify with the
+	// server's own key is never written; the markers stay.
+	if err := in.selfCheckBytes(data, hdr, [32]byte{}); err != nil {
 		return err
 	}
 	unlock, err := in.st.LockMailbox(k.mailbox)
@@ -351,6 +356,14 @@ func (q *queue) flushLocked(k batchKey) error {
 	}
 	if crash("batch-written") {
 		return errCrashed
+	}
+	// The bytes on disk are checked again; if they do not verify, the term
+	// list is removed and the markers stay.
+	if err := in.selfCheck(in.st.PendingFile(k.mailbox, k.epoch, id), hdr, [32]byte{}); err != nil {
+		if rerr := store.RemoveDurable(in.st.PendingFile(k.mailbox, k.epoch, id)); rerr != nil {
+			in.log.Info("ingest could not remove a term list that failed the self-check", "mailbox", k.mailbox.String(), "batch", id.String())
+		}
+		return err
 	}
 	for i, e := range p.Entries {
 		if err := store.RemoveDurable(in.st.PendingFile(k.mailbox, k.epoch, e.MailID)); err != nil {

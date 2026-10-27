@@ -22,10 +22,21 @@ func newIngest(t *testing.T, env *testenv.Env, mod ...func(*Config)) *Ingest {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { in.Close() })
 	if err := in.Recover(); err != nil {
 		t.Fatal(err)
 	}
 	return in
+}
+
+// kill simulates the end of a crashed server process: its server lock
+// (9.1) is released and nothing is flushed, so that a new server can
+// start on the same data directory.
+func kill(in *Ingest) {
+	in.queue.mu.Lock()
+	in.queue.closed = true
+	in.queue.mu.Unlock()
+	in.releaseLock()
 }
 
 // deliver runs one delivery through the backend interface.
