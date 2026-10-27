@@ -254,7 +254,7 @@ func TestTwoHostScript(t *testing.T) {
 		}
 		for _, want := range []string{"kein Nachweis nach 9.1", "**bestanden**", "Testsperre", "Serversperre", "client lock in force",
 			"no registered user", "Server-Sperre: store: in use", "keine privaten Schlüssel im Export", "kein Klartext", "ohne Datei",
-			"gelöscht: Passphrase-Datei"} {
+			"gelöscht: Passphrase-Datei", "ohne Freigabe nicht", "liest die Mail", "nach der Freigabe"} {
 			if !strings.Contains(p, want) {
 				t.Errorf("protocol without %q", want)
 			}
@@ -317,7 +317,7 @@ func TestTwoHostScript(t *testing.T) {
 			t.Fatalf("script: exit status %d\n%s\nprotocol:\n%s", code, output, p)
 		}
 		for _, want := range []string{"zwei Maschinen, NFSv4", "**bestanden**", "nfs4 mit vers=4.2 local_lock=none",
-			"getrennte Benutzer", "Gruppe " + f.group, "kein Klartext"} {
+			"getrennte Benutzer", "Gruppe " + f.group, "kein Klartext", "nach der Freigabe"} {
 			if !strings.Contains(p, want) {
 				t.Errorf("protocol without %q", want)
 			}

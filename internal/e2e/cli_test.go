@@ -246,12 +246,15 @@ func (p *platform) startWitnessGen(s *serverProc, gen uint32) (stop func()) {
 }
 
 // keygen runs "gomailctl keygen" with the arguments common and answers
-// the three questions from the words shown.
+// the three questions from the words shown. A production gomailctl
+// shows the seed only on a terminal and reads the words only from one
+// (task 13b, tested on a pseudo terminal in cmd/gomailctl); the test
+// build runs on pipes with GOMAILCTL_TEST_KEYGEN_PIPE=1.
 func (p *platform) keygen(common []string) {
 	t := p.t
 	t.Helper()
 	kg := exec.Command(filepath.Join(p.bin, "gomailctl"), append([]string{"keygen"}, common...)...)
-	kg.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple")
+	kg.Env = append(os.Environ(), "GOMAILCTL_PASSPHRASE=correct horse battery staple", "GOMAILCTL_TEST_KEYGEN_PIPE=1")
 	stdin, _ := kg.StdinPipe()
 	stdout, _ := kg.StdoutPipe()
 	stderr, _ := kg.StderrPipe()

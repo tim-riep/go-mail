@@ -46,18 +46,43 @@ func TestUsageAndConfig(t *testing.T) {
 	if run([]string{"sync", "--data", data}, strings.NewReader(""), &out, &errb) != 1 {
 		t.Fatal("missing --platform")
 	}
-	// keygen asks the passphrase twice; a mismatch stops it.
+	// keygen on stand-in terminals asks the passphrase twice; a mismatch
+	// stops it before anything is shown.
 	t.Setenv("GOMAILCTL_PASSPHRASE", "")
-	if run(append([]string{"keygen"}, common...), strings.NewReader("a\nb\n"), &out, &errb) != 1 {
-		t.Fatal("passphrase mismatch")
+	keygen := func(answers map[string]string) (int, string, *keyboard) {
+		screen := &tty{}
+		kb := &keyboard{err: &syncBuf{}, answer: lineSet(answers)}
+		code := run(append([]string{"keygen"}, common...), kb, screen, kb.err)
+		return code, screen.String(), kb
 	}
-	if run(append([]string{"keygen"}, common...), strings.NewReader(""), &out, &errb) != 1 {
-		t.Fatal("no passphrase")
+	for _, c := range []struct {
+		answers map[string]string
+		want    string
+	}{
+		{map[string]string{"Passphrase: ": "a", "wiederholen: ": "b"}, "stimmen nicht überein"},
+		{nil, "keine Passphrase"},
+		{map[string]string{"Passphrase: ": "", "wiederholen: ": ""}, "leere Passphrase"},
+		{map[string]string{"Passphrase: ": strings.Repeat("p", 5000)}, "Zeile zu lang"},
+	} {
+		if code, screen, kb := keygen(c.answers); code != 1 || screen != "" || !strings.Contains(kb.err.String(), c.want) {
+			t.Fatalf("keygen with %v: exit %d, screen %q, %s", c.answers, code, screen, kb.err.String())
+		}
 	}
-	// Wrong words: nothing is created.
-	errb.Reset()
-	if run(append([]string{"keygen"}, common...), strings.NewReader("pw\npw\nx\nx\nx\n"), &out, &errb) != 1 {
-		t.Fatal("wrong words")
+	// Wrong words: nothing is created, the screen is cleared.
+	screen := &tty{}
+	kb := &keyboard{err: &syncBuf{}}
+	kb.answer = func(prompt string) (string, bool) {
+		if wordPromptRe.MatchString(prompt) {
+			return "zoo", true
+		}
+		return lineSet(map[string]string{"Passphrase: ": "pw", "wiederholen: ": "pw", "Bildschirm: ": ""})(prompt)
+	}
+	code := run(append([]string{"keygen"}, common...), kb, screen, kb.err)
+	if code != 1 || !strings.HasSuffix(screen.String(), clearScreen) || !strings.Contains(kb.err.String(), "not confirmed") {
+		t.Fatalf("wrong words: exit %d, %q", code, kb.err.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "c", "keystore")); !os.IsNotExist(err) {
+		t.Fatal("key store after wrong words")
 	}
 	// Commands that need a registered user.
 	if run(append([]string{"sync"}, common...), strings.NewReader("pw\n"), &out, &errb) != 1 {

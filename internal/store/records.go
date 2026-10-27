@@ -802,7 +802,12 @@ func DecodePlatformPin(data []byte) (*PlatformPin, error) {
 // CleanText makes s storable in a record string field of at most max
 // bytes (3.6 rule 3): invalid UTF-8 becomes U+FFFD, control characters
 // other than tab become spaces, the result is in NFC and cut at a
-// character boundary so that it stays in NFC.
+// character boundary so that it stays in NFC. Control characters are
+// the C0 set (U+0000-U+001F), DEL (U+007F), the C1 set (U+0080-U+009F,
+// among them the single-character CSI and OSC of a terminal) and the
+// bidirectional embeddings, overrides and isolates (U+202A-U+202E,
+// U+2066-U+2069), which reorder what a terminal shows (task 13b
+// finding 6).
 func CleanText(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -812,7 +817,7 @@ func CleanText(s string, max int) string {
 	}
 	s = strings.ToValidUTF8(s, "�")
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 && r != '\t' || r == 0x7f {
+		if isControl(r) {
 			return ' '
 		}
 		return r
@@ -832,6 +837,20 @@ func CleanText(s string, max int) string {
 		s = norm.NFC.String(s[:cut])
 	}
 	return s
+}
+
+// isControl reports whether CleanText replaces r: a control character
+// other than tab, or a bidirectional formatting character.
+func isControl(r rune) bool {
+	switch {
+	case r < 0x20:
+		return r != '\t'
+	case r >= 0x7f && r <= 0x9f:
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }
 
 // ------------------------------------------------------ address assignment

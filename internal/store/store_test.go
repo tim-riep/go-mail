@@ -598,6 +598,12 @@ func TestCleanText(t *testing.T) {
 		"bad \xff utf8":  "bad � utf8",
 		"é":             "é",
 		"\x7f":           " ",
+		// C1 controls (task 13b finding 6): the single-character CSI and
+		// OSC of a terminal, NEL; U+00A0 is no control.
+		"a\u009b31mb\u009d0;x\u009cc\u0085d\u0080\u009f\u00a0": "a 31mb 0;x c d  \u00a0",
+		// Bidirectional embeddings, overrides and isolates; LRM, RLM and
+		// U+2065 stay.
+		"\u202aa\u202bb\u202cc\u202dd\u202ee\u2066f\u2067g\u2068h\u2069i\u200e\u200f\u2065\u2029": " a b c d e f g h i\u200e\u200f\u2065\u2029",
 	}
 	for in, want := range cases {
 		if got := CleanText(in, 100); got != want {

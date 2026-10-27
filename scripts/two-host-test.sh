@@ -45,7 +45,8 @@
 #      --require-client-lock starts and sees it
 #   d  end to end: keygen, invite, register, mailbox, address, mail over
 #      SMTP to the server, sync/list/read on the client host, a second
-#      user on the client host, a log head cosigned by the witness
+#      user on the client host who reads the mailbox only after
+#      "gomailctl mailbox share", a log head cosigned by the witness
 #   e  evidence on the export: no private keys (0600 files, key files,
 #      key stores), no plaintext (subject and body token), rights of
 #      every file and directory
@@ -93,9 +94,9 @@
 # transparency log; --log-helper names the test program of internal/e2e
 # (go test -c -tags gomail_test ./internal/e2e), which appends user.rec
 # and epoch.rec as the client will. TODO(task-14): drop --log-helper.
-# gomailctl has no "mailbox share" yet (9.2): step d registers the second
-# user and checks that it cannot read the mailbox, the share itself is
-# skipped. TODO(ask): gomailctl mailbox share.
+# Step d registers a second user, checks that it cannot read the mailbox,
+# shares the mailbox with it from epoch 1 ("gomailctl mailbox share",
+# task 13) and checks that it reads the mail then.
 
 set -eu
 
@@ -104,14 +105,14 @@ set -eu
 # export flag, so none reaches the programs either. GOMAILCTL_PASSPHRASE
 # would take precedence over --passphrase-file; CDPATH, ENV and BASH_ENV
 # change cd and the shells started.
-unset GOMAILCTL_PASSPHRASE GOMAIL_E2E_HELPER CDPATH ENV BASH_ENV \
+unset GOMAILCTL_PASSPHRASE GOMAILCTL_TEST_KEYGEN_PIPE GOMAIL_E2E_HELPER CDPATH ENV BASH_ENV \
 	LOCAL KEEP GROUP SERVER_HOST CLIENT_HOST EXPORT MOUNT PIN WITNESS OUT BIN WORKDIR LOG_HELPER \
 	RUNID SUBJECT BODY ADDR FROM PASSPHRASE RCM P T TBASE T_OURS STATUS STEP MODE WARN PROTO RC XRUN \
 	SRV CER WIT CTL ENV_SRV REDACT PIDS TOOLS RW SW CW RW_OURS SW_OURS CW_OURS \
 	SDATA CDATA KEYS SPIN INGEST ADMIN CPIN WKEY PASS ALICE BOB ROOT BUILD HELP \
 	SID SHOST SUMASK CID CHOST CUMASK GCHECK SGID CGID MOUNTS MLINE FSTYPE MOPTS MARK MARKF MKWORK \
 	DATA_OURS WKEY_OURS PIN_OURS PASS_OURS MARK_OURS MADE_LINK MADE_EXPORT MADE_WORKDIR MADE_SWORKDIR MADE_CWORKDIR \
-	RIGHTS C_ARGS SERVE SMTP LOG KEYGEN INV_A INV_B UID_A UID_B MBX MAILID VKEY ORIGIN WNAME HEADF \
+	RIGHTS C_ARGS SERVE SMTP LOG KEYGEN INV_A INV_B UID_A UID_B MBX NEP MAILID VKEY ORIGIN WNAME HEADF \
 	rc why a b e f m n p w
 IFS=$(printf ' \t\nx')
 IFS=${IFS%x}
@@ -126,7 +127,7 @@ SID='' SHOST='' SUMASK='' CID='' CHOST='' CUMASK='' GCHECK='' SGID='' CGID='' MO
 MARK='' MARKF='' MKWORK=''
 DATA_OURS=0 WKEY_OURS=0 PIN_OURS=0 PASS_OURS=0 MARK_OURS=0
 MADE_LINK=0 MADE_EXPORT=0 MADE_WORKDIR=0 MADE_SWORKDIR=0 MADE_CWORKDIR=0
-RIGHTS='' C_ARGS='' SERVE='' SMTP='' LOG='' KEYGEN='' INV_A='' INV_B='' UID_A='' UID_B='' MBX='' MAILID=''
+RIGHTS='' C_ARGS='' SERVE='' SMTP='' LOG='' KEYGEN='' INV_A='' INV_B='' UID_A='' UID_B='' MBX='' NEP=0 MAILID=''
 VKEY='' ORIGIN='' WNAME='' HEADF=''
 rc=0 why='' a='' b='' e='' f='' m='' n='' p='' w=''
 
@@ -149,8 +150,9 @@ Aufruf:
              das Skript schreibt sie (0600) und löscht sie am Ende (außer mit --keep)
   --log-helper  Testprogramm aus internal/e2e (go test -c -tags gomail_test ./internal/e2e),
              trägt bis Auftrag 14 user.rec und epoch.rec ins Log ein
-  --bin      Verzeichnis der Programme auf beiden Hosts (Standard: PATH; lokal: wird gebaut),
-             gebaut mit -tags gomail_dev,gomail_test (gomail-ceremony init --dev)
+  --bin      Verzeichnis der Programme auf beiden Hosts, Testbuild (-tags gomail_test: keygen über
+             FIFOs) (Standard: PATH; lokal: wird gebaut), gebaut mit -tags gomail_dev,gomail_test
+             (gomail-ceremony init --dev)
   --workdir  darunter legt das Skript auf jedem Host sein eigenes Verzeichnis two-host.XXXXXX
              an, außerhalb von Export und Mount (Standard /tmp, lokal $TMPDIR oder /tmp)
   --out      Verzeichnis für das Protokoll (protokoll.md, darf noch nicht existieren)
@@ -856,7 +858,9 @@ step "d) Ende zu Ende"
 # KEYGEN answers the three word questions of gomailctl keygen. The words
 # never reach a file (task 16b finding 1): standard output comes through
 # a FIFO and stays in the memory of this shell; the answers go through a
-# FIFO to standard input. On SIGINT, SIGTERM or SIGHUP the shell exits
+# FIFO to standard input. A production gomailctl shows the seed only on
+# a terminal (task 13b); the test build (-tags gomail_test) runs keygen
+# on the FIFOs with GOMAILCTL_TEST_KEYGEN_PIPE=1. On SIGINT, SIGTERM or SIGHUP the shell exits
 # through its EXIT trap, which stops keygen and removes the FIFOs and
 # the PID file. The PID of keygen is in the file $kp, which cleanup
 # knows before the start: a keygen left on a host after the connection
@@ -874,7 +878,7 @@ errline() {
 	sed "s/Wort Nr\. [0-9]*: //g" "$t/err" 2>/dev/null | awk "NF { l = \$0 } END { if (l != \"\") print l }" >&2
 }
 mkfifo "$t/in" "$t/out"
-"$ctl" keygen --data "$data" --dir "$dir" --platform "$pin" --insecure-no-log --passphrase-file "$pass" <"$t/in" >"$t/out" 2>"$t/err" &
+GOMAILCTL_TEST_KEYGEN_PIPE=1 "$ctl" keygen --data "$data" --dir "$dir" --platform "$pin" --insecure-no-log --passphrase-file "$pass" <"$t/in" >"$t/out" 2>"$t/err" &
 p=$!
 echo "$p" >"$kp"
 exec 3>"$t/in" 4<"$t/out"
@@ -936,6 +940,7 @@ must client "d=$(q "$CDATA/mailboxes/$MBX/epochs"); n=1; set --
 while [ -f \"\$d/\$n/epoch.rec\" ]; do set -- \"\$@\" \"\$d/\$n/epoch.rec\"; n=\$((n + 1)); done
 [ \$# -gt 0 ] || { echo 'keine Epochen'; exit 1; }
 $HELP $(q "$CDATA") $(q "$CPIN") epoch \"\$@\""
+NEP=$(grep -c '^epoch ' "$T/out") || fail "keine Epoche im Log"
 must server "$SRV address add $(q "$ADDR") --mailbox $(q "$MBX") --data $(q "$SDATA") --admin-key $(q "$ADMIN") --pin $(q "$SPIN")"
 ok "Postfach $MBX mit Adresse <Adresse> (signiert und geloggt auf dem Server-Host)"
 
@@ -985,13 +990,39 @@ for w in 'Received-Kopf: ja' 'Betreff: ja' 'Text: ja'; do
 done
 ok "sync, list und read auf dem Client-Host: Mail $MAILID entschlüsselt, Betreff und Text stimmen (geprüft in der Pipe, ohne Datei)"
 
-md "" "TODO(ask): gomailctl hat kein \`mailbox share\` (9.2); das Teilen mit dem zweiten Benutzer ist übersprungen. Geprüft wird, dass der zweite Benutzer das Postfach ohne Freigabe nicht lesen kann."
 # Only the exit status and standard error count: standard output (a list
 # the second user must not see) goes to /dev/null (task 16c finding 5).
 x client "$CTL list $(q "$MBX") $C_ARGS --dir $(q "$BOB") >/dev/null"
 [ "$RC" -ne 0 ] || fail "der zweite Benutzer liest das Postfach ohne Freigabe"
 if grep -q Testsperre "$T/err"; then fail "zweiter Benutzer scheitert an der Testsperre statt am fehlenden Zugang"; fi
-ok "zweiter Benutzer $UID_B auf dem Client-Host liest $MBX ohne Freigabe nicht (share: TODO(ask), gomailctl mailbox share fehlt)"
+ok "zweiter Benutzer $UID_B auf dem Client-Host liest $MBX ohne Freigabe nicht"
+
+# The share (2.5, 9.2): the wrap of epoch 1 for the second user and an
+# epoch member-added with its supply, which the log helper appends to
+# the log like the epochs of the mailbox (TODO(task-14)).
+must client "$CTL mailbox share $(q "$MBX") $(q "$UID_B") --from 1 $C_ARGS --dir $(q "$ALICE")"
+grep -q "Verpackt für $UID_B: Epochen 1" "$T/out" || fail "share: Epoche 1 nicht für den zweiten Benutzer verpackt"
+must client "d=$(q "$CDATA/mailboxes/$MBX/epochs"); n=1; set --
+while [ -f \"\$d/\$n/epoch.rec\" ]; do [ \$n -le $NEP ] || set -- \"\$@\" \"\$d/\$n/epoch.rec\"; n=\$((n + 1)); done
+[ \$# -gt 0 ] || { echo 'keine neue Epoche'; exit 1; }
+$HELP $(q "$CDATA") $(q "$CPIN") epoch \"\$@\""
+must_sec client "{ $CTL list $(q "$MBX") $C_ARGS --dir $(q "$BOB") || echo $RCM \$?; } |
+GM_M=$RCM LC_ALL=C awk '
+\$1 == ENVIRON[\"GM_M\"] && NF == 2 { rc = \$2; next }
+{ print \$1, \"Größe\", \$4; if (index(\$0, ENVIRON[\"GM_S\"])) n++ }
+END { print \"Zeilen mit dem Betreff: \" n + 0; if (rc != \"\") { print \"Exit \" rc; exit 1 } }'" \
+	"gomailctl list $MBX $C_ARGS --dir $BOB | awk ...   # nur Mail-ID und Größe ins Protokoll, keine Datei"
+grep -q 'Zeilen mit dem Betreff: 1' "$T/out" || fail "der zweite Benutzer sieht die Mail nach der Freigabe nicht"
+must_sec client "{ $CTL read $(q "$MBX") $(q "$MAILID") $C_ARGS --dir $(q "$BOB") || echo $RCM \$?; } |
+GM_M=$RCM LC_ALL=C awk '
+\$1 == ENVIRON[\"GM_M\"] && NF == 2 { rc = \$2; next }
+index(\$0, ENVIRON[\"GM_B\"]) { b = 1 }
+END {
+	if (b) print \"Text: ja\"
+	if (rc != \"\") { print \"Exit \" rc; exit 1 }
+}'" "gomailctl read $MBX $MAILID $C_ARGS --dir $BOB | awk ...   # nur das Prüfergebnis ins Protokoll, keine Datei"
+grep -q 'Text: ja' "$T/out" || fail "read des zweiten Benutzers: Text fehlt"
+ok "mailbox share $MBX an $UID_B ab Epoche 1: der zweite Benutzer liest die Mail $MAILID nach der Freigabe (geprüft in der Pipe, ohne Datei)"
 
 must server "pub=$(q "$SDATA/platform/ingest-1.pub")
 h=\$({ printf 'gomail-log\n\001'; cat \"\$pub\"; } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8)

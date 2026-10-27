@@ -1,19 +1,36 @@
-// Command gomailctl is the user's client (9.2). Phase 1:
+// Command gomailctl is the user's client (9.2):
 //
-//	gomailctl keygen
+//	gomailctl keygen [--shares k-of-n]
 //	gomailctl register --invite <code>
 //	gomailctl mailbox create <name>
+//	gomailctl mailbox share <mailbox-id> <user-id> [--from <epoch>] [--to <epoch>]
+//	gomailctl mailbox revoke <mailbox-id> <user-id>
 //	gomailctl sync
+//	gomailctl device lost
+//	gomailctl restore [--shares <k>]
 //	gomailctl list <mailbox-id> [--folder <name>]
 //	gomailctl read <mailbox-id> <mail-id>
+//	gomailctl search <mailbox-id> <term> [--since YYYY-MM]
+//	gomailctl flag <mailbox-id> <mail-id> [--set a,b] [--clear c]
 //	gomailctl inspect <file>
+//
+// The commands of task 13 (keygen --shares, mailbox share and revoke,
+// device lost, restore, search, flag) live in the files cmd_*.go; see
+// commands.go for the exit codes (0 success, 1 error, 2 usage error, 3
+// client.ErrPartial) and for the commands of 9.2 that are not built.
 //
 // Common flags: --data <dir> (data directory), --dir <dir> (client
 // directory, default ~/.config/gomailctl), --platform <file> (trusted
 // platform identity, identity-1.pin of the ceremony) and
 // --insecure-no-log (required until task 14 builds the client log). The
 // passphrase of the key store is read from GOMAILCTL_PASSPHRASE, from
-// --passphrase-file or from standard input.
+// --passphrase-file or from standard input (one line of at most 4096
+// bytes).
+//
+// The seed and shares appear only on a terminal and are cleared from it
+// (screen.go): keygen requires a terminal on standard output and on
+// standard input; seed and share words typed on a terminal are read with
+// the echo off (task 13b).
 //
 // Every command but inspect holds the shared client lock locks/client
 // and works only while the lock of a running gomail-server is in force
@@ -22,6 +39,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,15 +56,24 @@ import (
 	"github.com/tim-riep/go-mail/internal/translog/translogtest"
 )
 
-func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
+func main() {
+	relayBrokenPipe()
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
 
 const usage = `Aufruf:
-  gomailctl keygen                         [gemeinsame Optionen]
+  gomailctl keygen [--shares k-of-n]       [gemeinsame Optionen]
   gomailctl register --invite <code>       [gemeinsame Optionen]
   gomailctl mailbox create <name>          [gemeinsame Optionen]
+  gomailctl mailbox share <postfach-id> <benutzer-id> [--from <epoche>] [--to <epoche>] [gemeinsame Optionen]
+  gomailctl mailbox revoke <postfach-id> <benutzer-id> [gemeinsame Optionen]
   gomailctl sync                           [gemeinsame Optionen]
+  gomailctl device lost                    [gemeinsame Optionen]
+  gomailctl restore [--shares <k>]         [gemeinsame Optionen]
   gomailctl list <postfach-id> [--folder <name>] [gemeinsame Optionen]
   gomailctl read <postfach-id> <mail-id>   [gemeinsame Optionen]
+  gomailctl search <postfach-id> <begriff> [--since JJJJ-MM] [gemeinsame Optionen]
+  gomailctl flag <postfach-id> <mail-id> [--set a,b] [--clear c] [gemeinsame Optionen]
   gomailctl inspect <datei>
 
 Gemeinsame Optionen:
@@ -59,6 +86,7 @@ Gemeinsame Optionen:
 
 type env struct {
 	stdin  *bufio.Reader
+	in     io.Reader // the standard input stdin reads, for the terminal checks
 	stdout io.Writer
 	stderr io.Writer
 	now    func() time.Time
@@ -94,7 +122,7 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	e := &env{stdin: bufio.NewReader(stdin), stdout: stdout, stderr: stderr, now: time.Now}
+	e := &env{stdin: bufio.NewReader(stdin), in: stdin, stdout: stdout, stderr: stderr, now: time.Now}
 	return e.run(args)
 }
 
@@ -102,6 +130,9 @@ func (e *env) run(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprint(e.stderr, usage)
 		return 2
+	}
+	if code, ok := e.dispatch(args); ok {
+		return code
 	}
 	cmd := args[0]
 	fs := e.flags(cmd)
@@ -116,7 +147,7 @@ func (e *env) run(args []string) int {
 		fmt.Fprint(e.stderr, usage)
 		return 2
 	}
-	want := map[string]int{"keygen": 0, "register": 0, "mailbox": 2, "sync": 0, "list": 1, "read": 2, "inspect": 1}
+	want := map[string]int{"register": 0, "mailbox": 2, "sync": 0, "list": 1, "read": 2, "inspect": 1}
 	n, ok := want[cmd]
 	if !ok || len(pos) != n || cmd == "mailbox" && pos[0] != "create" || cmd == "register" && e.invite == "" {
 		fmt.Fprint(e.stderr, usage)
@@ -131,8 +162,6 @@ func (e *env) run(args []string) int {
 	}
 	defer release()
 	switch cmd {
-	case "keygen":
-		return e.keygen(cfg)
 	case "register":
 		code, err := store.ParseID(strings.TrimSpace(e.invite))
 		if err != nil {
@@ -177,6 +206,9 @@ func (e *env) run(args []string) int {
 
 func (e *env) fail(err error) int {
 	fmt.Fprintln(e.stderr, "gomailctl:", err)
+	if errors.Is(err, client.ErrPartial) {
+		return exitPartial
+	}
 	return 1
 }
 
@@ -230,9 +262,11 @@ func (e *env) config() (client.Config, func(), error) {
 }
 
 // passphrase reads the passphrase: GOMAILCTL_PASSPHRASE, the file, or a
-// line from standard input. Input on a terminal is echoed: phase 1 has no
-// terminal control (only the standard library and x/crypto, x/mod,
-// x/text); use the file or the variable for real secrets.
+// line of at most 4096 bytes from standard input (readSecret; a longer
+// line is refused, task 13b finding 5). Input on a terminal is echoed;
+// keygen clears the screen with its scroll-back buffer before it shows
+// the seed. Use the file or the variable for real secrets.
+// TODO(ask): whether the passphrase too is read with the echo off.
 func (e *env) passphrase(twice bool) ([]byte, error) {
 	if v := os.Getenv("GOMAILCTL_PASSPHRASE"); v != "" {
 		return []byte(v), nil
@@ -246,11 +280,16 @@ func (e *env) passphrase(twice bool) ([]byte, error) {
 	}
 	read := func(prompt string) ([]byte, error) {
 		fmt.Fprint(e.stderr, prompt)
-		line, err := e.stdin.ReadString('\n')
-		if err != nil && line == "" {
+		line, err := e.readSecret()
+		if errors.Is(err, errLongLine) {
+			return nil, fmt.Errorf("Passphrase: %w (höchstens %d Bytes)", err, e.stdin.Size())
+		}
+		if err != nil {
 			return nil, errors.New("keine Passphrase")
 		}
-		return []byte(strings.TrimRight(line, "\r\n")), nil
+		p := bytes.Clone(line)
+		clear(line)
+		return p, nil
 	}
 	p, err := read("Passphrase: ")
 	if err != nil {
@@ -259,9 +298,13 @@ func (e *env) passphrase(twice bool) ([]byte, error) {
 	if twice {
 		q, err := read("Passphrase wiederholen: ")
 		if err != nil {
+			keys.Wipe(p)
 			return nil, err
 		}
-		if string(p) != string(q) {
+		same := bytes.Equal(p, q)
+		keys.Wipe(q)
+		if !same {
+			keys.Wipe(p)
 			return nil, errors.New("die Passphrasen stimmen nicht überein")
 		}
 	}
@@ -269,46 +312,6 @@ func (e *env) passphrase(twice bool) ([]byte, error) {
 		return nil, errors.New("leere Passphrase")
 	}
 	return p, nil
-}
-
-// prompter shows the words and reads the answers from standard input.
-type prompter struct{ e *env }
-
-func (p prompter) ShowWords(words []string) error {
-	fmt.Fprintln(p.e.stdout, "Ihr Seed (24 Wörter). Schreiben Sie ihn auf Papier; er wird danach gelöscht:")
-	for i, w := range words {
-		fmt.Fprintf(p.e.stdout, "%2d. %-10s", i+1, w)
-		if i%4 == 3 {
-			fmt.Fprintln(p.e.stdout)
-		}
-	}
-	fmt.Fprintln(p.e.stdout)
-	return nil
-}
-
-func (p prompter) AskWord(pos int) (string, error) {
-	fmt.Fprintf(p.e.stderr, "Wort Nr. %d: ", pos)
-	line, err := p.e.stdin.ReadString('\n')
-	if err != nil && line == "" {
-		return "", errors.New("keine Eingabe")
-	}
-	// Only the line terminator is removed. TODO(S11): normalization of
-	// the input (spaces, case) is not decided yet.
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-func (e *env) keygen(cfg client.Config) int {
-	pass, err := e.passphrase(true)
-	if err != nil {
-		return e.fail(err)
-	}
-	defer keys.Wipe(pass)
-	id, err := client.Keygen(cfg, pass, prompter{e})
-	if err != nil {
-		return e.fail(err)
-	}
-	fmt.Fprintf(e.stdout, "Benutzer %s angelegt (noch nicht registriert).\n", id)
-	return 0
 }
 
 func (e *env) list(c *client.Client, mbxArg string) int {
@@ -333,9 +336,12 @@ func (e *env) list(c *client.Client, mbxArg string) int {
 		}
 	}
 	mails, err := c.List(mbx, folder)
+	// The subject is the only plaintext of the metadata shown (task 13:
+	// no plaintext in the output but the subject of list and search).
+	// TODO(ask): the sender column of phase 1 is dropped for it.
 	for _, m := range mails {
 		t := time.UnixMilli(m.Meta.Received).UTC().Format("2006-01-02 15:04")
-		fmt.Fprintf(e.stdout, "%s  %s  %7d  %-30.30s  %s\n", m.ID, t, m.Meta.Size, m.Meta.From, m.Meta.Subject)
+		fmt.Fprintf(e.stdout, "%s  %s  %7d  %s\n", m.ID, t, m.Meta.Size, m.Meta.Subject)
 	}
 	if err != nil {
 		return e.fail(err)
