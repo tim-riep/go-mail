@@ -89,8 +89,9 @@
 //  4. State has Fork set: refuse (ErrFork), permanently.
 //  5. size < stored size: refuse (ErrConsistency); not permanent, the
 //     server may serve an old candidate after a restart.
-//  6. size == stored size: hash differs -> store the head as fork
-//     evidence, set Fork, refuse (ErrFork) permanently: two heads of one
+//  6. size == stored size: hash differs (whatever its time line; the
+//     hash is compared first) -> store the head as fork evidence, set
+//     Fork, refuse (ErrFork) permanently: two heads of one
 //     size signed by the log key prove a split view. Same hash: time >=
 //     stored time (ErrTime), cosign (refresh for freshness). Reading
 //     (task 03b, finding S5): 2.7 forbids two heads of one size "with
@@ -114,19 +115,78 @@
 //
 // The key file is outside the state directory. The state directory holds
 // no private key.
+//
+// New creates a missing state directory with rights 0700 and refuses one
+// that grants any right to group or others (whoever can delete a .fork
+// file could make the witness forget a fork), a key file with rights
+// other than owner-only and a key file inside the state directory. The
+// stored head is read back only if it carries a valid cosignature by the
+// witness's own key and the configured origin (ErrState otherwise); the
+// log signature in it is not checked again, so that removing a rotated
+// --log-key keeps the state usable. A .fork file sets Fork whatever it
+// holds (fail closed).
+//
+// # Readings of task 08
+//
+//   - Proof: with no stored head and for a head of the stored size the
+//     proof must be empty (ErrConsistency), as for the client
+//     (translog.Verifier.CheckHead). Poll requests a proof only for a
+//     head larger than the stored one.
+//   - Order: the rules run in the order 4, 1, 2, 5, 6, 7 (a forked
+//     witness refuses everything first). A head of the stored size with
+//     another hash but a time beyond the clock skew is refused with
+//     ErrTime and is not recorded as a fork.
+//   - Exactly one log signature: a head that carries valid signatures by
+//     two configured log keys is refused (ErrProtocol), because the
+//     cosign body has exactly two lines (translog.MaxSignatures). The log
+//     signature is forwarded only in its canonical base64 encoding
+//     (ErrProtocol otherwise).
+//   - Repetition: Ed25519 signatures are deterministic, so the
+//     cosignature of an unchanged head is the same line. Poll does not
+//     post it again when the candidate already carries that exact line,
+//     and Cosign rewrites the state only when the stored note changes.
+//   - POST answers: 200 and 409 end the round without error (409: the
+//     next round fetches the new candidate); 400, 403 and every other
+//     status are ErrProtocol. Network failures are ErrUnavailable.
+//   - HTTP: every request, from sending it to reading the whole
+//     response, ends after Config.Timeout (RequestTimeout by default;
+//     ErrUnavailable). A body is read at most up to its limit plus one
+//     byte (MaxHeadNote, MaxProofBody, MaxErrorBody), then the
+//     connection is dropped. The protocol knows no redirects: New uses
+//     a copy of a client given in Config.HTTP whose CheckRedirect
+//     returns http.ErrUseLastResponse, so a 3xx is a status like any
+//     other (ErrProtocol) and the caller's client is not changed.
+//   - Fork evidence: when the .fork file cannot be written, Fork is
+//     still set in memory and the error wraps ErrFork and ErrState;
+//     Serve ends with it like with any fork, so the witness never runs
+//     on without the evidence on disk (task 08b).
+//   - Log lines of the witness carry sizes, the first four bytes of the
+//     root hash in hex, status codes and the text of this package's
+//     error variables only (never a body or an error from the network).
 package witness
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
-	"io"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 
+	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
 )
 
@@ -150,32 +210,61 @@ const (
 	MaxKeyFile = 512
 	// DefaultInterval is the polling interval of serve.
 	DefaultInterval = 10 * time.Second
+	// RequestTimeout is the default of Config.Timeout.
+	RequestTimeout = 30 * time.Second
+	// MaxErrorBody is the most of a /cosign response body the witness
+	// reads (and discards).
+	MaxErrorBody = 1 << 10
 )
 
 // Errors. Every error of this package wraps one of them.
 var (
-	ErrSignature      = errors.New("witness: head is not signed by the log")
-	ErrOrigin         = errors.New("witness: head of another origin")
-	ErrTime           = errors.New("witness: head time out of range")
-	ErrConsistency    = errors.New("witness: head is not an extension of the last cosigned head")
-	ErrFork           = errors.New("witness: log presented two heads of one size; cosigning stopped")
-	ErrState          = errors.New("witness: unusable state directory")
-	ErrKey            = errors.New("witness: unusable key")
-	ErrProtocol       = errors.New("witness: protocol violation")
-	ErrNotImplemented = errors.New("witness: not implemented yet")
+	ErrSignature   = errors.New("witness: head is not signed by the log")
+	ErrOrigin      = errors.New("witness: head of another origin")
+	ErrTime        = errors.New("witness: head time out of range")
+	ErrConsistency = errors.New("witness: head is not an extension of the last cosigned head")
+	ErrFork        = errors.New("witness: log presented two heads of one size; cosigning stopped")
+	ErrState       = errors.New("witness: unusable state directory")
+	ErrKey         = errors.New("witness: unusable key")
+	ErrProtocol    = errors.New("witness: protocol violation")
+	ErrConfig      = errors.New("witness: invalid configuration")
+	ErrUnavailable = errors.New("witness: log server not reachable")
 )
+
+// sentinels lists the error variables in the order reason checks them.
+var sentinels = []error{ErrFork, ErrSignature, ErrOrigin, ErrTime, ErrConsistency, ErrState, ErrKey, ErrConfig, ErrUnavailable, ErrProtocol, ErrWitnesses}
+
+// reason returns the text of the error variable err wraps, never the
+// text of a wrapped foreign error (log lines, see the package comment).
+func reason(err error) string {
+	for _, s := range sentinels {
+		if errors.Is(err, s) {
+			return s.Error()
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "context ended"
+	}
+	return "witness: unexpected error"
+}
 
 // Config configures a witness (gomail-witness serve).
 type Config struct {
-	Log      string   // base URL of the log server (--log)
+	Log      string   // base URL of the log server (--log), http or https
 	LogKeys  []string // note verifier keys of the log signer (--log-key)
 	Origin   string   // pinned origin (--origin), translog.CheckOrigin
 	KeyFile  string   // note signer key of the witness (--key), 0600
 	StateDir string   // --state
 	Interval time.Duration
-	Now      func() time.Time
-	HTTP     *http.Client
-	Logger   *slog.Logger // IDs, sizes and status codes only
+	// Timeout bounds every HTTP request of the witness, from sending it
+	// to reading the whole response; 0 means RequestTimeout.
+	Timeout time.Duration
+	Now     func() time.Time
+	// HTTP is the client for the log server, nil for a default one. New
+	// uses a copy whose CheckRedirect refuses to follow redirects
+	// (http.ErrUseLastResponse); the client given is not changed.
+	HTTP   *http.Client
+	Logger *slog.Logger // IDs, sizes and status codes only
 }
 
 // State is what the witness keeps per origin.
@@ -188,18 +277,209 @@ type State struct {
 }
 
 // Witness is a configured witness with its key loaded and its state
-// directory locked.
+// directory locked. Its methods may be called concurrently.
 type Witness struct {
 	cfg    Config
 	signer note.Signer
-	known  note.Verifiers
+	known  note.Verifiers // the configured log keys
+	own    note.Verifiers // the witness's own key
+	base   *url.URL
+	client *http.Client
+	log    *slog.Logger
+	now    func() time.Time
+	// write stores a state file durably; tests replace it to simulate a
+	// crash before the state is written (rule 8).
+	write func(path string, data []byte) error
+
+	mu      sync.Mutex
+	release func() // nil once closed
+	state   State
+	stored  []byte // the note of state.Head as stored, nil before the first
 }
 
 // New loads the key, locks the state directory and reads the state.
-func New(cfg Config) (*Witness, error) { return nil, ErrNotImplemented }
+func New(cfg Config) (*Witness, error) {
+	w := &Witness{cfg: cfg, now: cfg.Now, log: cfg.Logger, write: store.WritePrivateFileAtomic}
+	if w.now == nil {
+		w.now = time.Now
+	}
+	if w.log == nil {
+		w.log = slog.New(slog.DiscardHandler)
+	}
+	if err := translog.CheckOrigin(cfg.Origin); err != nil {
+		return nil, fmt.Errorf("%w: %w: %v", ErrConfig, ErrOrigin, err)
+	}
+	if cfg.Interval < 0 {
+		return nil, fmt.Errorf("%w: negative interval", ErrConfig)
+	}
+	if w.cfg.Interval == 0 {
+		w.cfg.Interval = DefaultInterval
+	}
+	if cfg.Timeout < 0 {
+		return nil, fmt.Errorf("%w: negative timeout", ErrConfig)
+	}
+	if w.cfg.Timeout == 0 {
+		w.cfg.Timeout = RequestTimeout
+	}
+	// The protocol knows no redirects; a 3xx is a protocol violation
+	// like any other unexpected status. A given client is copied, so
+	// the caller's client keeps its own CheckRedirect.
+	c := http.Client{Timeout: w.cfg.Timeout}
+	if cfg.HTTP != nil {
+		c = *cfg.HTTP
+	}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	w.client = &c
+	base, err := parseBase(cfg.Log)
+	if err != nil {
+		return nil, err
+	}
+	w.base = base
+	if w.known, err = logVerifiers(cfg.LogKeys); err != nil {
+		return nil, err
+	}
+	if cfg.StateDir == "" || cfg.KeyFile == "" {
+		return nil, fmt.Errorf("%w: key file and state directory are required", ErrConfig)
+	}
+	if err := prepareStateDir(cfg.StateDir); err != nil {
+		return nil, err
+	}
+	if inside(cfg.KeyFile, cfg.StateDir) {
+		return nil, fmt.Errorf("%w: the key file must not lie in the state directory", ErrKey)
+	}
+	signer, own, err := loadKey(cfg.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	w.signer, w.own = signer, note.VerifierList(own)
+	release, err := store.LockFile(filepath.Join(cfg.StateDir, lockFile))
+	if err != nil {
+		return nil, fmt.Errorf("%w: lock: %w", ErrState, err)
+	}
+	w.release = release
+	if err := w.load(); err != nil {
+		release()
+		return nil, err
+	}
+	return w, nil
+}
+
+// parseBase checks the base URL of the log server: http or https, a
+// host, no user information, query or fragment.
+func parseBase(s string) (*url.URL, error) {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return nil, fmt.Errorf("%w: --log must be an http or https URL without user, query or fragment", ErrConfig)
+	}
+	return u, nil
+}
+
+// logVerifiers parses the configured verifier keys of the log signer.
+func logVerifiers(vkeys []string) (note.Verifiers, error) {
+	if len(vkeys) == 0 {
+		return nil, fmt.Errorf("%w: no log key", ErrKey)
+	}
+	var list []note.Verifier
+	for _, k := range vkeys {
+		v, err := note.NewVerifier(k)
+		if err != nil {
+			return nil, fmt.Errorf("%w: log key: %v", ErrKey, err)
+		}
+		if v.Name() != translog.LogSignerName {
+			return nil, fmt.Errorf("%w: a log key must have the name %s", ErrKey, translog.LogSignerName)
+		}
+		for _, o := range list {
+			if o.KeyHash() == v.KeyHash() {
+				return nil, fmt.Errorf("%w: log key given twice", ErrKey)
+			}
+		}
+		list = append(list, v)
+	}
+	return note.VerifierList(list...), nil
+}
+
+// inside reports whether path lies in dir, after resolving symbolic
+// links where possible.
+func inside(path, dir string) bool {
+	rel, err := filepath.Rel(resolve(dir), resolve(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolve returns the absolute path of p with symbolic links resolved
+// in p or, if p does not exist, in its directory.
+func resolve(p string) string {
+	a, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	if r, err := filepath.EvalSymlinks(a); err == nil {
+		return r
+	}
+	if r, err := filepath.EvalSymlinks(filepath.Dir(a)); err == nil {
+		return filepath.Join(r, filepath.Base(a))
+	}
+	return a
+}
 
 // State returns the state for the configured origin.
-func (w *Witness) State() (*State, error) { return nil, ErrNotImplemented }
+func (w *Witness) State() (*State, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.release == nil {
+		return nil, fmt.Errorf("%w: witness closed", ErrState)
+	}
+	s := w.state
+	if s.Head != nil {
+		h := *s.Head
+		h.Sigs = append([]note.Signature(nil), h.Sigs...)
+		h.Note = append([]byte(nil), h.Note...)
+		s.Head = &h
+	}
+	return &s, nil
+}
+
+// Close releases the state directory. Calling it twice is harmless.
+func (w *Witness) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.release != nil {
+		w.release()
+		w.release = nil
+	}
+	return nil
+}
+
+// openHead applies rule 1 to a signed head from the server: at most
+// translog.MaxHeadNote bytes, exactly one valid signature by a
+// configured log key (ErrSignature without one, ErrProtocol with two or
+// a non-canonical encoding of it), a strict head text (ErrProtocol) and
+// the configured origin (ErrOrigin).
+func (w *Witness) openHead(msg []byte) (*translog.Head, error) {
+	if len(msg) > translog.MaxHeadNote {
+		return nil, fmt.Errorf("%w: signed head too long", ErrProtocol)
+	}
+	h, err := translog.OpenHead(msg, w.known)
+	if err != nil {
+		var unverified *note.UnverifiedNoteError
+		var invalid *note.InvalidSignatureError
+		if _, nerr := note.Open(msg, w.known); errors.As(nerr, &unverified) || errors.As(nerr, &invalid) {
+			return nil, fmt.Errorf("%w: %v", ErrSignature, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrProtocol, err)
+	}
+	if len(h.Sigs) != 1 {
+		return nil, fmt.Errorf("%w: head carries %d log signatures", ErrProtocol, len(h.Sigs))
+	}
+	raw, err := base64.StdEncoding.DecodeString(h.Sigs[0].Base64)
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != h.Sigs[0].Base64 {
+		return nil, fmt.Errorf("%w: log signature not in canonical base64", ErrProtocol)
+	}
+	if h.Origin != w.cfg.Origin {
+		return nil, ErrOrigin
+	}
+	return h, nil
+}
 
 // Cosign applies the rules of the package documentation to a signed
 // head and a consistency proof from the stored head, stores the new
@@ -208,22 +488,143 @@ func (w *Witness) State() (*State, error) { return nil, ErrNotImplemented }
 // other line of the candidate (task 03c finding 8d). The stored state
 // keeps the same two lines.
 func (w *Witness) Cosign(head []byte, proof tlog.TreeProof) ([]byte, error) {
-	return nil, ErrNotImplemented
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.release == nil {
+		return nil, fmt.Errorf("%w: witness closed", ErrState)
+	}
+	if w.state.Fork { // rule 4
+		return nil, ErrFork
+	}
+	h, err := w.openHead(head) // rule 1
+	if err != nil {
+		return nil, err
+	}
+	if h.Time > w.now().UnixMilli()+translog.MaxClockSkew.Milliseconds() { // rule 2
+		return nil, fmt.Errorf("%w: head lies in the future", ErrTime)
+	}
+	last := w.state.Head
+	switch {
+	case last == nil: // rule 3
+		if len(proof) != 0 {
+			return nil, fmt.Errorf("%w: proof without a stored head", ErrConsistency)
+		}
+	case h.Size < last.Size: // rule 5
+		return nil, fmt.Errorf("%w: size %d below the stored size %d", ErrConsistency, h.Size, last.Size)
+	case h.Size == last.Size: // rule 6
+		if h.Hash != last.Hash {
+			return nil, w.fork(head)
+		}
+		if h.Time < last.Time {
+			return nil, fmt.Errorf("%w: head older than the stored head", ErrTime)
+		}
+		if len(proof) != 0 {
+			return nil, fmt.Errorf("%w: proof for a head of the stored size", ErrConsistency)
+		}
+	default: // rule 7
+		if h.Size > translog.MaxTreeSize {
+			return nil, fmt.Errorf("%w: size above the limit", ErrProtocol)
+		}
+		if h.Time < last.Time {
+			return nil, fmt.Errorf("%w: head older than the stored head", ErrTime)
+		}
+		if err := translog.CheckTreeProof(proof, h.Size, h.Hash, last.Size, last.Hash); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrConsistency, err)
+		}
+	}
+	text, err := h.Text()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProtocol, err)
+	}
+	body, err := note.Sign(&note.Note{Text: string(text), Sigs: h.Sigs[:1]}, w.signer)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sign: %v", ErrKey, err)
+	}
+	if !bytes.Equal(body, w.stored) { // rule 8: durable before it leaves
+		if err := w.write(w.path(headExt), body); err != nil {
+			return nil, fmt.Errorf("%w: write: %w", ErrState, err)
+		}
+	}
+	h.Note = append([]byte(nil), body...)
+	w.state.Head, w.stored = h, h.Note
+	return append([]byte(nil), body...), nil
 }
 
-// Poll runs one round: fetch the head, fetch the proof, Cosign, post.
-func (w *Witness) Poll(ctx context.Context) error { return ErrNotImplemented }
+// fork records the evidence of a split view durably and stops the
+// witness for good (rule 6). Fork is set even when the evidence cannot
+// be written (fail closed); the error then wraps ErrState as well.
+func (w *Witness) fork(head []byte) error {
+	w.state.Fork = true
+	if err := w.write(w.path(forkExt), head); err != nil {
+		return fmt.Errorf("%w (evidence not stored: %w: %w)", ErrFork, ErrState, err)
+	}
+	return ErrFork
+}
 
-// Close releases the state directory.
-func (w *Witness) Close() error { return ErrNotImplemented }
+// State files.
+const (
+	lockFile = "lock"
+	headExt  = ".head"
+	forkExt  = ".fork"
+)
 
-// Serve runs Poll every cfg.Interval until ctx ends (gomail-witness
-// serve). A fork stops it with ErrFork.
-func Serve(ctx context.Context, cfg Config) error { return ErrNotImplemented }
+// path returns the name of a state file of the configured origin.
+func (w *Witness) path(ext string) string {
+	sum := sha256.Sum256([]byte(w.cfg.Origin))
+	return filepath.Join(w.cfg.StateDir, hex.EncodeToString(sum[:])+ext)
+}
 
-// Keygen creates a witness key named name (CheckName) with randomness
-// from r (crypto/rand if nil), writes the signer key to keyFile (0600,
-// exclusive) and returns the verifier key line.
-func Keygen(name, keyFile string, r io.Reader) (vkey string, err error) {
-	return "", ErrNotImplemented
+// prepareStateDir creates a missing state directory with rights 0700 and
+// refuses one that grants rights to group or others.
+func prepareStateDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("%w: %w", ErrState, err)
+		}
+		if err := store.SyncDir(filepath.Dir(filepath.Clean(dir))); err != nil {
+			return fmt.Errorf("%w: %w", ErrState, err)
+		}
+	} else if !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("%w: %w", ErrState, err)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrState, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%w: not a directory", ErrState)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%w: rights %04o, the state directory must be 0700", ErrState, fi.Mode().Perm())
+	}
+	return nil
+}
+
+// load reads the state of the configured origin (under the lock).
+func (w *Witness) load() error {
+	if err := store.RemoveTemp(w.cfg.StateDir); err != nil {
+		return fmt.Errorf("%w: %w", ErrState, err)
+	}
+	w.state = State{Origin: w.cfg.Origin}
+	if _, err := os.Lstat(w.path(forkExt)); err == nil {
+		w.state.Fork = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %w", ErrState, err)
+	}
+	data, err := store.ReadFileLimited(w.path(headExt), translog.MaxHeadNote)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrState, err)
+	}
+	h, err := translog.OpenHead(data, w.own)
+	if err != nil {
+		return fmt.Errorf("%w: stored head: %v", ErrState, err)
+	}
+	if h.Origin != w.cfg.Origin {
+		return fmt.Errorf("%w: stored head of another origin", ErrState)
+	}
+	w.state.Head, w.stored = h, h.Note
+	return nil
 }

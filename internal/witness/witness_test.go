@@ -2,7 +2,6 @@ package witness
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -136,31 +135,6 @@ func TestProofFormat(t *testing.T) {
 		if _, err := ParseProof([]byte(bad)); !errors.Is(err, ErrProtocol) {
 			t.Fatalf("accepted %q", bad)
 		}
-	}
-}
-
-func TestStubs(t *testing.T) {
-	if _, err := New(Config{}); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("New")
-	}
-	w := &Witness{}
-	if _, err := w.State(); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("State")
-	}
-	if _, err := w.Cosign(nil, nil); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("Cosign")
-	}
-	if err := w.Poll(context.Background()); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("Poll")
-	}
-	if err := w.Close(); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("Close")
-	}
-	if err := Serve(context.Background(), Config{}); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("Serve")
-	}
-	if _, err := Keygen("w", "", nil); !errors.Is(err, ErrNotImplemented) {
-		t.Fatal("Keygen")
 	}
 }
 
