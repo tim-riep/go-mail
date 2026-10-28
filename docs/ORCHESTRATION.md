@@ -181,3 +181,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   - Q22: Haltepunkt 3.
   - Ältere offene Punkte siehe `docs/QUESTIONS.md`.
 - **Aufräumen:** Unter `.claude/worktrees/` liegen noch Worktrees früherer, schon zusammengeführter Aufträge, einige davon gesperrt. Sie werden vor der Abnahme entfernt; der Worktree von 09e bleibt bestehen.
+- Fortsetzung am 28.10. abends: Q22 ist beantwortet mit Variante (b), „eine Runde jetzt“. 09f läuft als vierte Runde der Linie 09b; das ist eine Abweichung von Regel 6 auf Anweisung des Auftraggebers. Danach folgen Spezifikations- und Angreiferprüfung und ein Volllauf einschließlich `internal/bench`. Bleiben Funde über niedrig, geht die Frage erneut an den Auftraggeber.
