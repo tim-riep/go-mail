@@ -127,3 +127,10 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - D84 Schritt 4: gescheiterte Neuausstellung → ErrPartial + Vormerkung, Sync setzt fort; Search/List/Read tolerant.
 - Orchestrator-Entscheidung: zurückgespieltes pending nach Segmentlöschung wird über Merkmal „indexiert“ im bestehenden Eintrag je Mail geschlossen (durch legitime Mails begrenzt).
 - AUDIT: Nachfolger gelöscht + markierter Inhalt zurückgelegt → Treffer fehlen (Verfügbarkeit, Löschen kann der Angreifer ohnehin).
+
+## Aus der Spezifikationsprüfung von 20a (niedrig, für 20)
+- `TestPtyRestoreStderrClosed` (pty13d_linux_test.go:309): Schleife bis inputQueued==0 wartet meist nicht (TIOCINQ 0 in 884/1000 direkt nach dem Schreiben) → erst auf >0 warten oder quiet mit Echo.
+- `terminalID` füllt st_dev ungeprüft → Test `terminalID(slave).dev == Stat(slave).Dev`.
+- `wordRun` (twohost_test.go:1170): Trenner nur 1–4 Nicht-Buchstaben; eingerückter Seed wird nicht gefunden → Trenner beliebiger Länge aus Leerraum.
+- Veraltete Kommentare: translog.go:43 („Warning is printed … with Unverified“), doc.go:1173 („only --insecure-no-log … until task 15“).
+- AUDIT: ceremony/publish.go:84 readExport öffnet `<from>/platform` mit os.Open ohne Prüfung → FIFO lässt publish hängen (Betreibereingabe).
