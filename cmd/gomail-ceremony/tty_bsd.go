@@ -48,3 +48,7 @@ func discardOutput(fd uintptr) error {
 // (tcflow(fd, TCOON): TIOCSTART), which on these systems lifts every
 // stop of the output, by an XOFF as well.
 func restartOutput(fd uintptr) error { return ioctlValue(fd, syscall.TIOCSTART, 0) }
+
+// resumeOutput is restartOutput (TIOCSTART), which stops nothing before
+// it (task 20a point 3: the last step of the abort path, term.resume).
+func resumeOutput(fd uintptr) error { return restartOutput(fd) }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -66,9 +68,26 @@ func TestMain(m *testing.M) {
 //	fsize0            RLIMIT_FSIZE 0 before the program runs: a write to
 //	                  a regular file fails with EFBIG and raises SIGXFSZ
 //	                  (task 15m point 3)
+//	stop-at-exit      once the abort path runs, every request that sets
+//	                  terminal attributes (the restore of the echo and
+//	                  of the flow control) first stops the output of
+//	                  stdout and stderr (TCOOFF), as a restart of the
+//	                  program (TCOOFF, then TCOON) that ran late would
+//	                  (task 20a point 3)
 func childHooks(name string) {
 	switch name {
 	case "":
+	case "stop-at-exit":
+		var tm atomic.Pointer[term]
+		probeHook = func(t *term) { tm.Store(t) }
+		ioctl = func(fd, req uintptr, arg unsafe.Pointer) error {
+			if t := tm.Load(); t != nil && t.dead.Load() && req == ioctlSetTermios {
+				for _, out := range []uintptr{1, 2} {
+					ioctlValue(out, ioctlFlowCtl, flowOutOff)
+				}
+			}
+			return sysIoctl(fd, req, arg)
+		}
 	case "fsize0":
 		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{}); err != nil {
 			os.Exit(3)
@@ -141,7 +160,7 @@ type pty struct {
 	shown map[int]string
 
 	shownAt []int // output offsets just behind every share line shown
-	sentAt  []int // output offsets at which input was sent
+	sentAt  []int // output offsets at which input was sent; guarded by mu
 
 	// afterType, when set, is called by converse once the n-th share
 	// is typed (sent with Enter).
@@ -270,19 +289,79 @@ func (p *pty) output() string {
 
 func (p *pty) send(s string) {
 	p.t.Helper()
-	p.sentAt = append(p.sentAt, len(p.output()))
-	if _, err := p.master.Write([]byte(s)); err != nil {
+	if err := p.write(s); err != nil {
 		p.t.Fatal(err)
 	}
 }
 
+// write is send without the test: it may run on a goroutine of its own
+// (answerEarly).
+func (p *pty) write(s string) error {
+	off := len(p.output())
+	p.mu.Lock()
+	p.sentAt = append(p.sentAt, off)
+	p.mu.Unlock()
+	_, err := p.master.Write([]byte(s))
+	return err
+}
+
 // confirm answers a confirmation with Enter as a holder does: not at
 // once, but answerPause after the prompt appeared, longer than the
-// confirmDelay of the program (task 15n finding 3).
+// confirmDelay of the program (task 15n finding 3). Should the program
+// take it as too early all the same (a loaded machine let the program
+// begin its wait late) and ask again with earlyHint, it is answered
+// again (answerEarly, task 20a point 7), and converse leaves that prompt
+// to it.
 func (p *pty) confirm() {
 	p.t.Helper()
 	time.Sleep(answerPause)
+	off := len(p.output())
 	p.send("\n")
+	go answerEarly(func() []byte { return []byte(p.output()) }, off, func() { p.write("\n") }, p.exited)
+}
+
+// earlyHintShown is earlyHint as a terminal shows it (ONLCR).
+var earlyHintShown = []byte(strings.ReplaceAll(earlyHint, "\n", "\r\n"))
+
+// answerEarly answers a confirmation once more (enter, answerPause after
+// the prompt was asked again) when the program took it as too early: as
+// long as earlyHint is the first output behind off on the terminal of
+// the prompts (output), the echo of the Enter aside. It returns once
+// anything else comes first there, once stop is closed, or after a
+// minute. So a confirmation that a loaded machine delivered too early
+// costs a repetition, not the timeout of the test (task 20a point 7),
+// and a hint that a test provokes on purpose later (an Enter typed
+// twice) is never answered: the program had answered this confirmation
+// with other output first.
+func answerEarly(output func() []byte, off int, enter func(), stop <-chan struct{}) {
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); {
+		select {
+		case <-stop:
+			return
+		case <-time.After(2 * time.Millisecond):
+		}
+		out := output()
+		if len(out) < off {
+			return
+		}
+		rest := bytes.TrimLeft(out[off:], "\r\n")
+		switch {
+		case len(rest) < len(earlyHintShown) && bytes.HasPrefix(earlyHintShown, rest):
+			continue // nothing yet, or the hint not complete yet
+		case !bytes.HasPrefix(rest, earlyHintShown):
+			return
+		}
+		// The hint and the prompt after it are one write.
+		time.Sleep(answerPause)
+		off = len(output())
+		enter()
+	}
+}
+
+// askedAgain reports whether the prompt that ends at p.pos and is m long
+// comes right behind earlyHint: confirm answers it (answerEarly).
+func (p *pty) askedAgain(m string) bool {
+	return strings.HasSuffix(p.output()[:p.pos-len(m)], string(earlyHintShown))
 }
 
 // lflag returns the local modes of the terminal.
@@ -459,7 +538,9 @@ func (p *pty) converse(queue []string) {
 		var share string
 		switch {
 		case strings.HasPrefix(m[0], "Inhaber"), strings.HasPrefix(m[0], "Anteil notiert"):
-			p.confirm()
+			if !p.askedAgain(m[0]) {
+				p.confirm()
+			}
 			continue
 		case m[3] != "":
 			var i int
@@ -499,16 +580,23 @@ func (p *pty) check(extra ...string) string {
 	return out
 }
 
+// anyShareLine is a share line as the program shows it.
+var anyShareLine = regexp.MustCompile(`Anteil \d+/\d+: [a-z ]+\r\n`)
+
 // checkShares is check without the confirmations, with at least
 // minClears clears.
 func (p *pty) checkShares(minClears int, extra ...string) string {
 	p.t.Helper()
 	out := p.output()
 	for _, ty := range p.typed {
+		// A share line shown after the input is no echo of it (task 20a
+		// point 6): reshare shows new shares after the old ones were
+		// typed, and one of them may hold a pair of words of an old one.
+		after := anyShareLine.ReplaceAllString(out[ty.off:], "\n")
 		for _, l := range ty.lines {
 			ws := strings.Fields(l)
 			for i := 0; i+2 <= len(ws); i++ {
-				if pair := ws[i] + " " + ws[i+1]; strings.Contains(out[ty.off:], pair) {
+				if pair := ws[i] + " " + ws[i+1]; strings.Contains(after, pair) {
 					p.t.Fatalf("typed words %q echoed", pair)
 				}
 			}
@@ -543,12 +631,18 @@ func (p *pty) checkConfirm(out string) {
 			p.t.Fatalf("share line %d never cleared", n+1)
 		}
 		sent := 0
+		p.mu.Lock()
 		for _, off := range p.sentAt {
 			if off >= s && off < s+c {
 				sent++
 			}
 		}
-		if k := strings.Count(out[s:s+c], "Anteil notiert?"); k != 1 || sent != 1 {
+		p.mu.Unlock()
+		// A confirmation the program took as too early (earlyHint) is
+		// asked again and answered again (answerEarly); every prompt
+		// still gets exactly one input.
+		again := strings.Count(out[s:s+c], string(earlyHintShown))
+		if k := strings.Count(out[s:s+c], "Anteil notiert?"); k != 1+again || sent != 1+again {
 			t := out[s : s+c]
 			p.t.Fatalf("share line %d: %d confirmation prompts and %d inputs before the clear: %q", n+1, k, sent, t)
 		}

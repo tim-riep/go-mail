@@ -31,10 +31,17 @@ type logSetup struct {
 
 func newLogSetup(t *testing.T) *logSetup {
 	t.Helper()
+	return newLogSetupAt(t, time.Now().Add(-time.Hour))
+}
+
+// newLogSetupAt is newLogSetup with the certificates valid from
+// validFrom.
+func newLogSetupAt(t *testing.T, validFrom time.Time) *logSetup {
+	t.Helper()
 	dir := t.TempDir()
 	s := &logSetup{dir: dir, data: filepath.Join(dir, "data"), keys: filepath.Join(dir, "keys")}
 	// InitDev logs the certificates and writes witnesses.rec (task 15).
-	res, err := ceremony.InitDev(s.data, s.keys, time.Now().Add(-time.Hour), nil, 0)
+	res, err := ceremony.InitDev(s.data, s.keys, validFrom, nil, 0)
 	if errors.Is(err, ceremony.ErrDev) {
 		t.Skip("needs the development ceremony (ceremony.InitDev): go test -tags gomail_dev,gomail_test")
 	}

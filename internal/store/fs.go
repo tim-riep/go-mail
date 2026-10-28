@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 var (
@@ -219,8 +220,15 @@ func RemoveDurable(path string) error {
 
 // ReadFileLimited reads path if it is a regular file of at most max
 // bytes. The size is checked before anything is allocated.
+//
+// The file is opened with O_NONBLOCK and checked with fstat after the
+// open (task 20a point 2): a FIFO, or a device, put in place of a file
+// of the data directory (or given as a pin or key file) is refused as
+// not regular, and the open, which waits for a writer on a FIFO without
+// O_NONBLOCK, returns at once; no reader (server, client, ceremony)
+// hangs at it. On a regular file O_NONBLOCK changes nothing.
 func ReadFileLimited(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(path))

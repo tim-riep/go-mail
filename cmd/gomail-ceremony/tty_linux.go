@@ -57,3 +57,12 @@ func restartOutput(fd uintptr) error {
 	}
 	return err
 }
+
+// resumeOutput lets the output of the terminal fd run again with TCOON
+// alone, without the TCOOFF of restartOutput (task 20a point 3): the
+// last step of the abort path (term.resume). It lifts a stop by a
+// TCOOFF, the only stop the program causes itself (restartOutput, in
+// the goroutines of waking), and stops nothing for a moment, so that the
+// program never exits between a TCOOFF and its TCOON. It waits for
+// nothing.
+func resumeOutput(fd uintptr) error { return ioctlValue(fd, ioctlFlowCtl, flowOutOn) }

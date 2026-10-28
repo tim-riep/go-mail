@@ -36,6 +36,9 @@ type vt struct {
 	mfd    int
 	paused atomic.Bool
 	before syscall.Termios
+	// prompts is the terminal of standard error, where the prompts
+	// appear (confirm); nil: this one.
+	prompts *vt
 
 	mu  sync.Mutex
 	buf []byte
@@ -122,11 +125,18 @@ func (v *vt) send(s string) {
 }
 
 // confirm answers a confirmation with Enter answerPause after the prompt
-// appeared (pty.confirm).
+// appeared (pty.confirm), and again when the program took it as too
+// early (answerEarly on the terminal of the prompts, task 20a point 7).
 func (v *vt) confirm() {
 	v.t.Helper()
 	time.Sleep(answerPause)
+	src := v
+	if v.prompts != nil {
+		src = v.prompts
+	}
+	off := len(src.output())
 	v.send("\n")
+	go answerEarly(src.output, off, func() { v.m.Write([]byte("\n")) }, v.stop)
 }
 
 // waitFor waits until the terminal showed a match of re; false if the
@@ -258,6 +268,7 @@ func abortRun(t *testing.T, w1 string, c abortCase) {
 		}
 	}
 	in, out, errw := vts[c.layout[0]], vts[c.layout[1]], vts[c.layout[2]]
+	in.prompts = errw
 	target := vts[c.target]
 	outDir, kd := filepath.Join(base, "out"), filepath.Join(base, "keys")
 	cmd := exec.Command(os.Args[0], "init", "--shares", "2-of-2", "--out", outDir, "--keys", kd, "--origin", "o", "--witness", w1, "--min-witnesses", "1")

@@ -25,7 +25,7 @@ func isTerminalFd(uintptr) bool { return false }
 
 func isPtyMaster(uintptr) bool { return false }
 
-func terminalID(uintptr) (uint64, bool) { return 0, false }
+func terminalID(uintptr) (termID, bool) { return termID{}, false }
 
 func disableEcho(uintptr) (func() error, error) {
 	return nil, errors.New("echo cannot be switched off on this system")

@@ -171,8 +171,13 @@ func TestPTYSignalSalvo(t *testing.T) {
 	}
 	window := calib.took
 	t.Logf("third share typed to exit without a signal: %v", window)
-	count := func(name string, runs int, needHit bool, sigs []syscall.Signal) {
-		var complete, aborted, completeSignalled int
+	// The coverage (both outcomes, and a run with exit code 0 although
+	// the salvo hit it) counts over both salvos together (task 20a point
+	// 6): on a loaded machine the 25 runs of the second one may all end
+	// the same way. The invariant holds in every run (salvoRun).
+	var complete, aborted, completeSignalled int
+	count := func(name string, runs int, sigs []syscall.Signal) {
+		var complete1, aborted1, completeSignalled1 int
 		for i := 0; i < runs; i++ {
 			var delay time.Duration
 			if k := i % 25; k >= 5 {
@@ -182,24 +187,27 @@ func TestPTYSignalSalvo(t *testing.T) {
 				r := salvoRun(t, w1, sigs, delay)
 				switch {
 				case r.complete && r.sent > 0:
-					completeSignalled++
-					complete++
+					completeSignalled1++
+					complete1++
 				case r.complete:
-					complete++
+					complete1++
 					window = (3*window + r.took) / 4
 				default:
-					aborted++
+					aborted1++
 				}
 			})
 		}
 		t.Logf("%s: %d runs, %d exit 0 with the export complete (%d of them hit by the salvo), %d exit 130 with nothing written, none killed; window at the end %v",
-			name, runs, complete, completeSignalled, aborted, window)
-		if aborted == 0 || complete == 0 || (needHit && completeSignalled == 0) {
-			t.Fatalf("%s: the salvos do not cover both outcomes", name)
-		}
+			name, runs, complete1, completeSignalled1, aborted1, window)
+		complete += complete1
+		aborted += aborted1
+		completeSignalled += completeSignalled1
 	}
-	count("sigint", 100, true, []syscall.Signal{syscall.SIGINT})
-	count("mixed", 25, false, []syscall.Signal{syscall.SIGTSTP, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGINT})
+	count("sigint", 100, []syscall.Signal{syscall.SIGINT})
+	count("mixed", 25, []syscall.Signal{syscall.SIGTSTP, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGINT})
+	if aborted == 0 || complete == 0 || completeSignalled == 0 {
+		t.Fatalf("the salvos together do not cover both outcomes: %d exit 0 (%d hit), %d exit 130", complete, completeSignalled, aborted)
+	}
 }
 
 // TestPTYTwoTerminals (task 15b point 0b, Q17 finding 2): stdin (and

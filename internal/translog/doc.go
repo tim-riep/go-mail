@@ -873,11 +873,10 @@
 // witness.WitnessSchema refers to it. store keeps its own constants of
 // the same value (store.MaxPinFile, MaxPinWitnesses, MaxPinIdentities,
 // MaxOrigin) because it cannot import translog; TestStoreLimits checks
-// that they agree. Requirement on task 14: client.Config does not have
-// AllowDevIdentity yet (ceremony/api.go names it); task 14 adds it and
-// refuses a pin with dev = 1 unless it is set (only tests set it, no
-// command line flag), replacing today's coupling of the dev flag to
-// --insecure-no-log.
+// that they agree. Task 14 added client.Config.AllowDevIdentity: a
+// client refuses a pin with dev = 1 unless it is set (only tests set
+// it, no command line flag; ErrDevIdentity). The dev flag is no longer
+// coupled to --insecure-no-log, which no command has.
 //
 // Size (finding 03d-9, correcting "below 10 KiB" of task 03c): one
 // element of field 8 costs 82 bytes in the canonical encoding, so the

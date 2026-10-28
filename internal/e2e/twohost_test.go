@@ -624,7 +624,9 @@ func newKeygenWrapper(t *testing.T, h *twoHost, dir string) *keygenWrapper {
 		"\t> >(exec tee "+shq(kw.words)+")\n")
 	t.Cleanup(func() {
 		if g := kw.gate(); g > 0 {
-			syscall.Kill(-g, syscall.SIGKILL)
+			// kill(1) as for the run (detached.kill): syscall.Kill does not
+			// build on Windows (go vet, task 20a).
+			exec.Command("kill", "-s", "KILL", "--", "-"+strconv.Itoa(g)).Run()
 		}
 	})
 	return kw
@@ -1104,11 +1106,18 @@ func seedWords(b []byte) []string {
 	return w
 }
 
-// filesWithWords returns the files under dirs that hold the seed words:
-// one of them with its number ("7. word") or at least three of them as
-// whole words (the answers to the word questions).
+// filesWithWords returns the files under dirs that hold the words of a
+// seed or a share: one of them with its number ("7. word"), or at least
+// three of them that follow each other in the seed, one after the other
+// in the file (task 20a point 6: three words of the seed anywhere in a
+// file, such as "able", "about" and "add" in a log or a binary, are
+// no hit).
 func filesWithWords(t *testing.T, words []string, dirs ...string) []string {
 	t.Helper()
+	var runs []*regexp.Regexp
+	for i := 0; i+3 <= len(words); i++ {
+		runs = append(runs, wordRun(words[i:i+3]))
+	}
 	var found []string
 	for _, dir := range dirs {
 		err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
@@ -1122,17 +1131,7 @@ func filesWithWords(t *testing.T, words []string, dirs ...string) []string {
 			if err != nil {
 				return err
 			}
-			n := 0
-			for i, w := range words {
-				if bytes.Contains(b, []byte(fmt.Sprintf("%d. %s", i+1, w))) {
-					n = len(words)
-					break
-				}
-				if wholeWord(b, w) {
-					n++
-				}
-			}
-			if n >= 3 {
+			if hasWords(b, words, runs) {
 				found = append(found, path)
 			}
 			return nil
@@ -1144,18 +1143,55 @@ func filesWithWords(t *testing.T, words []string, dirs ...string) []string {
 	return found
 }
 
-func wholeWord(b []byte, w string) bool {
-	letter := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
-	for off := 0; ; {
-		i := bytes.Index(b[off:], []byte(w))
-		if i < 0 {
-			return false
-		}
-		i += off
-		j := i + len(w)
-		if (i == 0 || !letter(b[i-1])) && (j == len(b) || !letter(b[j])) {
+// hasWords reports whether b holds one of words with its number, or a
+// run of three words that follow each other in words (runs, wordRun).
+func hasWords(b []byte, words []string, runs []*regexp.Regexp) bool {
+	for i, w := range words {
+		if bytes.Contains(b, []byte(fmt.Sprintf("%d. %s", i+1, w))) {
 			return true
 		}
-		off = i + 1
+	}
+	for _, re := range runs {
+		if re.Match(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// wordRun matches the words ws as whole words one after the other,
+// apart by one to four characters that are no letters (a space, a line
+// break, ", ", "\",\"").
+func wordRun(ws []string) *regexp.Regexp {
+	q := make([]string, len(ws))
+	for i, w := range ws {
+		q[i] = regexp.QuoteMeta(w)
+	}
+	return regexp.MustCompile(`(?i)(^|[^a-z])` + strings.Join(q, `[^a-z]{1,4}`) + `($|[^a-z])`)
+}
+
+// TestHasWords (task 20a point 6): a hit is a word with its number or
+// three words of the seed in their order; three words scattered over a
+// file, or two in order, are none.
+func TestHasWords(t *testing.T) {
+	words := []string{"abandon", "ability", "able", "about", "above"}
+	var runs []*regexp.Regexp
+	for i := 0; i+3 <= len(words); i++ {
+		runs = append(runs, wordRun(words[i:i+3]))
+	}
+	for in, want := range map[string]bool{
+		"3. able":                          true,
+		"ability able about":               true,
+		"x\nABLE\nABOUT\nABOVE\n":          true,
+		`["abandon","ability","able"]`:     true,
+		"able to talk about it, above all": false,
+		"about able ability":               false,
+		"abandon ability":                  false,
+		"abandonability able about":        false,
+		"ability able aboutx":              false,
+	} {
+		if got := hasWords([]byte(in), words, runs); got != want {
+			t.Errorf("%q: %v, want %v", in, got, want)
+		}
 	}
 }

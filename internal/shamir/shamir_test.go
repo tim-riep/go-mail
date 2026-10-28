@@ -261,6 +261,16 @@ func TestShareFromWordsRejects(t *testing.T) {
 		f(w)
 		return w
 	}
+	// Two different words to swap (task 20a point 6): the split is
+	// random, and two equal words, swapped, give the same share (about
+	// one run in 2048 for words 0 and 1).
+	other := 1
+	for other < len(good) && good[other] == good[0] {
+		other++
+	}
+	if other == len(good) {
+		t.Fatal("all words of the share equal")
+	}
 	cases := []struct {
 		name  string
 		words []string
@@ -272,7 +282,7 @@ func TestShareFromWordsRejects(t *testing.T) {
 		{"24 words", good[:24], ErrWordCount},
 		{"unknown word", mut(func(w []string) { w[3] = "notaword" }), ErrUnknownWord},
 		{"uppercase", mut(func(w []string) { w[3] = strings.ToUpper(w[3]) }), ErrUnknownWord},
-		{"swapped words", mut(func(w []string) { w[0], w[1] = w[1], w[0] }), ErrChecksum},
+		{"swapped words", mut(func(w []string) { w[0], w[other] = w[other], w[0] }), ErrChecksum},
 		{"changed word", mut(func(w []string) {
 			if w[10] == "zoo" {
 				w[10] = "abandon"

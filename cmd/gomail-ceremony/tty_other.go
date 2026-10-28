@@ -46,6 +46,11 @@ func wakeOutput(uintptr, bool) error {
 	return errors.New("the output cannot be restarted on this system")
 }
 
+// resumeOutput is unreachable as disableEcho is; it fails closed.
+func resumeOutput(uintptr) error {
+	return errors.New("the output cannot be restarted on this system")
+}
+
 // flushInput is unreachable as disableEcho is; it fails closed.
 func flushInput(uintptr) error {
 	return errors.New("input cannot be discarded on this system")

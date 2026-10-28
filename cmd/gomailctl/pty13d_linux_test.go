@@ -303,7 +303,14 @@ func TestPtyRestoreStderrClosed(t *testing.T) {
 	r.Close()
 	p.waitEcho(t)
 	p.typeIn(t, strings.Join(ws[:12], " ")+"\n")
-	time.Sleep(200 * time.Millisecond)
+	// The program has read the first line once the input queue is
+	// empty (no fixed wait, task 20a point 8); it runs on after the
+	// failed progress line.
+	for deadline := time.Now().Add(60 * time.Second); inputQueued(t, p.slave) != 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first line is not read")
+		}
+	}
 	ch.running(t)
 	p.typeIn(t, strings.Join(ws[12:], " ")+"\n")
 	code := ch.exit(t)

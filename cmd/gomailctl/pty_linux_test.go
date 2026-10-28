@@ -393,13 +393,18 @@ func TestPtyDoubleEnterAtHolder(t *testing.T) {
 	if share < 0 {
 		t.Fatal("share 1 not shown")
 	}
-	time.Sleep(time.Second)
 	ch.running(t)
-	if s := p.out.String()[share:]; strings.Contains(s, clearScreen) || strings.Contains(s, "Inhaber von Anteil 2") {
+	// No fixed wait (task 20a point 8, as task 13e point 2): the next
+	// line typed, a marker, confirms share 1, because the Enter typed
+	// ahead was discarded before the prompt. Between share 1 and the
+	// echo of the marker nothing clears it or calls holder 2; behind
+	// the echo come the clear and holder 2.
+	const mark = "gomailctl-test-mark"
+	p.typeIn(t, mark+"\n")
+	pos, _ = p.wait(t, pos, regexp.QuoteMeta(mark)+`\r?\n(?s).*`+regexp.QuoteMeta(clearScreen)+`(?s).*Inhaber von Anteil 2 von 2 an den Bildschirm, dann Eingabetaste: $`)
+	if s := p.out.String()[share:]; strings.Contains(s[:strings.Index(s, mark)], clearScreen) || strings.Contains(s[:strings.Index(s, mark)], "Inhaber von Anteil 2") {
 		t.Fatalf("share 1 confirmed by the Enter typed ahead: %q", s)
 	}
-	p.typeIn(t, "\n")
-	pos, _ = p.wait(t, pos, regexp.QuoteMeta(clearScreen)+`(?s).*Inhaber von Anteil 2 von 2 an den Bildschirm, dann Eingabetaste: $`)
 	p.typeIn(t, "\n")
 	pos, _ = p.wait(t, pos, `Anteil notiert\? Eingabetaste löscht den Bildschirm: $`)
 	p.typeIn(t, "\n")
@@ -524,14 +529,18 @@ func TestPtyWordsStdoutRedirected(t *testing.T) {
 			t.Fatalf("%v: exit %d\n%q", tc.args, code, p.out.String())
 		}
 		got, _ := readAll(r)
-		time.Sleep(100 * time.Millisecond)
-		s := p.out.String()
+		// Everything the program wrote is in the transcript before the
+		// marker, without a fixed wait (task 20a point 8, quiet).
+		s, n := p.quiet(t, 0)
 		if len(got) != 0 || strings.Contains(s, "Passphrase") || strings.Contains(s, "eingeben") || !strings.Contains(s, "dasselbe Terminal") {
 			t.Fatalf("%v: stdout %q, terminal %q", tc.args, got, s)
 		}
 		// What was typed was not read: it is still in the input of the
 		// terminal (its echo is in the transcript, as the terminal shows
 		// it, the program never got it).
+		if typed := strings.Join(alice.Words, " "); n != len(typed)+1 {
+			t.Fatalf("%v: %d bytes in the input of the terminal, typed %d", tc.args, n, len(typed)+1)
+		}
 		if tc.dir != alice.Dir && exists(tc.dir) {
 			t.Fatalf("%v: client directory", tc.args)
 		}

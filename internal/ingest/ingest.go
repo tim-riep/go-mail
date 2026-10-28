@@ -116,6 +116,13 @@ var (
 	// signs no metadata from then on (translog doc.go "Platform
 	// generations"), every client would reject it.
 	ErrSuperseded = errors.New("ingest: the ingest generation is superseded in the log")
+	// ErrNotYetValid: valid_from of ingest-<gen>.cert lies after the
+	// time of the start (task 20a point 1). Clients accept metadata of
+	// generation gen only for receipt times from valid_from on (client
+	// ingestKey), and heads, which the same key signs (Q4), only with a
+	// time from valid_from on (translog LogKey.Covers); a server started
+	// earlier with the new key would sign mails every client rejects.
+	ErrNotYetValid = errors.New("ingest: the ingest certificate is not valid yet")
 )
 
 // New checks the ingest key against platform/ingest-<gen>.cert in the
@@ -126,7 +133,16 @@ var (
 // The certificate must be in the log with exactly the bytes in platform/
 // (Log.CheckPlatform against the identity list of the log's anchor), and
 // generation gen must not be superseded at the time of the start
-// (ErrSuperseded, see checkGeneration); both fail with ErrConfig.
+// (ErrSuperseded, see checkGeneration); both fail with ErrConfig. The
+// certificate must be valid at the time of the start, Config.Now:
+// valid_from after it fails with ErrNotYetValid and ErrConfig (task 20a
+// point 1, RUNBOOK 6 step 4: the server with the new key starts only from
+// valid_from on). There is no tolerance (not translog.MaxClockSkew): the
+// receipt time of every mail is this clock, and a client rejects a
+// receipt time before valid_from without any (client ingestKey); with
+// the same clock, exactly one of the old and the new generation passes
+// New at any time (checkGeneration refuses the old one from valid_from
+// on).
 // Config.BatchSize must lie between 0 (DefaultBatchSize) and
 // store.MaxBatch, the most entries a term list can hold (ErrConfig).
 //
@@ -187,6 +203,13 @@ func New(cfg Config) (*Ingest, error) {
 	if cfg.BatchAge == 0 {
 		cfg.BatchAge = DefaultBatchAge
 	}
+	// One time for both ends of the validity of generation gen: valid_from
+	// of its certificate here, and valid_from of ingest-<gen+1>.cert in
+	// checkGeneration below.
+	now := cfg.Now()
+	if now.UnixMilli() < cert.ValidFrom {
+		return nil, fmt.Errorf("%w: %w: %s valid from %d, now %d", ErrConfig, ErrNotYetValid, certName, cert.ValidFrom, now.UnixMilli())
+	}
 	release, err := cfg.Store.HoldRoleLock(store.RoleServer)
 	if err != nil {
 		return nil, fmt.Errorf("ingest: server lock: %w", err)
@@ -198,7 +221,7 @@ func New(cfg Config) (*Ingest, error) {
 		}
 	}
 	in := &Ingest{cfg: cfg, st: cfg.Store, log: cfg.Logger, now: cfg.Now, signer: cfg.IngestKey, pub: cert.Pub, release: release}
-	if err := in.checkGeneration(cfg.Now()); err != nil {
+	if err := in.checkGeneration(now); err != nil {
 		release()
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}

@@ -52,6 +52,7 @@ func start15n(t *testing.T, w1, layout string, env ...string) *ceremony15n {
 		}
 	}
 	c.in, c.out, c.errw = c.vts[layout[0]], c.vts[layout[1]], c.vts[layout[2]]
+	c.in.prompts = c.errw
 	c.outDir, c.kd = filepath.Join(base, "out"), filepath.Join(base, "keys")
 	cmd := exec.Command(os.Args[0], "init", "--shares", "2-of-2", "--out", c.outDir, "--keys", c.kd, "--origin", "o", "--witness", w1, "--min-witnesses", "1")
 	for _, kv := range os.Environ() {

@@ -26,27 +26,42 @@
 // switch to run without it; tests use package testenv and
 // translogtest). --pin (identity-<gen>.pin, outside the data directory)
 // and --log-listen are required. At the start serve checks, in this
-// order, and refuses to start when a check fails:
+// order (RUNBOOK 1.6), and refuses to start when a check fails; before
+// them come the checks of the invocation (flags, loopback addresses):
 //
-//  1. the rights of 9.1 on the data directory and its top-level entries
+//  1. the pin (readPin): readable and valid, outside the data directory
+//     with symbolic links resolved, and no development pin in a build
+//     without the tag gomail_dev (both exit status 2, task 15k);
+//  2. the rights of 9.1 on the data directory and its top-level entries
 //     only (checkDataDir: nothing open to others; a directory without
 //     setgid, missing group rights and a foreign group are warnings;
 //     deeper entries are not walked, they inherit the group through the
 //     setgid bit);
-//  2. the pin and platform/ (checkPlatformPin, translog.ErrMismatch): no
-//     identity generation the pin does not know (operating rule after a
-//     succession, Q10 point 5), no contradiction to its identity list;
-//  3. platform/witnesses.rec, the working copy of the witnesses (a
+//  3. the server lock locks/server: a second server refuses here, before
+//     it reads the ingest key (task 14 addendum);
+//  4. the ingest key (ceremony.ReadKey): outside the data directory,
+//     role ingest;
+//  5. the log side (openLogSide): the pin against platform/
+//     (checkPlatformPin, translog.ErrMismatch: no identity generation
+//     the pin does not know, operating rule after a succession, Q10
+//     point 5, no contradiction to its identity list),
+//     platform/witnesses.rec, the working copy of the witnesses (a
 //     warning when it differs from the pin), and the operator log of the
 //     data directory opened against the pin's identity list and origin
 //     (translog.Open checks the tiles against tree.rec and the quorum);
-//  4. ingest.New: the server lock locks/server, held exclusively until
+//  6. ingest.New: the server lock locks/server, held exclusively until
 //     the end (a second server fails), the ingest key against its
-//     certificate, the certificate in the log and not superseded; with
-//     --require-client-lock also a client lock locks/client that is in
-//     force (ingest.Config.PeerCheck, store.CheckPeerLock(RoleClient));
-//  5. the start test of the locks (checkLocks, 9.1 "Testsperre");
-//  6. the log head (checkHead: Operator.SignHead without publishing).
+//     certificate, the certificate in the log, valid at the start (a
+//     valid_from after the clock of this computer is exit status 2 with
+//     a fixed message, ingest.ErrNotYetValid, task 20a point 1) and not
+//     superseded; with --require-client-lock also a client lock
+//     locks/client that is in force (ingest.Config.PeerCheck,
+//     store.CheckPeerLock(RoleClient));
+//  7. the start test of the locks (checkLocks, 9.1 "Testsperre");
+//  8. the log head (checkHead: Operator.SignHead without publishing).
+//
+// Between 7 and 8 it says whether it can tell the free space
+// (checkDiskSpace, a warning only).
 //
 // --require-client-lock (task 15c finding 3, reading D70 of 9.1 "each
 // side checks the lock of the other"): off by default, because a
@@ -64,8 +79,11 @@
 // --listen; ingest checks every delivery against the same operator log.
 // "address add" logs the signed assignment with Append(KindAddress)
 // before it changes addresses.json, and only when the address is free
-// or already assigned to that mailbox (exit status 2 otherwise; no
-// message names the address). "log repair" rebuilds tree.rec, the tiles
+// or already assigned to that mailbox (exit status 2 otherwise). On
+// success it prints the normalized address and the mailbox on standard
+// output ("<address> -> <mailbox>"); no message on standard error names
+// the address, an error names the mailbox only (failAddr,
+// checkAddressFree). "log repair" rebuilds tree.rec, the tiles
 // and keys/ from the entries and the signed heads (translog.RepairTree)
 // while no server runs. It removes nothing: entries beyond the size the
 // entries give (translog.OrphanEntriesError, task 15d) are reported
@@ -260,6 +278,12 @@ func readPin(path, root string) (*store.PlatformPin, []translog.Identity, error)
 // the development ceremony (task 15k finding 1).
 const devPinRefused = "der Pin ist ein Entwicklungs-Pin (gomail-ceremony init --dev); ein Produktionsbuild (ohne Build-Tag gomail_dev) verweigert ihn"
 
+// ingestNotYetValid is the message of serve for an ingest key whose
+// certificate is valid only from a time after the start
+// (ingest.ErrNotYetValid, task 20a point 1, RUNBOOK 6 step 4).
+const ingestNotYetValid = "der Ingest-Schlüssel ist noch nicht gültig (valid_from seines Zertifikats liegt nach der Uhr dieses Rechners); " +
+	"den Server mit diesem Schlüssel erst ab valid_from starten, bis dahin mit dem bisherigen"
+
 // devPinWarning is printed by a build with the development ceremony when
 // it runs with a development pin.
 const devPinWarning = "WARNUNG: Entwicklungs-Pin (gomail-ceremony init --dev), nur in einem Testbuild; nie mit echten Mails verwenden."
@@ -291,11 +315,11 @@ func readPinFile(path string) (*store.PlatformPin, error) {
 }
 
 // readRegular reads path, which must be a regular file of at most max
-// bytes, as store.ReadFileLimited does, but opens it with O_NONBLOCK
-// (task 15k finding 3): a FIFO or a device given as --pin or --witnesses
-// is refused as not regular after the open, which returns at once, and
-// never blocks the program. The size is checked before anything is
-// allocated.
+// bytes, as store.ReadFileLimited does, with the message of this
+// program. Both open with O_NONBLOCK (task 15k finding 3, task 20a point
+// 2): a FIFO or a device given as --pin or --witnesses is refused as not
+// regular after the open, which returns at once, and never blocks the
+// program. The size is checked before anything is allocated.
 func readRegular(path string, max int64) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -430,6 +454,10 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 			err = fmt.Errorf("ein anderer Server hält die Serversperre locks/server (9.1): %w", err)
 		case errors.Is(err, store.ErrPeerLock):
 			err = fmt.Errorf("Testsperre: --require-client-lock verlangt eine wirksame Client-Sperre locks/client (9.1): %w", err)
+		case errors.Is(err, ingest.ErrNotYetValid):
+			// Task 20a point 1: an operating error, refused like a usage
+			// error (exit status 2) with a fixed message.
+			err = usageError{ingestNotYetValid}
 		}
 		return fail(stderr, err)
 	}

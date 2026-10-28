@@ -66,7 +66,12 @@
 // limit stays as before: a terminal that never takes output again (one
 // whose output another program stops again and again, faster than it
 // is restarted, until the end) never shows the clear, and after exit
-// code 130 nothing tries again.
+// code 130 nothing tries again. The last step of the abort path
+// restarts the output of stdout and stderr once more with a single
+// request and no stop before it (TCOON, TIOCSTART), after every
+// goroutine of the program that restarts the output (TCOOFF, then
+// TCOON) has ended: no terminal is left stopped at the exit (task 20a
+// point 3).
 //
 // A confirmation (Enter when a holder is called, Enter when a holder
 // noted the share) counts only when it arrives at least confirmDelay (1
@@ -577,6 +582,23 @@ func outputWake(w any) func(discard bool) error {
 	return func(discard bool) error { return wakeOutput(fd, discard) }
 }
 
+// outputResume returns the function that restarts the output of the
+// terminal w with a single request, without stopping it first
+// (resumeOutput: TCOON on Linux, TIOCSTART on the BSDs and macOS; task
+// 20a point 3); nil when w is no terminal (*os.File) or a stand-in of
+// the tests.
+func outputResume(w any) func() error {
+	f, ok := w.(*os.File)
+	if !ok {
+		return nil
+	}
+	fd := f.Fd()
+	if !isTerminalFd(fd) {
+		return nil
+	}
+	return func() error { return resumeOutput(fd) }
+}
+
 // echoControl returns the switches of stdin v, or nil if v is not a
 // terminal.
 func echoControl(v any) *control {
@@ -851,7 +873,21 @@ type term struct {
 	// when that is no terminal and for a stand-in of the tests. errWake
 	// is set whenever stderr is a terminal, also the one of stdout.
 	outWake, errWake func(discard bool) error
-	dead             atomic.Bool // the abort path runs: nothing more on the screen
+	// outResume and errResume restart the output of stdout and of
+	// stderr with a single request and no stop before it (outputResume,
+	// TCOON, TIOCSTART), the last step of the abort path (task 20a point
+	// 3); nil as outWake and errWake are.
+	outResume, errResume func() error
+	dead                 atomic.Bool // the abort path runs: nothing more on the screen
+	// wakeMu guards wakeOff and wakeStops: the stop functions of the
+	// goroutines of waking that run for this term (t.waking), which the
+	// abort path ends before its last step (stopWaking, task 20a point
+	// 3), also one that a write of the command started and still waits
+	// for (push). Once wakeOff is set, t.waking starts none.
+	wakeMu    sync.Mutex
+	wakeOff   bool
+	wakeN     int
+	wakeStops map[int]func()
 	// visible: a share line was written to stdout, completely or in part,
 	// and no clear of stdout after it was written completely yet (task
 	// 15n finding 1). Set and cleared while t.out is held.
@@ -892,6 +928,8 @@ func (e *env) newTerm() *term {
 	t.errTerm = otherTerminal(e.stdout, e.stderr)
 	t.outWake = outputWake(e.stdout)
 	t.errWake = outputWake(e.stderr)
+	t.outResume = outputResume(e.stdout)
+	t.errResume = outputResume(e.stderr)
 	// Task 15i: a write to a pipe without a reader on stderr fails with
 	// EPIPE instead of ending the program; run started that already
 	// (task 15m point 4), this covers a term opened without run (tests).
@@ -1095,6 +1133,13 @@ func (c abortClock) take(ch chan struct{}, limit time.Duration) bool {
 //     stderr takes nothing (task 15i; it holds no secret), with the
 //     reason first when a prompt was lost (promptLost) or a write to
 //     the screen did not get through (screenLost).
+//  7. Every goroutine of waking of the term has ended (stopWaking),
+//     also one that a write of the command, still blocked, started
+//     (push), and none starts any more; then the output of stdout, and
+//     of stderr when that is a terminal, is restarted once more with a
+//     single request and no stop before it (resume, task 20a point 3):
+//     no terminal is left stopped at the exit, also not by a restart of
+//     the steps before (TCOOFF, TCOON).
 //
 // The output not yet sent is discarded only when a write does not get
 // through (steps 2 and 3): unconditionally, it would also drop a share
@@ -1139,7 +1184,30 @@ func (t *term) abort() {
 			io.WriteString(t.e.stdout, msg)
 		}
 	})
+	c.bounded(t.stopWaking)
+	t.resume(c)
 	exit(exitAbort)
+}
+
+// resume is the last step of the abort path (task 20a point 3): the
+// output of stdout and of stderr is restarted once more, each with a
+// single request that stops nothing before it (outResume, errResume:
+// TCOON, TIOCSTART), within one bounded step. Every restart before it
+// (wakeOutput: on Linux TCOOFF, then TCOON) stops the output for a
+// moment; the goroutines of waking that send them have ended when their
+// stop returned, so that no TCOOFF of the program comes after this step
+// and no terminal is left stopped at the exit, also when it was stopped
+// by a TCOOFF in the meantime. Should a write of the program still be
+// blocked on a terminal (a prompt, the last line), it may go on once the
+// output runs; the clear came before it.
+func (t *term) resume(c abortClock) {
+	c.bounded(func() {
+		for _, r := range []func() error{t.outResume, t.errResume} {
+			if r != nil {
+				r()
+			}
+		}
+	})
 }
 
 // wake lets the output of stdout and of stderr (when that is a
@@ -1159,7 +1227,7 @@ func (t *term) wake(c abortClock, discard bool) {
 // t.out may be one that a program stops again and again (abort, step
 // 2; task 15n finding 2).
 func (t *term) takeWaking(c abortClock, limit time.Duration) bool {
-	stop := waking(t.outWake, t.errWake)
+	stop := t.waking(t.outWake, t.errWake)
 	defer stop()
 	return c.take(t.out, limit)
 }
@@ -1181,7 +1249,7 @@ func (t *term) takeWaking(c abortClock, limit time.Duration) bool {
 // with the program.
 func (t *term) clearBounded(limit time.Duration, write func() error, wake func(bool) error) bool {
 	end := time.Now().Add(limit)
-	stop := waking(wake)
+	stop := t.waking(wake)
 	defer stop()
 	discard := false
 	for {
@@ -1221,9 +1289,12 @@ func (t *term) clearBounded(limit time.Duration, write func() error, wake func(b
 
 // waking restarts the output of the terminals of wakes (nil entries are
 // skipped) every wakeEvery, in a goroutine of its own, until the
-// function it returns is called (task 15n finding 2). None of the
-// requests waits; should one wait all the same, it holds up nothing but
-// that goroutine.
+// function it returns is called (task 15n finding 2). That function
+// returns only once the goroutine has ended (task 20a point 3): a
+// restart is TCOOFF and TCOON on Linux, and a goroutine still running
+// could stop the output after the last step of the abort path (resume)
+// and leave it stopped at the exit. None of the requests waits, so the
+// wait for the goroutine is at most one round of them.
 func waking(wakes ...func(bool) error) (stop func()) {
 	var ws []func(bool) error
 	for _, w := range wakes {
@@ -1235,7 +1306,9 @@ func waking(wakes ...func(bool) error) (stop func()) {
 		return func() {}
 	}
 	quit := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		tick := time.NewTicker(wakeEvery)
 		defer tick.Stop()
 		for {
@@ -1249,7 +1322,53 @@ func waking(wakes ...func(bool) error) (stop func()) {
 			}
 		}
 	}()
-	return func() { close(quit) }
+	return func() {
+		close(quit)
+		<-done
+	}
+}
+
+// waking is waking for the term t: its goroutine is ended by the stop
+// function returned or by stopWaking, whichever comes first (task 20a
+// point 3). After stopWaking it starts none and returns a stop that does
+// nothing: the abort path, which called it, ends the program.
+func (t *term) waking(wakes ...func(bool) error) (stop func()) {
+	t.wakeMu.Lock()
+	defer t.wakeMu.Unlock()
+	if t.wakeOff {
+		return func() {}
+	}
+	s := sync.OnceFunc(waking(wakes...))
+	if t.wakeStops == nil {
+		t.wakeStops = make(map[int]func())
+	}
+	id := t.wakeN
+	t.wakeN++
+	t.wakeStops[id] = s
+	return func() {
+		s()
+		t.wakeMu.Lock()
+		delete(t.wakeStops, id)
+		t.wakeMu.Unlock()
+	}
+}
+
+// stopWaking ends every goroutine of waking that runs for t and returns
+// once they have ended; t.waking starts none after it (abort, step 7;
+// task 20a point 3). A write of the command that is still blocked (push)
+// keeps its goroutine of waking running until its outputGrace is up,
+// longer than the abort path takes: without stopWaking that goroutine
+// could stop the output (TCOOFF) after the last step of the abort path
+// and leave the terminal stopped at the exit.
+func (t *term) stopWaking() {
+	t.wakeMu.Lock()
+	t.wakeOff = true
+	stops := t.wakeStops
+	t.wakeStops = nil
+	t.wakeMu.Unlock()
+	for _, s := range stops {
+		s()
+	}
 }
 
 // unblock clears O_NONBLOCK on the open file descriptions of stdout and
@@ -1293,7 +1412,7 @@ var errOutputStuck = errors.New("Ausgabe hängt")
 func (t *term) push(deadline time.Time, write func() error, wakes ...func(bool) error) error {
 	done := make(chan error, 1)
 	go func() { done <- write() }()
-	stop := waking(wakes...)
+	stop := t.waking(wakes...)
 	defer stop()
 	grace := time.NewTimer(max(time.Until(deadline), 0))
 	defer grace.Stop()

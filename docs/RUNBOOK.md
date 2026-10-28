@@ -119,7 +119,7 @@ gomail-server serve --data <datenverzeichnis> --listen 127.0.0.1:2525 --ingest-k
   3. Serversperre `locks/server`: ein zweiter Server verweigert mit „Serversperre“, **bevor** er den Ingest-Schlüssel liest.
   4. Ingest-Schlüssel lesen: außerhalb des Datenverzeichnisses, Rolle Ingest.
   5. Log-Seite: Pin gegen `platform/` (keine Identitätsgeneration, die der Pin nicht kennt), `platform/witnesses.rec` (Abweichung vom Pin nur Warnung), das Log gegen Identitätsliste und Origin des Pins.
-  6. Annahme (`ingest.New`): nimmt die Serversperre und hält sie bis zum Ende; prüft den Ingest-Schlüssel gegen sein Zertifikat, das Zertifikat im Log und nicht abgelöst (Abschnitt 6); mit `--require-client-lock` die Client-Sperre.
+  6. Annahme (`ingest.New`): nimmt die Serversperre und hält sie bis zum Ende; prüft den Ingest-Schlüssel gegen sein Zertifikat, das Zertifikat im Log, schon gültig (`valid_from` nicht nach der Uhr des Servers, sonst Exit 2) und nicht abgelöst (Abschnitt 6); mit `--require-client-lock` die Client-Sperre.
   7. Testsperre (9.1).
   8. Kopf: ein signierbarer Kopf des Logs.
 - **`--require-client-lock`** (Testsperre nach 9.1, Lesart D70): Der Server startet nur, wenn eine wirksame Client-Sperre `locks/client` besteht (ein laufendes `gomailctl` hält sie). Ohne den Schalter startet er auch ohne Client und meldet nur, dass keine Client-Sperre gehalten wird; ein dauerhaft laufender Server kann beim Start keinen Client voraussetzen. Der Test auf zwei Maschinen schaltet ihn ein. Die Testsperre zeigt nur, dass irgendein Prozess mit Zugriff auf das Datenverzeichnis die Sperre hält; sie authentifiziert niemanden.
@@ -370,7 +370,7 @@ Ein neuer Ingest-Schlüssel (und damit ein neuer Log-Schlüssel, Q4) braucht dre
    `<n>` ist die höchste vorhandene Ingest-Generation + 1 (aus `platform/ingest-*.cert`). `--valid-from` darf nach der Uhr des Zeremonierechners nicht in der Vergangenheit liegen. Drei Inhaber geben ihren Anteil ein; der Root muss genau die Identität des Pins ergeben. Ergebnis: `<export-n>` mit `ingest-<n>.pub`/`.cert` und `<schlüssel>/ingest-<n>.key` (0600).
 2. **Veröffentlichen vor dem Umschalten** (Server kurz anhalten): `gomail-ceremony publish --from <export-n> --data <datenverzeichnis> --pin <pin>`, dann den Server mit dem bisherigen Schlüssel wieder starten.
 3. **Zeugen:** Prüfschlüssel der neuen Generation nach 1.7 aus `platform/ingest-<n>.pub` bilden und jeden Zeugen mit beiden Log-Schlüsseln neu starten (`--log-key <alt> --log-key <neu>`, gleiches Zustandsverzeichnis).
-4. **Umschalten ab `<valid-from>`:** Ab diesem Zeitpunkt signiert die alte Generation nichts mehr gültig. Ein laufender Server mit dem alten Schlüssel lehnt Einlieferungen mit `451` ab; ein Neustart mit dem alten Schlüssel verweigert (`ingest: the ingest generation is superseded in the log`). Den Server **nach** `<valid-from>` mit `--ingest-key <ingest-<n>.key>` neu starten, nicht vorher (eine Mail mit Empfangszeit vor `valid_from` des neuen Zertifikats lehnen die Clients ab). Absender wiederholen nach `451`.
+4. **Umschalten ab `<valid-from>`:** Ab diesem Zeitpunkt signiert die alte Generation nichts mehr gültig. Ein laufender Server mit dem alten Schlüssel lehnt Einlieferungen mit `451` ab; ein Neustart mit dem alten Schlüssel verweigert (`ingest: the ingest generation is superseded in the log`). Den Server **nach** `<valid-from>` mit `--ingest-key <ingest-<n>.key>` neu starten; vorher verweigert der Server den Start mit dem neuen Schlüssel (Exit 2, `der Ingest-Schlüssel ist noch nicht gültig`), denn eine Mail mit Empfangszeit vor `valid_from` des neuen Zertifikats lehnen die Clients ab. Maßgeblich ist die Uhr des Servers (Abschnitt 10). Absender wiederholen nach `451`.
 5. **Alten Schlüssel vernichten**, sobald der Server mit dem neuen läuft.
 
 Clients beenden die alte Generation bei `valid_from` des neuen Zertifikats, sobald es im Log steht: Metadaten, die der alte Schlüssel für eine Empfangszeit ab `valid_from` signiert hat, lehnen sie ab (`WARNUNG: Mail <id> wird nicht verarbeitet: Plattformzertifikat oder Annahmeschlüssel nicht gültig.`); ältere Mails bleiben lesbar. Einen Widerruf einer kompromittierten Ingest- oder Admin-Generation und eine Admin-Rotation gibt es nicht (Q8, R18).
@@ -460,6 +460,7 @@ Server, Zeuge und Clients enden mit SIGINT oder SIGTERM. Für Skripte, die Progr
 | `--listen und --log-listen müssen Loopback-Adressen sein` | öffentliche Adresse ohne `--isolated-test-network` |
 | `kennt nur 1 bis <g>` beim Serverstart | Pin älter als `platform/` (nach einer Nachfolge den neuen Pin nehmen) |
 | `ingest: the ingest generation is superseded in the log` | alter Ingest-Schlüssel nach `valid_from` der neuen Generation (Abschnitt 6) |
+| `der Ingest-Schlüssel ist noch nicht gültig` | neuer Ingest-Schlüssel vor `valid_from` seines Zertifikats gestartet: bis dahin mit dem bisherigen Schlüssel weiterlaufen lassen (Abschnitt 6); sonst die Uhr des Servers prüfen (Abschnitt 10) |
 | `translog: log is inconsistent` | Abschnitt 8.1 und 8.2 |
 | `not yet covered by a verified head` | eigener Logeintrag noch ohne bestätigten Kopf; nach etwa einer Minute wiederholen (3.4) |
 | `translog: no fresh verified tree head` | seit 24 Stunden kein bestätigter Kopf: Server, Zeuge oder Uhr prüfen (Abschnitt 10) |
@@ -510,7 +511,7 @@ Ohne `--bin` baut das Skript im lokalen Modus die Programme selbst mit den Testb
 | Uhr | wofür | Regel |
 |---|---|---|
 | Zeremonierechner (offline, ohne NTP) | `valid_from` der Zertifikate (`init`), der Nachfolge (`succeed`); Prüfung „nicht in der Vergangenheit“ von `ingest-rotate --valid-from` | vor jeder Zeremonie von Hand nach einer verlässlichen Quelle auf UTC stellen; `init` und `succeed` zeigen sie vor dem ersten Schritt, bei falscher Uhr mit Strg-C abbrechen |
-| Server-Host | Empfangszeit jeder Mail, Zeit der Log-Köpfe, Umschalten der Ingest-Generation | NTP Pflicht |
+| Server-Host | Empfangszeit jeder Mail, Zeit der Log-Köpfe, Umschalten der Ingest-Generation; Freigabe des Starts mit einem neuen Ingest-Schlüssel (vor dessen `valid_from` verweigert `serve`, ohne Toleranz) | NTP Pflicht |
 | Client-Rechner | Prüfung der Kopfzeiten, Zeit offener Logeinträge, Beginn neuer Epochen | NTP Pflicht |
 | Zeugenhost | Prüfung der Kopfzeiten | NTP Pflicht |
 

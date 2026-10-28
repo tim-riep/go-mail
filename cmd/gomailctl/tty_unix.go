@@ -145,16 +145,17 @@ func flushInput(fd uintptr) error {
 }
 
 // terminalID identifies the terminal fd: its device number (fstat
-// st_rdev); ok is false if fd is no terminal.
-func terminalID(fd uintptr) (id uint64, ok bool) {
+// st_rdev) and the device of the file system of its node (st_dev,
+// termID); ok is false if fd is no terminal.
+func terminalID(fd uintptr) (id termID, ok bool) {
 	if !isTerminalFd(fd) {
-		return 0, false
+		return termID{}, false
 	}
 	var st syscall.Stat_t
 	if err := syscall.Fstat(int(fd), &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFCHR {
-		return 0, false
+		return termID{}, false
 	}
-	return uint64(st.Rdev), true
+	return termID{rdev: uint64(st.Rdev), dev: uint64(st.Dev)}, true
 }
 
 // devTTY is the path of the controlling terminal of a process.
@@ -197,24 +198,30 @@ func isDevTTY(rdev uint64) bool {
 // of the program (isControllingFd: on Linux TIOCGDEV, the terminal behind
 // the descriptor, is tty_nr) and answer TIOCGPGRP; otherwise they are
 // refused, even if both name the same terminal of another session.
+//
+// TIOCGPGRP is the check that carries the decision (task 20a point 4):
+// the device numbers here (isControllingDevice compares tty_nr, a device
+// number as well) only pick the cases; in two instances of devpts one
+// device number names two terminals, and only the kernel's answer for
+// the controlling terminal of the program's session tells them apart.
 func sameControlling(a, b uintptr) bool {
 	x, ok1 := terminalID(a)
 	y, ok2 := terminalID(b)
 	if !ok1 || !ok2 {
 		return false
 	}
-	ttyA, ttyB := isDevTTY(x), isDevTTY(y)
+	ttyA, ttyB := isDevTTY(x.rdev), isDevTTY(y.rdev)
 	switch {
 	case ttyA && ttyB:
 		if !isControllingFd(a) || !isControllingFd(b) {
 			return false
 		}
 	case ttyA:
-		if !isControllingDevice(y) {
+		if !isControllingDevice(y.rdev) {
 			return false
 		}
 	case ttyB:
-		if !isControllingDevice(x) {
+		if !isControllingDevice(x.rdev) {
 			return false
 		}
 	default:

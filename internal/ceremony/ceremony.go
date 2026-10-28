@@ -12,8 +12,10 @@
 // marked insecure. The pin it writes for clients carries the development
 // flag, the origin DevOrigin, the witnesses and the identity list (pin
 // fields 4 to 6 and 8, translog doc.go "Pin"); clients accept it only
-// with --insecure-no-log (later only with
-// client.Config.AllowDevIdentity, task 14).
+// with client.Config.AllowDevIdentity (task 14), which no command line
+// flag sets: gomailctl only in a test build with
+// GOMAIL_TEST_DEV_IDENTITY=1, and gomail-server refuses it in a build
+// without the tag gomail_dev (task 15k).
 //
 // InitDev exists only in a build with the tag gomail_dev
 // (initdev_dev.go, task 15b point 4); without it InitDev returns ErrDev

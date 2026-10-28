@@ -142,9 +142,18 @@ func ptyMasterOf(v any) bool {
 	return ok && isPtyMaster(f.Fd())
 }
 
+// termID identifies a terminal (terminalID): its device number (fstat
+// st_rdev) and the device of the file system that holds its node
+// (st_dev). The device number alone does not name one terminal: two
+// instances of devpts (a container, a mount with newinstance) number
+// their pseudo terminals each from 0, and /dev/pts/0 of the one has the
+// device number of /dev/pts/0 of the other (task 20a point 4). A
+// stand-in of the tests names its rdev only (ttyID).
+type termID struct{ rdev, dev uint64 }
+
 // terminalOf returns the identity of the terminal v (terminalID; a
 // stand-in names its own, 0 by default).
-func terminalOf(v any) (uint64, bool) {
+func terminalOf(v any) (termID, bool) {
 	switch f := v.(type) {
 	case *os.File:
 		return terminalID(f.Fd())
@@ -152,27 +161,36 @@ func terminalOf(v any) (uint64, bool) {
 		terminalStandIn
 		ttyID() uint64
 	}:
-		return f.ttyID(), f.terminal()
+		return termID{rdev: f.ttyID()}, f.terminal()
 	case terminalStandIn:
-		return 0, f.terminal()
+		return termID{}, f.terminal()
 	}
-	return 0, false
+	return termID{}, false
+}
+
+// sameDevice reports whether x and y are the same terminal by their
+// identities: the same device number other than /dev/tty, in the same
+// file system (task 20a point 4: the same st_rdev in two instances of
+// devpts are two terminals).
+func sameDevice(x, y termID) bool {
+	return x == y && !isDevTTY(x.rdev)
 }
 
 // sameTerminal reports whether a and b are the same terminal: the same
-// device other than /dev/tty, or, for two files, both the controlling
-// terminal of the program (task 13c finding 2: /dev/tty is a device of
-// its own, 5:0 on Linux, and names the controlling terminal;
-// sameControlling). Two descriptors of /dev/tty have the same device
-// even when they were opened in different sessions and name different
-// terminals (task 13e point 1): they pass only through sameControlling.
+// device other than /dev/tty with its node in the same file system
+// (sameDevice), or, for two files, both the controlling terminal of the
+// program (task 13c finding 2: /dev/tty is a device of its own, 5:0 on
+// Linux, and names the controlling terminal; sameControlling). Two
+// descriptors of /dev/tty have the same device even when they were
+// opened in different sessions and name different terminals (task 13e
+// point 1): they pass only through sameControlling.
 func sameTerminal(a, b any) bool {
 	x, ok1 := terminalOf(a)
 	y, ok2 := terminalOf(b)
 	if !ok1 || !ok2 {
 		return false
 	}
-	if x == y && !isDevTTY(x) {
+	if sameDevice(x, y) {
 		return true
 	}
 	fa, ok1 := a.(*os.File)

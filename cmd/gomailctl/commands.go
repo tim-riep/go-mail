@@ -40,10 +40,6 @@ import (
 //     is decided (TODO(Q1)); the API stays internal.
 //   - mailbox folders set, mailbox rename: not in 9.2; API only.
 //   - index: not in 9.2; Index runs in sync.
-//   - device lost --force-new-generation (client.DeviceLostOptions): not
-//     in 9.2. TODO(ask): without it a user whose device of the
-//     interrupted generation is lost as well has no way from the command
-//     line to revoke that generation too.
 
 // exitPartial is the exit code of client.ErrPartial.
 const exitPartial = 3

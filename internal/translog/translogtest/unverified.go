@@ -1,9 +1,11 @@
 // Package translogtest holds Unverified, the log that accepts
 // everything. It was translog.Unverified until task 07, which moved it
-// here: it is for tests and testenv only. The commands use it behind
-// --insecure-no-log until task 15 removes that switch and builds the
-// real log into server, ingest and ceremony (task 14 for the client);
-// translog.ErrNoLog stays for programs that run without a log.
+// here: it is for tests and testenv only (the server side of testenv,
+// for ingest). No command uses it: task 15 built the real log into
+// server, ingest and ceremony, task 14 into the client, and the switch
+// --insecure-no-log is a usage error everywhere. NewUnverified keeps
+// translog.ErrNoLog for a caller that did not accept running without a
+// log.
 package translogtest
 
 import (

@@ -11,9 +11,12 @@
 //
 // The log on the data directory (golang.org/x/mod/sumdb/tlog, tiles,
 // witnesses) is Open (task 07, impl.go). The accepting placeholder of
-// phase 1, Unverified, lives in package translogtest for tests; until
-// task 15 the commands still use it behind the explicit switch
-// --insecure-no-log, and clients print Warning on every start.
+// phase 1, Unverified, lives in package translogtest for tests only; no
+// command uses it. The switch --insecure-no-log is gone (task 14 for
+// gomailctl, task 15 for gomail-server and gomail-ceremony): every
+// command runs with the log, and the switch is a usage error. ErrNoLog
+// and Warning, whose texts still name it, remain for Unverified; no
+// command prints Warning.
 //
 // The interface for milestone M1 (task 03) is laid out in doc.go: the
 // file format of data/log/, the entries and their duplicate keys, the
