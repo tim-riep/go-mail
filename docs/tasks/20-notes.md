@@ -142,3 +142,11 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - `sameDevice`: statisch per mknod angelegter Knoten auf anderem FS (chroot) wird jetzt verweigert (sichere Richtung) → HANDOFF.
 - hasWords findet keine Spalten mit ≥ 5 Füllzeichen, NUL-Füllung, ANSI zwischen Wörtern, UTF-16 (Formate, die das Programm nicht erzeugt).
 - Alte Angriffsskripte (multi.py, salvo4.py, stuck.py) beantworten Fragen vor confirmDelay bzw. nie; angepasste Fassungen unter verify20a-attack2.
+
+## Aus 09e (für DECISIONS beim Merge)
+- (a) Vermerk „indexiert“ je Art (Marker `indexed`, Begriffsliste `indexed_terms`); Begriffsliste nach Marker wird indexiert, Marker nach Begriffsliste nicht; höchstens ein Feld mehr je Mail.
+- (b) Zusammenfassen nur bei mehr verschiedenen Postings als bei der letzten eigenen Zusammenfassung (`merged` je Epoche, nur steigend) – begrenzt erzwungene Zusammenfassungen durch Postings der Epoche.
+- (c) Unter Neuausstellung: Austausch/Entfernen im Fenster, errStale, nicht bestätigte eigene Generation, MaxUint32 → nicht neu ausgestellt (ErrPartial, Vormerkung).
+- (d) AUDIT: Austausch/Entfernen vor dem Lesen in Schritt 4 betrifft nur Verfügbarkeit; MaxUint32-Metadatei eines Mitglieds hält die Vormerkung dauerhaft.
+- (e) Kopie gilt nur nach Annahme der vorigen Datei gleichen Inhalts als erledigt.
+- 09e: race client 2003 s, 386 1733 s, Abdeckung client 87,7 %.
