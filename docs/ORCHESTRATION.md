@@ -142,3 +142,42 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - **20a Kleine Nacharbeiten** (künftige Ingest-Schlüssel verweigert, D90; nicht blockierendes Lesen; Exit der Zeremonie ohne gestopptes Terminal; devpts; Kommentare; Flakes und Heuristiken; PTY-Tests ohne feste Wartezeiten; openbsd). Nach dem Neustart abgeschlossen. Spezifikation ohne Funde über niedrig. Angreifer: erste Prüfung abgebrochen; die zweite fand nichts über niedrig, der Verdacht der ersten war ein Fehler im Skript. Volllauf gofmt/vet/race/386 mit Tags grün. Nachträge D85, D86, D87.
 - 09e (dritte Runde) umgesetzt: Commit 4acdc45 im Worktree agent-a4b5ac897ba87ee5f. Inhalt: Merkmal je Art, Schritt 4 ohne stille Ausgänge, Kopien nur nach Annahme erledigt, `merged` je Epoche. race und 386 grün, Abdeckung client 87,7 %. Spezifikations- und Angreiferprüfung von 09e laufen mit Frist 04:40 UTC; die Spezifikationsprüfung von 09d (f982400) läuft noch. 20a zusammengeführt (e799367, D90).
 - **Haltepunkt 3 für die Linie 09b (Q22):** Die Angreiferprüfung von 09e fand 1 mittel (`merged` blockiert das Zusammenfassen nach einem Löschen dauerhaft) und 3 niedrig. Keine Funde hoch; alle Wachstumsangriffe ohne Schlüssel liegen bei +0 Byte. 09e ist nicht zusammengeführt. Die Spezifikationsprüfung von 09e läuft noch, der Volllauf auf 4acdc45 läuft vorsorglich.
+
+## 5. Stand beim Anhalten (28.10.2026, 06:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+- **Laufende Agenten:** keine. Nichts halb Geprüftes ist zusammengeführt.
+- **Nicht zusammengeführt:** Linie 09b (09b → 09c → 09d → 09e), Worktree `.claude/worktrees/agent-a4b5ac897ba87ee5f`, Commit 4acdc45 auf dem Merge 0a2b279. Es gilt Haltepunkt 3, siehe **Q22**:
+  - 1 Fund mittel: Die Regel `merged` blockiert das Zusammenfassen nach einem Löschen und hält es auch im ehrlichen Betrieb zurück.
+  - Der Volllauf ist rot in `internal/bench`; alle anderen Pakete sind grün.
+  - Folgeauftrag `docs/tasks/09f-client-merge-rule.md` ist vorbereitet, aber nicht gestartet.
+- **Zusammengeführt in dieser Sitzung (Auszug):**
+  - 13e/13f `gomailctl` /dev/tty-Sitzungen (b03135d)
+  - 18/18b AUDIT (bb92cd9)
+  - 19/19b RUNBOOK und `TestRunbook` (d072685)
+  - 15i–15n Terminalregeln der Zeremonie (d636ffc)
+  - 20a kleine Nacharbeiten (e799367, D90)
+- **Nächste Schritte:**
+  1. Entscheidung zu Q22 (a oder b), dann 09f starten, prüfen und die Linie zusammenführen.
+  2. Kleiner Client-Auftrag 20b aus `docs/tasks/20-notes.md`:
+     - `TODO(task-13)` ShowShares;
+     - keygen atomar;
+     - `commitHead`-Test;
+     - `warnContradicts` am Kopf;
+     - `ListIndexSegments` begrenzt lesen;
+     - eigene Segment-Vermerke;
+     - doppeltes `epochLogged`.
+  3. Auftrag 17 MEASUREMENTS, nur auf ruhiger Maschine.
+  4. Auftrag 20 Abnahme mit dem Nachtrag `docs/tasks/20-notes.md`:
+     - Fuzzing 10 Minuten je Ziel;
+     - Abdeckung;
+     - Volllauf;
+     - HANDOFF;
+     - AUDIT auf den Stand nach 09b, 13e, 15n und 20a bringen;
+     - DECISIONS-Nachträge aus den Notizen.
+  5. Abschlussbericht.
+- **Offene Fragen:**
+  - Q18 und Q20: strengste Lesart gebaut.
+  - Q19: Haltepunkt 2, `succeed --compromised` gesperrt.
+  - Q22: Haltepunkt 3.
+  - Ältere offene Punkte siehe `docs/QUESTIONS.md`.
+- **Aufräumen:** Unter `.claude/worktrees/` liegen noch Worktrees früherer, schon zusammengeführter Aufträge, einige davon gesperrt. Sie werden vor der Abnahme entfernt; der Worktree von 09e bleibt bestehen.
