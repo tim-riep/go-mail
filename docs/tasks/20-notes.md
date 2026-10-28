@@ -120,3 +120,10 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - D85: Abbruchpfad endet mit `stopWaking` (alle Wiederanlauf-Goroutinen) und einem einzelnen TCOON/TIOCSTART; Fenster „Terminal nach Exit gestoppt“ geschlossen; `TestPTYUnblockBrief` schließt die unblock-Lücke.
 - D87: `ReadFileLimited` mit O_NONBLOCK. D86: `sameDevice` mit st_dev (devpts nur per Einheitstest).
 - RUNBOOK 10 ergänzen: Server-Uhr gibt den Start mit neuem Ingest-Schlüssel frei.
+
+## Aus 09d (für DECISIONS beim Merge)
+- D84 (2) präzisieren: Kein Pfad entfernt Einträge aus `Checked`; ein Eintrag darf an Ort und Stelle zu `{hash, next}` geändert werden (zählt dann nie mehr für eine Übernahme), ohne zu wachsen.
+- D79 (1): MergeThreshold zählt nur verschiedene gültige Segmente; byte-gleiche Kopien einmal je Lauf, Leser ignorieren, mergeSegments entfernt unter Sperre; Index schreibt keine schon enthaltenen Einträge; Altformat-Vermerke zählen für genau ihren Inhalt.
+- D84 Schritt 4: gescheiterte Neuausstellung → ErrPartial + Vormerkung, Sync setzt fort; Search/List/Read tolerant.
+- Orchestrator-Entscheidung: zurückgespieltes pending nach Segmentlöschung wird über Merkmal „indexiert“ im bestehenden Eintrag je Mail geschlossen (durch legitime Mails begrenzt).
+- AUDIT: Nachfolger gelöscht + markierter Inhalt zurückgelegt → Treffer fehlen (Verfügbarkeit, Löschen kann der Angreifer ohnehin).
