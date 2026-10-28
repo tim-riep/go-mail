@@ -134,3 +134,11 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - `wordRun` (twohost_test.go:1170): Trenner nur 1–4 Nicht-Buchstaben; eingerückter Seed wird nicht gefunden → Trenner beliebiger Länge aus Leerraum.
 - Veraltete Kommentare: translog.go:43 („Warning is printed … with Unverified“), doc.go:1173 („only --insecure-no-log … until task 15“).
 - AUDIT: ceremony/publish.go:84 readExport öffnet `<from>/platform` mit os.Open ohne Prüfung → FIFO lässt publish hängen (Betreibereingabe).
+
+## Aus der Angreiferprüfung von 20a (niedrig, für 20 und AUDIT)
+- `resume` (TCOON am Ende des Abbruchpfads) kann eine über das ganze Fenster blockierte Anteilszeile nach dem letzten Löschen durchlassen. Nur mit einer Mutante nachstellbar, die jeden Wiederanlauf verliert (5/30 ABA). Mit den echten Binaries kam der Anteil immer nach 8–198 ms durch. Vorschlag: stdout nur freigeben, wenn der Abbruchpfad `t.out` erhalten hat, oder nach `resume` ein begrenztes Löschen.
+- O_NONBLOCK auf gemeinsamem Deskriptor macht auch stdin nicht blockierend (AAA/AAB enter/stop → Exit 1 statt 130, Anteil gelöscht; Basis gleich).
+- Weitere `os.Open` ohne O_NONBLOCK: ceremony/files.go:109, translog/operator.go:341/776/810 (Verzeichnisse, syncFile) → FIFO hängt; Betreiber-/Datenverzeichnis-Pfade → AUDIT.
+- `sameDevice`: statisch per mknod angelegter Knoten auf anderem FS (chroot) wird jetzt verweigert (sichere Richtung) → HANDOFF.
+- hasWords findet keine Spalten mit ≥ 5 Füllzeichen, NUL-Füllung, ANSI zwischen Wörtern, UTF-16 (Formate, die das Programm nicht erzeugt).
+- Alte Angriffsskripte (multi.py, salvo4.py, stuck.py) beantworten Fragen vor confirmDelay bzw. nie; angepasste Fassungen unter verify20a-attack2.
