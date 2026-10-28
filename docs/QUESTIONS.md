@@ -162,3 +162,28 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
 - Haltepunkt 3 (13b, 13c, 13d). Stand: Worktree `agent-ad0b87717cb6dc4ca`, Commit 286d80c. Behoben: Seed nur am Terminal mit Löschen, Worteingabe ohne Echo, Doppel-Enter, Signale, SIGPIPE, `/dev/tty`, Pty-Master, Zeilengrenze. Nach 13d: (1) mittel: zwei über den Pfad `/dev/tty` geöffnete Deskriptoren aus **verschiedenen Sitzungen** gelten als dasselbe Terminal (`sameTerminal` vergleicht nur `st_rdev` 5:0, ohne die Steuerterminal-Prüfung); Folge beobachtet: Echo auf Terminal A aus, Wörter auf A getippt, Löschen auf B; keine Wörter sichtbar, kein Leck; (2) niedrig: `TestPtyKeygenNoTerminal` liest den Mitschnitt, bevor die Fehlermeldung eintrifft (flaky, auch vor 13d).
 - Entscheidung des Orchestrators (Mandat „entscheide du“, wie Q16/Q17): Paket 13 wird zusammengeführt; beide Punkte gehen als Pflichtpunkte in Auftrag 13e (Produktivcode: bei zwei `/dev/tty`-Identitäten beide als Steuerterminal verlangen, `TIOCGPGRP` gleich und > 0; Testwartezeit), der vor Auftrag 20 läuft und einmal geprüft wird. Begründung: keine Sicherheitsfolge, einzeilige Ursache, die Befehle werden von 19/20 gebraucht; Abweichung von Regel 6 in D86 festgehalten.
 - Stand: erledigt mit 13e/13f (D86 Nachtrag). Beide Punkte sind behoben, die Merge-Prüfung fand nichts über niedrig.
+
+## Q22 Linie 09b (S13 für Metadaten und Segmente, `internal/terms`) nach drei Nacharbeitsrunden mit einem Fund mittel
+
+- **Haltepunkt 3** (09c, 09d, 09e). Stand: Worktree `agent-a4b5ac897ba87ee5f`, Commit 4acdc45 (auf dem Merge 0a2b279 mit dem Arbeitsbranch). Nicht zusammengeführt.
+- **Behoben über die Runden:**
+  - Übernahme widerrufener Metadaten und Segmente nur mit Prüfvermerk vor dem Widerruf (Grenze R/R+1 geprüft).
+  - `device lost` lässt sich nicht über das Datenverzeichnis blockieren; eine gescheiterte Neuausstellung meldet `ErrPartial` mit Vormerkung.
+  - Kein bekannter Weg, `state.json` ohne Schlüssel zu vergrößern: Kopien, Neusignatur, Zusammenfassen, Zurückspielen von Segmenten und `pending` liegen alle bei +0 Byte.
+  - Begriffsliste nach Marker wird wieder indexiert.
+  - Abdeckung `client` 87,7 %; race und 386 grün (Implementierer).
+- **Offen nach 09e (Angreiferprüfung):**
+  - **Mittel, neu durch die Regel `merged` aus 09e:** Der Client fasst nur zusammen, wenn es mehr Postings gibt als bei seiner letzten Zusammenfassung, und der Wert steigt nur. Fehlen danach Postings, fasst der Client nie wieder zusammen. Das passiert, wenn
+    - ein Angreifer ohne Schlüssel das zusammengefasste Segment einmal löscht, oder
+    - ein kolludierendes Mitglied vorher Müll-Postings unterschiebt und dann ersetzt.
+    Die eigenen Segmente häufen sich dann bis zur Lesegrenze (4096), danach meldet jede Suche `ErrPartial` und neue Mails fehlen. Es gibt keinen Ausweg ohne Eingriff in `state.json`. Test: `TestAttack09eMergedBlock` (Angriffstests im Scratchpad unter `verify09e-attack/kept/`).
+  - **Niedrig:**
+    - Datei während des ganzen `device lost` versteckt: stiller Erfolg, nur Verfügbarkeit, heilt bei der nächsten Suche.
+    - Zurückgespielte ältere Metadatenversion hält die Vormerkung, solange sie liegt.
+    - Rücksetzen auf den Stand vor dem Zusammenfassen: Der Client löscht die Originale als „verbraucht“, schon seit 09d.
+- **Zielkonflikt:** Die Regel `merged` begrenzt erzwungene Zusammenfassungen durch wiedereingespielte fremde Segmente; das ist ein Wachstumsangriff, rechnerisch erst ab 16 Geräten unbegrenzt. Sie blockiert aber nach einem Löschen. Beides zugleich verlangt eine Regel, die zwischen „verbraucht, weil eigenes Ergebnis vorhanden“ und „Ergebnis fehlt“ unterscheidet.
+  - Vorschlag: `merged` nur anwenden, solange das eigene letzte Ergebnis unter den angenommenen Segmenten liegt; sonst normal zusammenfassen.
+  - Für das Rücksetzen gilt dasselbe: Originale nur dann als verbraucht löschen, wenn ihr Nachfolger angenommen wurde.
+  - Kein Format- oder Spezifikationspunkt, nur Client-Logik.
+- **Frage an den Auftraggeber:** (a) 09e zusammenführen und den Fund mittel samt der Niedrigen als Pflichtpunkte in einen Folgeauftrag 09f vor der Abnahme geben (wie Q16, Q17 und Q21)? Oder (b) 09f als vierte Runde vor dem Zusammenführen? Ohne 09b fehlt im Branch die S13-Regel für Metadaten und Segmente (`TODO(S13)`, strengste Lesart): Nach `device lost` fallen Mails mit Benutzersignatur aus `List`. Das betrifft M1-Kriterium A.
+- **Bis zur Antwort:** nicht zusammengeführt. Der Volllauf auf 4acdc45 wird vorsorglich ausgeführt.
