@@ -33,12 +33,20 @@ Umsetzen:
    - Die Reihenfolge „Marken speichern vor Entfernen“ bei Zusammenfassen, Neusignatur und Index (Mutationen V13, V14 und V18 aus der Spezifikationsprüfung 09d).
    - `reissuing` wird nach `Sync` zurückgesetzt (V8).
 
+## Volllauf: `internal/bench` scheitert auf 4acdc45
+
+Betroffen sind `TestIndex/terms`, `TestIndex/unprocessed`, `TestSync` (keine Segmente nach `Sync`) und `TestIndexSegments` (kein Zusammenfassen bei 1000 Mails), jeweils mit Tags, unter race und unter 386.
+- Ursache klären: Unterdrücken die neuen Regeln (keine enthaltenen Einträge, `Indexed`, `merged`) wiederholte Messrunden mit denselben Mails, oder liegt ein Fehler vor, der auch echte Nutzer trifft?
+- Liegt ein Fehler im Code vor, wird er behoben.
+- Ist es nur die Messweise, wird die Messumgebung angepasst (nur Testcode in `internal/bench`), ohne die gemessene Größe zu verfälschen.
+- `go test -race -tags gomail_dev,gomail_test ./internal/bench` kommt in die Fertig-Läufe.
+
 ## Fertig
 
 - `gofmt -l .` ist leer.
 - `go vet ./...` ohne Befund, mit und ohne Tags.
 - `go test -race -tags gomail_dev,gomail_test -timeout 40m ./internal/client` grün.
-- Ohne race grün: `./internal/e2e`, `./cmd/gomailctl`, `./internal/terms`.
+- Ohne race grün: `./internal/e2e`, `./cmd/gomailctl`, `./internal/terms`; mit race grün: `./internal/bench`. Dazu der Volllauf aller Pakete nach `00-vorgaben.md`.
 - `GOARCH=386 go test -tags gomail_dev,gomail_test ./internal/client` grün.
 - Abdeckung `client` mindestens 85 %.
 - Mutationsnachweise.

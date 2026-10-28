@@ -195,3 +195,10 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
     - Dass Search, List und Read bei ersetzten Metadaten (`errStale`) tolerant bleiben, ist ungetestet.
     - Der Zweig „eigene Generation widerrufen“ in `ownGenValid` ist ungetestet, und er ist sicherheitsrelevant.
   - Diese Punkte gehören in 09f.
+- **Nachtrag (Volllauf auf 4acdc45, 04:28 UTC):** gofmt, vet, race ohne Tags und e2e sind grün, `internal/bench` scheitert, mit Tags unter race und unter 386.
+  - `TestIndex/terms` und `TestIndex/unprocessed`: „round 1: {Mails:0 Segments:0}“.
+  - `TestSync`: „no segments after Sync“.
+  - `TestIndexSegments`: kein Zusammenfassen bei 1000 Mails.
+  - Vermutliche Ursache: Die Messumgebung spielt dieselben Mails und `pending`-Einträge je Runde erneut ein. Die Regeln aus 09d/09e („keine schon enthaltenen Einträge“, Merkmal „indexiert“, `merged`) unterdrücken genau das. Das ist noch nicht untersucht.
+  - Die Implementierer von 09c–09e haben `internal/bench` nicht laufen lassen; es stand nicht in ihren Fertig-Läufen.
+  - **Damit ist 09e auch nach Variante (a) nicht ohne Weiteres zusammenführbar.** 09f muss die Messumgebung anpassen (frischer Client oder frisches Postfach je Runde, nur Testcode) oder klären, ob ein Fehler der neuen Regeln vorliegt.
