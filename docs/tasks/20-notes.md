@@ -150,3 +150,7 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - (d) AUDIT: Austausch/Entfernen vor dem Lesen in Schritt 4 betrifft nur Verfügbarkeit; MaxUint32-Metadatei eines Mitglieds hält die Vormerkung dauerhaft.
 - (e) Kopie gilt nur nach Annahme der vorigen Datei gleichen Inhalts als erledigt.
 - 09e: race client 2003 s, 386 1733 s, Abdeckung client 87,7 %.
+
+## Aus der Spezifikationsprüfung von 09d (f982400; Fund mittel und Kopie-unter-Laufnummer-0 in 09e behoben)
+- Testlücken (niedrig): Reihenfolge „Marken speichern vor Entfernen“ (merge V13, resign V14, Index V18) ohne Test; `reissuing` nicht zurückgesetzt (V8, nur im selben Prozess nach Sync sichtbar).
+- D84 (2) Text um „ändern ohne Wachsen“ ergänzen (beim Merge von 09e).
