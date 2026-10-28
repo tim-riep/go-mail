@@ -187,3 +187,11 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
   - Kein Format- oder Spezifikationspunkt, nur Client-Logik.
 - **Frage an den Auftraggeber:** (a) 09e zusammenführen und den Fund mittel samt der Niedrigen als Pflichtpunkte in einen Folgeauftrag 09f vor der Abnahme geben (wie Q16, Q17 und Q21)? Oder (b) 09f als vierte Runde vor dem Zusammenführen? Ohne 09b fehlt im Branch die S13-Regel für Metadaten und Segmente (`TODO(S13)`, strengste Lesart): Nach `device lost` fallen Mails mit Benutzersignatur aus `List`. Das betrifft M1-Kriterium A.
 - **Bis zur Antwort:** nicht zusammengeführt. Der Volllauf auf 4acdc45 wird vorsorglich ausgeführt.
+- **Nachtrag (Spezifikationsprüfung von 09e, 03:45 UTC):** keine Funde über niedrig, Haltepunkt 1 greift nicht. Die Regel `merged` hält aber auch im ehrlichen Betrieb ein nötiges Zusammenfassen zurück (niedrig, nur Leistung):
+  - Ablauf: Bob fasst zusammen, wird widerrufen, und Alice lehnt sein Ergebnis ab. Im Beleg führten 40 Indexläufe zu 41 Segmenten ohne Zusammenfassen, entgegen K5 Punkt 4.
+  - Das stützt den Vorschlag oben: `merged` an das Vorhandensein des eigenen letzten Ergebnisses binden.
+  - Testlücken (niedrig):
+    - Ein Zähler für alle Epochen statt je Epoche würde unbemerkt bleiben.
+    - Dass Search, List und Read bei ersetzten Metadaten (`errStale`) tolerant bleiben, ist ungetestet.
+    - Der Zweig „eigene Generation widerrufen“ in `ownGenValid` ist ungetestet, und er ist sicherheitsrelevant.
+  - Diese Punkte gehören in 09f.
