@@ -114,3 +114,9 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - Folge (20 oder später): store.ListIndexSegments liest ganzes Verzeichnis vor der Grenze → ReadDir(n); writeSegments eigene Vermerke sofort (index-gone-Fall).
 - AUDIT: >4096 ungültige Dateien → Search dauerhaft ErrPartial (sichtbares DoS).
 - Q11 offen (Laufnummer nicht in Datei gebunden).
+
+## Aus 20a (für DECISIONS beim Merge)
+- Entscheidung des Orchestrators: Der Server verweigert einen Ingest-Schlüssel vor `valid_from` **ohne** `MaxClockSkew`-Toleranz. Grund: Clients prüfen die gestempelte Empfangszeit ohne Toleranz gegen `valid_from`, eine Toleranz ließe den Server Mails signieren, die Clients ablehnen. Abweichung vom Auftragstext ist damit strenger und bestätigt.
+- D85: Abbruchpfad endet mit `stopWaking` (alle Wiederanlauf-Goroutinen) und einem einzelnen TCOON/TIOCSTART; Fenster „Terminal nach Exit gestoppt“ geschlossen; `TestPTYUnblockBrief` schließt die unblock-Lücke.
+- D87: `ReadFileLimited` mit O_NONBLOCK. D86: `sameDevice` mit st_dev (devpts nur per Einheitstest).
+- RUNBOOK 10 ergänzen: Server-Uhr gibt den Start mit neuem Ingest-Schlüssel frei.
