@@ -212,3 +212,8 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
   - Der ursprüngliche Fund hoch war „unbegrenztes Wachstum bis zum Stillstand in Minuten“, nicht „jedes Byte“.
   - D84 (2), wonach kein Pfad den Zustand verkleinert, ist eine Entscheidung des Orchestrators aus 06h, ebenfalls keine Vorgabe der Spezifikation.
 - **Neue Frage an den Auftraggeber (Q22, Teil 2):** Siehe Chat. Optionen: (A) Vereinfachen, empfohlen; (B) Vermerke gelöschter Segmente aufräumen dürfen, Ausnahme von D84 (2); (C) weitere Runde auf dem jetzigen Weg.
+- **Nachtrag (Spezifikationsprüfung 09f):** keine Funde über niedrig. Haltepunkt 1 greift nicht, D84 (2) ist gewahrt. 386-Lauf grün, Abdeckung `client` 87,9 %, race `internal/bench` grün. Die Anpassung der Messumgebung verfälscht die Messgrößen nicht; der Datenverlust nach Wiederherstellung aus einem Backup (Angreiferprüfung, M2) liegt außerhalb dessen, was sie misst. Niedrig:
+  - N1, wie in der Angreiferprüfung;
+  - N2: erzwungene Zusammenfassungen ab etwa 16 Geräten rechnerisch unbegrenzt (Alice +3,9 KB, Carol +0,3 KB je Runde), Kommentar fehlt;
+  - `scripts/bench.sh` beschreibt den alten Ablauf;
+  - zwei Testlücken.
