@@ -154,3 +154,6 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 ## Aus der Spezifikationsprüfung von 09d (f982400; Fund mittel und Kopie-unter-Laufnummer-0 in 09e behoben)
 - Testlücken (niedrig): Reihenfolge „Marken speichern vor Entfernen“ (merge V13, resign V14, Index V18) ohne Test; `reissuing` nicht zurückgesetzt (V8, nur im selben Prozess nach Sync sichtbar).
 - D84 (2) Text um „ändern ohne Wachsen“ ergänzen (beim Merge von 09e).
+
+## Flake aus dem Volllauf 09f (386)
+- `internal/client` `TestWordErrorsNameNoInput` (generations_test.go:503): Der Test prüft, dass die Fehlermeldung `f.u.Words[0]` nicht enthält. Die feste Meldung „keys: word is not in the BIP-39 list: word 4“ enthält aber BIP-39-Wörter wie „word“ und „list“. Ist das erste Seed-Wort zufällig eines davon (etwa 2/2048), scheitert der Test. Er besteht seit vor 09f; nur Testcode, auf ganze Wörter prüfen, die nicht in der festen Meldung stehen.
