@@ -217,3 +217,4 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
   - N2: erzwungene Zusammenfassungen ab etwa 16 Geräten rechnerisch unbegrenzt (Alice +3,9 KB, Carol +0,3 KB je Runde), Kommentar fehlt;
   - `scripts/bench.sh` beschreibt den alten Ablauf;
   - zwei Testlücken.
+- **Antwort des Auftraggebers (03.11., 00:24 Uhr):** „Deine Entscheidungen.“ Der Orchestrator wählt **(A) Vereinfachen**: Auftrag 09g auf dem Stand von 09f, siehe `docs/tasks/09g-client-simplify.md`. Abweichung von Regel 6 (fünfte Runde) auf ausdrücklichen Auftrag; Begründung in DECISIONS beim Merge.
