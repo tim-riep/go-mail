@@ -162,3 +162,9 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - D85: Abbruchdauer einheitlich formulieren („Schrittgrenze `abortTotal` 1,5 s, Ende unter 2 s“), Paketkommentar und D85 (c) abgleichen.
 - HANDOFF: statisch per mknod angelegter Terminalknoten auf anderem Dateisystem wird von `gomailctl` verweigert (AUDIT R6 c).
 - R41-Stellen (D87-Nachtrag) im Rahmen von 20 nach Art von `ReadFileLimited` absichern, soweit es Dateien sind.
+
+## Aus der Prüfung von 18c (niedrig, AUDIT in 20)
+- 6.2 „Kein Klartext“: `TestHasWords` (internal/e2e/twohost_test.go) nennen; `runbook_test.go` mit Präfix `internal/e2e/`.
+- R3/6.5: Abbruch „etwa 1,5 s plus wenige `abortFloor`“ (TestAbortBounded 1,61 s), mit RUNBOOK 2 abgleichen.
+- R14: „bis dahin muss der Server mit dem bisherigen Schlüssel weiterlaufen bzw. neu gestartet werden“.
+- R3: Beleg 15b (Flusssteuerung auf beiden Terminals geräumt, Bildschirmschreiben nicht unter Handler-Sperre) wieder aufnehmen.
