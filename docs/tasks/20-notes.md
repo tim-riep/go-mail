@@ -157,3 +157,8 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 
 ## Flake aus dem Volllauf 09f (386)
 - `internal/client` `TestWordErrorsNameNoInput` (generations_test.go:503): Der Test prüft, dass die Fehlermeldung `f.u.Words[0]` nicht enthält. Die feste Meldung „keys: word is not in the BIP-39 list: word 4“ enthält aber BIP-39-Wörter wie „word“ und „list“. Ist das erste Seed-Wort zufällig eines davon (etwa 2/2048), scheitert der Test. Er besteht seit vor 09f; nur Testcode, auf ganze Wörter prüfen, die nicht in der festen Meldung stehen.
+
+## Aus 18c (für 20 und HANDOFF)
+- D85: Abbruchdauer einheitlich formulieren („Schrittgrenze `abortTotal` 1,5 s, Ende unter 2 s“), Paketkommentar und D85 (c) abgleichen.
+- HANDOFF: statisch per mknod angelegter Terminalknoten auf anderem Dateisystem wird von `gomailctl` verweigert (AUDIT R6 c).
+- R41-Stellen (D87-Nachtrag) im Rahmen von 20 nach Art von `ReadFileLimited` absichern, soweit es Dateien sind.

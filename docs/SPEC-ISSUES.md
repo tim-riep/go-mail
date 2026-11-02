@@ -687,3 +687,11 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: Die Spezifikation beschreibt die Wiederherstellung aus Seed oder Anteilen und das Ändern von Flags. 9.2 nennt aber für keines von beiden einen Befehl.
 - Stand nach Auftrag 18: `gomailctl restore [--shares <k>]` richtet ein leeres Client-Verzeichnis aus 24 Wörtern oder k Anteilen mit neuer Passphrase ein. `gomailctl flag <postfach-id> <mail-id> [--set a,b] [--clear c]` setzt und löscht Flags (Namen siehe S63). Namen und Optionen folgen Auftrag 13 (`TODO(ask)` in `cmd/gomailctl/cmd_devicelost.go` und `cmd/gomailctl/cmd_search.go`; Commit 4748ac7).
 - Vorschlag: Beide Befehle mit diesen Namen und Optionen in 9.2 aufnehmen, wie S67, S68 und S85 für die übrigen Programme.
+
+## S93 Start des Servers mit einem Ingest-Schlüssel vor `valid_from`
+- Art: klarstellend (D90).
+- Stelle: 2.3 „Ingest-Rotation“; 9.2 `gomail-server serve`.
+- Problem: Die Spezifikation sagt nicht, ob der Server einen Ingest-Schlüssel schon vor dessen `valid_from` verwenden darf und mit welcher Toleranz.
+- Stand: `ingest.New` verweigert ihn ohne Toleranz (`ErrNotYetValid`), `serve` endet mit Exit 2. Clients prüfen die Empfangszeit ohne Toleranz gegen `valid_from`; eine Toleranz ließe den Server Mails signieren, die alle Clients ablehnen.
+- Vorschlag: In 2.3 festhalten: „Der Server nimmt einen Ingest-Schlüssel erst ab dessen `valid_from` nach eigener Uhr in Betrieb.“
+
