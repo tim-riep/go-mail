@@ -237,3 +237,12 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - Liegengebliebene `.<name>.keygen-*` beim nächsten `keygen` entfernen.
 - Abhilfetext am Kopf in RUNBOOK und D86.
 - Hinweis: `GOOS=solaris|illumos` vet scheitert an `syscall.Mkfifo` in den neuen FIFO-Tests (gleiches Muster wie bestehende Tests); `lockOnlyDir` könnte `store.OpenDir` nutzen.
+
+## Aus der Angreiferprüfung von 20b (keine Funde über niedrig; für 20e und AUDIT)
+- L1: `keygen` gegen gleichzeitiges `Open`/`Restore` desselben Verzeichnisses: `ENOTEMPTY` wird als `ErrExists` „nicht leer“ gemeldet (irreführend), kein Verlust, Wiederholen gelingt → einmal wiederholen oder Meldung „nicht leer oder in Benutzung“.
+- L2: `lockOnlyDir` entfernt jede reguläre Datei `lock`, unabhängig vom Inhalt (nur mit Schreibzugriff auf das Client-Verzeichnis) → Kommentar.
+- L3: liegengebliebene `.<name>.keygen-*` (0700; versiegelter Schlüsselspeicher, `user.rec`, `state.json`) → aufräumen oder AUDIT-Satz.
+- L4: AUDIT R33 und D86 „Zurückgestellt“ beschreiben das halbe Verzeichnis von `keygen` noch als offen → beim Merge von 20b berichtigen.
+- L5: über `MaxListedIndexSegments` Teilmenge in Verzeichnisreihenfolge (wie Spezifikationsprüfung).
+- Hinweis, schon vorher: `OpenRegular`/`ReadFileLimited` ohne `O_NOCTTY`.
+- Angriffstests: Scratchpad `verify20b-attack/src/` (`zz_attack20b_*`).
