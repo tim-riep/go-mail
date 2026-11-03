@@ -182,3 +182,29 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus der Prüfung von 20c (für 20 und später)
 - D91 (5) und Kommentar an `TestAttack09fForcedMergesDevices` angleichen: Der Code fasst zusammen bei `counted − len(result) ≥ MergeThreshold − 1` und `counted ≥ 16`; das ergibt erzwungene Zusammenfassungen ab (D − 1) · k ≥ 15, nicht 16 (Hinweis, kein Fund).
 - Vorschläge D-1 bis D-4, S-1 bis S-9, R-1 bis R-3 und P-1, P-2 stehen in `docs/tasks/20-triage.md`; der Orchestrator übernimmt sie (P-2 als kleiner Produktivcode-Auftrag nach 20b).
+
+## Fuzzing für 10.2 (Orchestrator, 03.11.)
+- 19 Ziele auf bf427c2 (Code gleich 3e06f23), je `-fuzztime 10m -parallel 1`, zwei Bahnen gleichzeitig: alle ohne Fund. Protokolle im Scratchpad unter `orch/fz/`.
+- Die 6 Ziele in `translog` (5) und `store` (1) laufen auf dem Stand von 20b (WIP 84ca174), weil 20b dort Code ändert; ändert der endgültige 20b-Commit diese Pakete noch, wird nachgefuzzt.
+
+| Paket | Ziel | Ausführungen in 10 min |
+|---|---|---|
+| `internal/envelope` | `FuzzParseAndOpen` | 829.752 |
+| `internal/ingest` | `FuzzTerms` | 1.465.639 |
+| `internal/keys` | `FuzzDecodeGenerationCert` | 9.322.292 |
+| `internal/keys` | `FuzzOpenKeystore` | 10.126.628 |
+| `internal/keys` | `FuzzParseWordlist` | 526.897 |
+| `internal/keys` | `FuzzSeedFromWords` | 8.829.700 |
+| `internal/loghttp` | `FuzzServer` | 3.093.479 |
+| `internal/rec` | `FuzzDecode` | 10.877.835 |
+| `internal/rec` | `FuzzIsNFC` | 9.876.698 |
+| `internal/shamir` | `FuzzCombine` | 4.165.047 |
+| `internal/shamir` | `FuzzShareFromBytes` | 12.377.691 |
+| `internal/shamir` | `FuzzShareFromWords` | 9.791.607 |
+| `internal/smtpd` | `FuzzCommands` | 3.568.702 |
+| `internal/smtpd` | `FuzzData` | 3.901.203 |
+| `internal/witness` | `FuzzCosign` | 3.365.961 |
+| `internal/witness` | `FuzzDecodeWitnesses` | 4.052.309 |
+| `internal/witness` | `FuzzParseProof` | 4.227.219 |
+| `internal/witness` | `FuzzPoll` | 1.327.905 |
+| `internal/words` | `FuzzNormalize` | 2.960.008 |
