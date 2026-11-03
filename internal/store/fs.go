@@ -193,6 +193,55 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 	return writeAtomic(path, data, PrivateFilePerm)
 }
 
+// WritePrivateFileAtomicIn is WritePrivateFileAtomic for the file name
+// in the directory that root holds (task 20l point 1): the temporary
+// file, its rename to name and the fsync of the directory all go
+// through root, so the file lands in that directory even if its path
+// names another directory by now. name is a name in that directory.
+func WritePrivateFileAtomicIn(root *os.Root, name string, data []byte) error {
+	var rnd [8]byte
+	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
+		return err
+	}
+	tmp := tmpPrefix + hex.EncodeToString(rnd[:])
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	err = f.Chmod(PrivateFilePerm)
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = root.Rename(tmp, name)
+	}
+	if err != nil {
+		root.Remove(tmp)
+		return err
+	}
+	return SyncRoot(root)
+}
+
+// SyncRoot fsyncs the directory that root holds, wherever its path is
+// now.
+func SyncRoot(root *os.Root) error {
+	d, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 func writeAtomic(path string, data []byte, perm fs.FileMode) error {
 	tmp, err := writeTemp(path, data, perm)
 	if err != nil {

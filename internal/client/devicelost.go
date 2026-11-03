@@ -581,7 +581,7 @@ func openForDeviceLost(cfg Config, passphrase []byte) (c *Client, local, remote 
 			return nil, nil, nil, err
 		}
 	}
-	ksData, err := keys.ReadKeystoreFile(cfg.keystorePath())
+	ksData, err := readKeystore(cfg.keystorePath())
 	if err != nil {
 		return nil, nil, nil, err
 	}

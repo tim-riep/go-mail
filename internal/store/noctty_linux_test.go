@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,6 +39,22 @@ func TestOpenRegularNoCTTY(t *testing.T) {
 	}
 	if got := runNoCTTYHelper(t, newPtySlave(t), "store"); got != "tty:"+syscall.ENXIO.Error() {
 		t.Fatalf("after OpenRegular and ReadFileLimited of a terminal: %s", got)
+	}
+}
+
+// TestLockFileNoCTTY (task 20l point 3, F3 of the attack review of task
+// 20i): a terminal device at the path of a lock file (here through a
+// symbolic link named lock) is opened by LockFile, LockPath and
+// probeLock with O_NOCTTY and refused as not regular, and it does not
+// become the controlling terminal of a process that has none. Before,
+// the open of an existing lock file had no O_NOCTTY. As
+// TestOpenRegularNoCTTY.
+func TestLockFileNoCTTY(t *testing.T) {
+	if got := runNoCTTYHelper(t, newPtySlave(t), "plain"); got != "tty:ok" {
+		t.Skipf("the control got no controlling terminal: %s", got)
+	}
+	if got := runNoCTTYHelper(t, newPtySlave(t), "lock"); got != "tty:"+syscall.ENXIO.Error() {
+		t.Fatalf("after locking a terminal: %s", got)
 	}
 }
 
@@ -102,6 +119,22 @@ func TestHelperNoCTTY(t *testing.T) {
 		}
 		if _, err := ReadFileLimited(path, MaxRecordFile); !errors.Is(err, ErrNotRegular) {
 			t.Fatalf("ReadFileLimited of a terminal: %v", err)
+		}
+	case "lock":
+		// A symbolic link named lock to the terminal: O_CREATE|O_EXCL
+		// fails on it, the open of the existing file follows it.
+		lock := filepath.Join(t.TempDir(), "lock")
+		if err := os.Symlink(path, lock); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LockFile(lock); !errors.Is(err, ErrNotRegular) {
+			t.Fatalf("LockFile of a terminal: %v", err)
+		}
+		if _, err := LockPath(lock); !errors.Is(err, ErrNotRegular) {
+			t.Fatalf("LockPath of a terminal: %v", err)
+		}
+		if err := probeLock(lock); !errors.Is(err, ErrNotRegular) {
+			t.Fatalf("probeLock of a terminal: %v", err)
 		}
 	default:
 		t.Fatal("unknown mode")

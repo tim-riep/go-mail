@@ -72,6 +72,24 @@ func SetClientDirFault(t interface{ Cleanup(func()) }, f func(step string) error
 	t.Cleanup(func() { clientDirFault = nil })
 }
 
+// ErrTempReplaced is the error of a keygen or restore whose temporary
+// directory was replaced (errTempReplaced).
+var ErrTempReplaced = errTempReplaced
+
+// OpenTempDir runs the check of createClientDir on the directory tmp
+// that os.MkdirTemp has just made (openTempDir) and closes it again.
+func OpenTempDir(tmp string) error {
+	root, _, err := openTempDir(tmp)
+	if err == nil {
+		root.Close()
+	}
+	return err
+}
+
+// ReadKeystore is the key store read of Open and DeviceLost
+// (readKeystore).
+var ReadKeystore = readKeystore
+
 // SetDirLockHook sets the hook of lockClientDir (see dirLockHook) until
 // the test ends.
 func SetDirLockHook(t interface{ Cleanup(func()) }, f func(attempt int)) {

@@ -45,6 +45,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -195,6 +196,30 @@ func (cfg *Config) checkReader() error {
 func (cfg *Config) keystorePath() string { return filepath.Join(cfg.Dir, "keystore") }
 func (cfg *Config) userPath() string     { return filepath.Join(cfg.Dir, "user.rec") }
 func (cfg *Config) statePath() string    { return filepath.Join(cfg.Dir, "state.json") }
+
+// readKeystore reads the sealed key store at path for keys.OpenKeystore
+// (Open, DeviceLost; task 20l point 2, F3 of the attack review of task
+// 20i, R41). It reads with store.ReadFileLimited, at most
+// keys.MaxKeystoreSize bytes: a FIFO in place of the key store is
+// refused at once instead of blocking the open until a writer comes,
+// and a terminal device does not become the controlling terminal of a
+// process that has none (O_NONBLOCK and O_NOCTTY of store.OpenRegular);
+// keys.ReadKeystoreFile opens with neither. As there, a file that is
+// not regular or too large is keys.ErrKeystore (and store.ErrNotRegular
+// or store.ErrTooLarge), a missing one fs.ErrNotExist (and
+// store.ErrNotFound).
+func readKeystore(path string) ([]byte, error) {
+	data, err := store.ReadFileLimited(path, keys.MaxKeystoreSize)
+	switch {
+	case err == nil:
+		return data, nil
+	case errors.Is(err, store.ErrNotRegular), errors.Is(err, store.ErrTooLarge):
+		return nil, fmt.Errorf("%w: %w", keys.ErrKeystore, err)
+	case errors.Is(err, store.ErrNotFound):
+		return nil, fmt.Errorf("%w (%w)", err, fs.ErrNotExist)
+	}
+	return nil, err
+}
 
 // state is the client's memory between runs (2.4, section 7): the
 // highest epoch seen per mailbox with the hash of its epoch.rec, and the
@@ -372,12 +397,15 @@ func loadState(path string) (*state, error) {
 }
 
 func saveState(path string, s *state) error {
-	data, err := json.MarshalIndent(s, "", "  ")
+	data, err := stateData(s)
 	if err != nil {
 		return err
 	}
 	return store.WritePrivateFileAtomic(path, data)
 }
+
+// stateData is the content of state.json for s.
+func stateData(s *state) ([]byte, error) { return json.MarshalIndent(s, "", "  ") }
 
 // Client is an unlocked client. It is not safe for concurrent use: one
 // method at a time, Close included (see the package comment, task 20i
@@ -553,7 +581,7 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	if err := c.checkOwnUser(local); err != nil {
 		return nil, err
 	}
-	ksData, err := keys.ReadKeystoreFile(cfg.keystorePath())
+	ksData, err := readKeystore(cfg.keystorePath())
 	if err != nil {
 		return nil, err
 	}

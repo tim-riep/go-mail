@@ -114,7 +114,7 @@ var resignHook func()
 
 // Limits of one run of readSegments, per mailbox and epoch (task 09c).
 // readSegments holds every segment it accepts in memory until the caller
-// is done, and a segment may be as large as rec.MaxRecordSize (4 MiB);
+// is done, and a segment may be as large as rec.MaxRecordSize (1 MiB);
 // the number of segments in index/<n>/ is not bounded by anybody but the
 // writers, and anybody with write access to the data directory can add
 // files there (copies of valid segments under new sequence numbers, Q11,

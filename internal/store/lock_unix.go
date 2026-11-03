@@ -72,7 +72,8 @@ func unreserve(path string) {
 }
 
 // openLockFile opens path for reading and writing, creating it with mode
-// FilePerm if it does not exist.
+// FilePerm if it does not exist. An existing path is opened with
+// openExistingLock.
 func openLockFile(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
@@ -85,7 +86,33 @@ func openLockFile(path string) (*os.File, error) {
 	if !errors.Is(err, fs.ErrExist) {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_RDWR, 0)
+	return openExistingLock(path)
+}
+
+// openExistingLock opens the existing lock file path for reading and
+// writing (task 20l point 3, F3 of the attack review of task 20i): with
+// O_NOCTTY, so a terminal device in place of a lock file, or named by a
+// symbolic link lock, does not become the controlling terminal of a
+// process that has none, and with O_NONBLOCK, so the open of a FIFO
+// does not wait for a peer; the record locks do not depend on it. After
+// the open fstat must show a regular file; anything else is refused
+// (ErrNotRegular) before it is locked. A missing path is the error of
+// the open (fs.ErrNotExist).
+func openExistingLock(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOCTTY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("store: lock %s is %w", filepath.Base(path), ErrNotRegular)
+	}
+	return f, nil
 }
 
 // fcntlLock sets (typ F_RDLCK or F_WRLCK) or releases (F_UNLCK) the lock
@@ -154,8 +181,9 @@ func tryLockFile(path string) (func(), error) { return lockPath(path, true, fals
 
 // probeLock tries to take an exclusive lock on the existing file path
 // without waiting and releases it at once. It returns nil if the lock was
-// free, ErrLocked if someone holds a lock on the file, and fs.ErrNotExist
-// if there is no such file.
+// free, ErrLocked if someone holds a lock on the file, fs.ErrNotExist if
+// there is no such file and ErrNotRegular if it is no regular file
+// (openExistingLock).
 func probeLock(path string) error {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -167,7 +195,7 @@ func probeLock(path string) error {
 		// process holds is in force against every other process.
 		return ErrLocked
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := openExistingLock(path)
 	if err != nil {
 		return err
 	}
