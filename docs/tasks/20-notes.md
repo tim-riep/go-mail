@@ -229,3 +229,11 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 | `internal/translog` | `FuzzOpenHead` | 5.766.720 |
 | `internal/translog` | `FuzzParseHeadText` | 7.979.507 |
 | `internal/translog` | `FuzzProofs` | 4.926.791 |
+
+## Aus der Spezifikationsprüfung von 20b (keine Funde über niedrig; für 20e)
+- `internal/translog/files.go:183` `newestHeadSize` öffnet `heads/` noch mit `os.Open` (R41-Klasse wie `eachHead`) → `store.OpenDir`, `fs.ErrNotExist` beibehalten.
+- `ListIndexSegments` über der Grenze: Teilmenge in Verzeichnisreihenfolge; `writeSegmentList` kann die höchste eigene Laufnummer verfehlen → `ErrExists`, bis 64 Versuche, fail closed. Im Funktionskommentar nennen.
+- `createClientDir`: `syscall.Rename` auf ein leeres Ziel scheitert, wenn das Ziel ein Einhängepunkt ist (EBUSY/EXDEV) → RUNBOOK/Kommentar.
+- Liegengebliebene `.<name>.keygen-*` beim nächsten `keygen` entfernen.
+- Abhilfetext am Kopf in RUNBOOK und D86.
+- Hinweis: `GOOS=solaris|illumos` vet scheitert an `syscall.Mkfifo` in den neuen FIFO-Tests (gleiches Muster wie bestehende Tests); `lockOnlyDir` könnte `store.OpenDir` nutzen.
