@@ -376,3 +376,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 | `internal/translog` | `FuzzOpenHead` | 6.936.251 |
 | `internal/translog` | `FuzzParseHeadText` | 7.142.506 |
 | `internal/translog` | `FuzzProofs` | 4.665.887 |
+
+## Aus der Nachprüfung (Angriff) von 21b (keine Funde über niedrig)
+- F1 und F2 geschlossen; Restlücke F2 braucht eine Formatänderung: Version ≥ 2 muss Schlüssel oder Zertifikats-Hash des Signierers von Version 1 festhalten (nicht nur die Generationsnummer), sonst ist ein vor dem Pinwechsel geloggtes `ingest-2.cert` des Diebs nicht von der ehrlichen Neuausstellung gleichen Namens zu unterscheiden. → Liste nach M1.
+- RUNBOOK: alte Plattformzertifikate in `platform/` nie entfernen (sonst scheitern auch Flags auf Mails späterer Generationen); Server am abgelesenen Kopf anhalten.
