@@ -102,8 +102,11 @@ type logConn struct {
 var logHook func(translog.Log) translog.Log
 
 // verifier builds the client Verifier from the pin (translog doc.go
-// "Pin"): origin, witnesses and quorum, the current identity and the
-// identity list. The clock is cfg.Now.
+// "Pin"): origin, witnesses and quorum, the current identity, the
+// identity list (field 8) and the revoked platform generations (field 7,
+// D93; Verifier.Revoked, empty for a pin without field 7). The Verifier
+// checks the revocation list against the current identity
+// (translog.CheckRevoked) when the log is opened. The clock is cfg.Now.
 func (cfg *Config) verifier() (*translog.Verifier, error) {
 	pin := cfg.Pin
 	ws := make([]note.Verifier, 0, len(pin.Witnesses))
@@ -114,12 +117,9 @@ func (cfg *Config) verifier() (*translog.Verifier, error) {
 		}
 		ws = append(ws, v)
 	}
-	ids := make([]translog.Identity, 0, len(pin.Identities))
-	for _, id := range pin.Identities {
-		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: id.Pub})
-	}
+	ids, rev := translog.AnchorFromPin(pin)
 	return &translog.Verifier{Origin: pin.Origin, Witnesses: ws, MinWitnesses: pin.MinWitnesses,
-		Identity: translog.Identity{Gen: pin.Gen, Pub: pin.Pub}, Identities: ids, Now: cfg.Now}, nil
+		Identity: translog.Identity{Gen: pin.Gen, Pub: pin.Pub}, Identities: ids, Revoked: rev, Now: cfg.Now}, nil
 }
 
 // headFromNote returns the head of a signed note kept in state.json. The

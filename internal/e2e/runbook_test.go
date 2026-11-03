@@ -796,9 +796,16 @@ func TestRunbook(t *testing.T) {
 	}
 
 	// 7. Succession of the platform identity 1 to 2.
-	r.step("7.3", "succeed --compromised gesperrt (Q19)")
-	if code, _, e := r.refuse("", "gomail-ceremony", "succeed", "--pin", pin1, "--out", filepath.Join(dir, "export-c"), "--compromised"); code != 2 || !strings.Contains(e, "Q19") {
+	// The whole flow of 7.3 (boundary, reissue, publish, serve, client)
+	// is TestRevokedIngestEndToEnd and the ceremony tests of task 21c;
+	// here only the refusal without the boundary of the revocation.
+	r.step("7.3", "succeed --compromised ohne Grenze des Widerrufs verweigert (D93)")
+	if code, _, e := r.refuse("", "gomail-ceremony", "succeed", "--pin", pin1, "--out", filepath.Join(dir, "export-c"), "--compromised"); code != 2 ||
+		!strings.Contains(e, "--revoke-at-size und --revoke-at-time sind nötig") {
 		t.Fatalf("succeed --compromised: exit %d %s", code, e)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "export-c")); err == nil {
+		t.Fatal("export of a compromise without boundary written")
 	}
 	r.step("7.1", "succeed (Testseams)")
 	out2 := filepath.Join(dir, "export-2")

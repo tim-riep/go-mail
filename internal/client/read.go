@@ -14,16 +14,27 @@ import (
 	"github.com/tim-riep/go-mail/internal/translog"
 )
 
+// ErrPlatformRevoked: a file is signed by an ingest generation that pin
+// field 7 revokes, and its receipt (creation) time is not before the
+// generation's revoked_at_time (D93 (2), task 21b). It wraps ErrPlatform;
+// the fixed cause of a warning is "Generation widerrufen" (warnCause).
+var ErrPlatformRevoked = fmt.Errorf("%w: generation revoked", ErrPlatform)
+
 // ingestKeyFor returns the ingest key of generation gen (2.3, section 7):
 // ingest-<gen>.cert signed by the platform identity of its identity_gen
 // (the key of the pin's identity list, or above the list the key named
 // by the valid logged successions, translog doc.go "Validity rules") and
-// a valid entry of the log (CheckPlatform). until is valid_from of
+// a valid entry of the log (CheckPlatform; a certificate the pin's field
+// 7 makes invalid at its index is none). until is valid_from of
 // ingest-<gen+1>.cert once that is a valid entry of the log (Lookup):
-// the strictest reading without Q8 (translog doc.go "Platform
-// generations", Log.CheckPlatform), the generation signs validly only
-// metadata received before it. The cache is emptied whenever the
-// reference head changes (refreshLog).
+// the supersession rule (translog doc.go "Platform generations",
+// Log.CheckPlatform), the generation signs validly only metadata
+// received before it. When pin field 7 revokes generation gen or the
+// identity generation that issued its certificate (D93 (2), its addendum;
+// Verifier.RevokedCertAtTime), it signs validly only files received
+// (created) before that revoked_at_time, whatever until is (revokedFor,
+// ErrPlatformRevoked). The cache is emptied whenever the reference head
+// changes (refreshLog).
 func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	c.mu.Lock()
 	k, ok := c.ingest[gen]
@@ -47,12 +58,13 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	if err != nil {
 		return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
 	}
-	// The certificate in the log, its generation not compromised (2.3,
-	// 7; pin field 7 only if Q8).
+	// The certificate in the log (2.3, 7); a certificate of a revoked
+	// generation or by a revoked identity generation logged from
+	// revoked_at_size on is no valid entry (D93 (2)).
 	if err := c.logged(func(l translog.Log) error { return l.CheckPlatform(name, raw) }); err != nil {
 		return ingestKey{}, err
 	}
-	k = ingestKey{pub: cert.Pub, validFrom: cert.ValidFrom}
+	k = ingestKey{pub: cert.Pub, validFrom: cert.ValidFrom, gen: gen, issuer: cert.IdentityGen}
 	if gen < ^uint32(0) {
 		next, err := c.lg.log.Lookup(translog.KindPlatform, []byte(store.PlatformFileName("ingest", gen+1, "cert")))
 		if err != nil {
@@ -70,6 +82,59 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	c.ingest[gen] = k
 	c.mu.Unlock()
 	return k, nil
+}
+
+// revokedFor reports whether pin field 7 makes a signature of this
+// generation on a file received (created) at t invalid (D93 (2) and its
+// addendum): the generation or the identity generation that issued its
+// certificate is revoked and t is not before that revoked_at_time
+// (Verifier.RevokedCertAtTime).
+func (k ingestKey) revokedFor(v *translog.Verifier, t int64) bool {
+	return v.RevokedCertAtTime(store.KeyRoleIngest, k.gen, k.issuer, t)
+}
+
+// checkReceivedCovered is the check of pin field 7 for metadata a user
+// signed (version 2 or later, a flag change or a takeover, K4): the
+// version does not name the ingest generation that signed version 1, so
+// the receipt time t must lie in the interval of an ingest generation
+// whose certificate is a valid entry of the log (ingestKeyFor: from its
+// valid_from to valid_from of the next generation's certificate) and
+// that generation must not be revoked at t, directly or through the
+// identity generation that issued its certificate (revokedFor; D93 (2)
+// and its addendum, task 21b rework after review, finding F2). The
+// same rule judges the heads (translog LogKey.Covers and
+// RevokedCertAtTime): at most one generation covers a time. Otherwise a
+// device with an older pin, which accepted a mail of a revoked
+// generation received from revoked_at_time on, would launder it by a
+// flag change into a version no ingest check applies to. A time no
+// generation covers (before valid_from of generation 1) is ErrPlatform;
+// one in the interval of a revoked generation from its revoked_at_time
+// on is ErrPlatformRevoked ("Generation widerrufen").
+//
+// What it cannot see without a format change: version 1 signed by a
+// revoked generation with a receipt time in the interval of another,
+// valid generation (an older pin's device accepted it because that
+// generation's certificate was not yet in its log); the new version
+// passes when the generation that covers the time is not revoked.
+func (c *Client) checkReceivedCovered(t int64) error {
+	for gen := uint32(1); ; gen++ {
+		k, err := c.ingestKeyFor(gen)
+		if err != nil {
+			return err
+		}
+		if t < k.validFrom {
+			return fmt.Errorf("%w: no ingest generation valid at receipt", ErrPlatform)
+		}
+		if k.superseded && t >= k.until {
+			// ingestKeyFor sets superseded only below the largest
+			// generation: gen+1 does not overflow.
+			continue
+		}
+		if k.revokedFor(c.lg.v, t) {
+			return fmt.Errorf("%w: %w: ingest generation %d, which covers the receipt time, revoked by the pin", ErrPlatformRevoked, translog.ErrRevoked, gen)
+		}
+		return nil
+	}
 }
 
 // identityKey returns the key of platform identity generation gen: from
@@ -121,22 +186,34 @@ type Mail struct {
 //   - kind meta, mailbox, file ID and folder as named by its location,
 //   - epoch in the verified chain and not discarded, suite of the epoch,
 //   - version 1 signed by a certified ingest key valid at the time of
-//     receipt; a later version (a flag change, section 7, K4) signed by a
-//     user member (kind 1) of the epoch with the current generation of
-//     its user.rec, or with a revoked generation if this client's check
+//     receipt (from valid_from, before a revoked generation's
+//     revoked_at_time, ErrPlatformRevoked, and before valid_from of the
+//     next generation; ingestKeyFor); a later version (a flag change,
+//     section 7, K4) signed by a user member (kind 1) of the epoch with
+//     the current generation of its user.rec, or with a revoked generation if this client's check
 //     record names exactly this file and was made before the revocation
 //     the log shows (2.2 rule 4, S13, task 09b; checkedBefore): then the
 //     client takes the file over and signs it again as version + 1
 //     (resignMeta), except during step 2 of DeviceLost. Without such a
 //     record the file is not used (errNotChecked, the caller warns with
-//     the mail ID only). A user signature on version 1 and an ingest
-//     signature on a later version are rejected,
+//     the mail ID only). For such a later version the receipt time must
+//     lie in the interval of a logged ingest generation that pin field 7
+//     does not revoke at it (checkReceivedCovered: ErrPlatformRevoked,
+//     or ErrPlatform before the first generation). A user signature on
+//     version 1 and an ingest signature on a later version are rejected,
 //   - signature over the file and the fields of section 7 (meta-signed),
 //   - receipt time equal to the creation time of the file and version
 //     equal to the header,
 //   - the epoch rule of 2.4 (checkEpochRule): the epoch had begun at
 //     receipt and no newer epoch that is not discarded had begun,
-//   - the address assignment at receipt in the log,
+//   - the address assignment at receipt in the log (ErrAddress; one in
+//     force of a superseded admin generation ErrAddressSuperseded,
+//     addressErr). An assignment that pin field 7 makes invalid (its
+//     admin generation, or the identity generation that issued its
+//     certificate, revoked at its log index, D93 (2)) is no valid entry
+//     of the audited tree and assigns nothing: ErrAddress with
+//     translog.ErrNotInLog ("Adresse nicht zugeordnet"), or the older
+//     assignment it would have replaced stays in force,
 //   - version not older than the highest seen, and epoch, receipt time
 //     and mail hash equal to those remembered for the mail (the first
 //     version seen), and for the highest version seen the same file
@@ -171,8 +248,8 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 		return nil, fmt.Errorf("%w: metadata without signature", ErrSigner)
 	}
 	var pub ed25519.PublicKey
-	validFrom, ingest := int64(0), false
-	superseded, until := false, int64(0)
+	ingest := false
+	var ik ingestKey
 	// signer and gen of a user signature; taken: by a revoked generation,
 	// accepted through the check record.
 	var signer store.ID
@@ -183,12 +260,11 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 		if h.Version != 1 {
 			return nil, fmt.Errorf("%w: ingest signature on metadata version %d", ErrSigner, h.Version)
 		}
-		ik, err := c.ingestKeyFor(ref.Gen)
+		ik, err = c.ingestKeyFor(ref.Gen)
 		if err != nil {
 			return nil, err
 		}
-		pub, validFrom, ingest = ik.pub, ik.validFrom, true
-		superseded, until = ik.superseded, ik.until
+		pub, ingest = ik.pub, true
 	case ref.Type == envelope.SignerUser:
 		if h.Version < 2 {
 			return nil, fmt.Errorf("%w: user signature on metadata version %d", ErrSigner, h.Version)
@@ -237,11 +313,19 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	if m.MailID != id || m.Folder != folder || m.Received != h.Created || m.Version != h.Version {
 		return nil, fmt.Errorf("%w: metadata fields", ErrMismatch)
 	}
-	if ingest && m.Received < validFrom {
+	if ingest && m.Received < ik.validFrom {
 		return nil, fmt.Errorf("%w: ingest key not yet valid at receipt", ErrPlatform)
 	}
-	if ingest && superseded && m.Received >= until {
+	if ingest && ik.revokedFor(c.lg.v, m.Received) {
+		return nil, fmt.Errorf("%w: %w: ingest generation %d revoked by the pin at receipt", ErrPlatformRevoked, translog.ErrRevoked, f.Trailer.Signer.Gen)
+	}
+	if ingest && ik.superseded && m.Received >= ik.until {
 		return nil, fmt.Errorf("%w: %w: ingest key superseded by the next generation at receipt", ErrPlatform, translog.ErrMismatch)
+	}
+	if !ingest {
+		if err := c.checkReceivedCovered(m.Received); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.checkEpochRule(ch, e, m.Received); err != nil {
 		return nil, err
@@ -252,20 +336,19 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 		// address.
 		check := func(l translog.Log) error { return l.CheckAddress(a, mbx, m.Received) }
 		err := c.logged(check)
-		if (errors.Is(err, translog.ErrNotInLog) || errors.Is(err, translog.ErrMismatch)) && !c.addrRefreshed {
+		if addressRefused(err) && !c.addrRefreshed {
 			// An assignment logged after the reference head is not
 			// visible to CheckAddress (it answers from the audit index):
-			// one Refresh per operation, then the answer is final.
+			// one Refresh per operation, then the answer is final. That
+			// holds for an assignment in force that the log refuses
+			// (ErrOrder, ErrRevoked) as well: a newer one may replace it.
 			c.addrRefreshed = true
 			if rerr := c.refreshLog(); rerr != nil {
 				return nil, rerr
 			}
 			err = c.logged(check)
 		}
-		if errors.Is(err, translog.ErrNotInLog) || errors.Is(err, translog.ErrMismatch) {
-			return nil, fmt.Errorf("%w: %w", ErrAddress, err)
-		}
-		if err != nil {
+		if err := addressErr(err); err != nil {
 			return nil, err
 		}
 	}
@@ -282,6 +365,49 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 		c.noteCheckedLater(mbx, metaMemo(id), data, signer, gen)
 	}
 	return mail, nil
+}
+
+// ErrAddressSuperseded: the address assignment in force at receipt is by
+// an admin generation that admin-<g+1>.cert had superseded at the
+// assignment's valid_from (D93 (3), translog Log.CheckAddress, ErrOrder).
+// It wraps ErrAddress; the fixed cause of a warning is "Zuordnung einer
+// abgelösten Admin-Generation" (warnCause).
+var ErrAddressSuperseded = fmt.Errorf("%w: assignment of a superseded admin generation", ErrAddress)
+
+// addressRefused reports whether err of CheckAddress refuses the
+// assignment (not found, another mailbox, or refused by the rules of the
+// log: ErrOrder, which translog.ErrRevoked wraps), so that one refresh
+// may change the answer.
+func addressRefused(err error) bool {
+	return errors.Is(err, translog.ErrNotInLog) || errors.Is(err, translog.ErrMismatch) || errors.Is(err, translog.ErrOrder)
+}
+
+// addressErr maps an error of CheckAddress to the error of checkMeta,
+// all checkable with errors.Is and each with a fixed cause (warnCause):
+// one of a superseded admin generation (translog.ErrOrder, D93 (3)) is
+// ErrAddressSuperseded; none in force or one for another mailbox is
+// ErrAddress ("Adresse nicht zugeordnet"). Other errors (the log cannot
+// answer) pass unchanged.
+//
+// The branch for translog.ErrRevoked (ErrAddress and ErrPlatformRevoked,
+// "Generation widerrufen") is defensive and not reached today:
+// CheckAddress never answers it, because an assignment that pin field 7
+// makes invalid at its log index is no valid entry of the audited tree
+// (translog RevokedCertAtIndex) and the answer is translog.ErrNotInLog
+// or the older assignment in force. It keeps the fixed cause should the
+// log ever name the revocation.
+func addressErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, translog.ErrRevoked):
+		return fmt.Errorf("%w: %w: %w", ErrAddress, ErrPlatformRevoked, err)
+	case errors.Is(err, translog.ErrOrder):
+		return fmt.Errorf("%w: %w", ErrAddressSuperseded, err)
+	case errors.Is(err, translog.ErrNotInLog), errors.Is(err, translog.ErrMismatch):
+		return fmt.Errorf("%w: %w", ErrAddress, err)
+	}
+	return err
 }
 
 // noteVersion applies the rules against replay (section 7) to checked
@@ -575,6 +701,9 @@ func (c *Client) openPending(ch *chain, e *store.Epoch, file store.ID) (*store.P
 	}
 	if f.Header.Created < ik.validFrom {
 		return reject(fmt.Errorf("%w: ingest key not yet valid", ErrPlatform))
+	}
+	if ik.revokedFor(c.lg.v, f.Header.Created) {
+		return reject(fmt.Errorf("%w: %w: ingest generation %d revoked by the pin", ErrPlatformRevoked, translog.ErrRevoked, f.Trailer.Signer.Gen))
 	}
 	if ik.superseded && f.Header.Created >= ik.until {
 		return reject(fmt.Errorf("%w: %w: ingest key superseded by the next generation", ErrPlatform, translog.ErrMismatch))

@@ -70,6 +70,13 @@ type Config struct {
 	// lock. Whether the server requires a running client is decided by
 	// the program (gomail-server), not by this package.
 	PeerCheck bool
+	// Revoked is the revocation list of the server's pin (field 7, D93;
+	// translog.AnchorFromPin). New refuses an ingest generation it lists
+	// or whose certificate an identity generation it lists issued
+	// (ErrRevoked): every client with that pin rejects what it signs from
+	// revoked_at_time on, and revoked_at_time lies before the pin was
+	// made. Empty for a pin without field 7.
+	Revoked []translog.Revoked
 }
 
 // Ingest is the backend of the SMTP server.
@@ -123,6 +130,12 @@ var (
 	// time from valid_from on (translog LogKey.Covers); a server started
 	// earlier with the new key would sign mails every client rejects.
 	ErrNotYetValid = errors.New("ingest: the ingest certificate is not valid yet")
+	// ErrRevoked: the server's pin revokes the ingest generation or the
+	// identity generation that issued its certificate (field 7, D93 (2)
+	// and its addendum, task 21b). A client with that pin rejects metadata and
+	// heads it signs from revoked_at_time on; the server starts only with
+	// a newly issued generation.
+	ErrRevoked = errors.New("ingest: the ingest generation is revoked by the pin")
 )
 
 // New checks the ingest key against platform/ingest-<gen>.cert in the
@@ -137,7 +150,15 @@ var (
 // certificate must be valid at the time of the start, Config.Now:
 // valid_from after it fails with ErrNotYetValid and ErrConfig (task 20a
 // point 1, RUNBOOK 6 step 4: the server with the new key starts only from
-// valid_from on). There is no tolerance (not translog.MaxClockSkew): the
+// valid_from on). A generation that Config.Revoked lists fails with
+// ErrRevoked and ErrConfig, before the certificate is read, and so does
+// one whose certificate an identity generation that Config.Revoked lists
+// issued (identity_gen of ingest-<gen>.cert; the cascade of D93, its
+// addendum on task 21a), right after the certificate is read; both
+// before the server lock is taken (task 21b): whatever the time of the
+// start, revoked_at_time comes from a head read before the pin was
+// made, so every client with that pin rejects what the generation signs
+// from now on (translog.RevokedCertAtTime). There is no tolerance (not translog.MaxClockSkew): the
 // receipt time of every mail is this clock, and a client rejects a
 // receipt time before valid_from without any (client ingestKey); with
 // the same clock, exactly one of the old and the new generation passes
@@ -161,9 +182,19 @@ func New(cfg Config) (*Ingest, error) {
 	if cfg.BatchSize < 0 || cfg.BatchSize > store.MaxBatch {
 		return nil, fmt.Errorf("%w: batch size %d: 0 (default %d) or 1 to %d", ErrConfig, cfg.BatchSize, DefaultBatchSize, store.MaxBatch)
 	}
+	if _, ok := translog.FindRevoked(cfg.Revoked, store.KeyRoleIngest, cfg.IngestGen); ok {
+		return nil, fmt.Errorf("%w: %w: generation %d", ErrConfig, ErrRevoked, cfg.IngestGen)
+	}
 	cert, err := cfg.Store.ReadPlatformCert(keys.RoleIngest, cfg.IngestGen)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ingest certificate: %v", ErrConfig, err)
+	}
+	// The cascade (D93, addendum on task 21a): revoking the identity
+	// generation that issued ingest-<gen>.cert revokes what generation
+	// gen signs from that revoked_at_time on (translog
+	// RevokedCertAtTime), so a client with this pin rejects it as well.
+	if _, ok := translog.FindRevoked(cfg.Revoked, store.KeyRoleIdentity, cert.IdentityGen); ok {
+		return nil, fmt.Errorf("%w: %w: generation %d, certified by the revoked identity generation %d", ErrConfig, ErrRevoked, cfg.IngestGen, cert.IdentityGen)
 	}
 	if !cert.Pub.Equal(cfg.IngestKey.Public()) {
 		return nil, fmt.Errorf("%w: the ingest key does not match ingest-%d.cert", ErrConfig, cfg.IngestGen)

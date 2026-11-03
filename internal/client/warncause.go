@@ -29,6 +29,8 @@ func warnCause(err error) string {
 		return "mehr Indexsegmente in der Epoche, als ein Lauf liest"
 	case errors.Is(err, errNotChecked):
 		return "von einer widerrufenen Generation signiert und vorher nicht geprüft"
+	case errors.Is(err, ErrPlatformRevoked), errors.Is(err, translog.ErrRevoked):
+		return "Generation widerrufen"
 	case errors.Is(err, ErrRevoked):
 		return "von einer widerrufenen Generation signiert und nicht gegengezeichnet"
 	case errors.Is(err, ErrDiscardedEpoch):
@@ -54,6 +56,8 @@ func warnCause(err error) string {
 		return "Entschlüsselung fehlgeschlagen"
 	case errors.Is(err, envelope.ErrSuite):
 		return "Algorithmensatz passt nicht"
+	case errors.Is(err, ErrAddressSuperseded):
+		return "Zuordnung einer abgelösten Admin-Generation"
 	case errors.Is(err, ErrAddress):
 		return "Adresse nicht zugeordnet"
 	case errors.Is(err, ErrSuperseded):

@@ -281,15 +281,20 @@ func TestSuccessionEndToEnd(t *testing.T) {
 	stopWitness()
 	srv.stop()
 
-	// 3. A compromise of identity 2 is refused (Q19), by the program and
-	// by the library; nothing is written.
+	// 3. A compromise of identity 2 (D93, task 21c): without the boundary
+	// of the revocation it is a usage error, by the program and by the
+	// library, and nothing is written. With size and time of a confirmed
+	// head the new pin identity-3.pin revokes identity 2 in field 7 from
+	// that size and from the head's time + 1 ms (D93 addendum), and no
+	// succession is written. It is not published: step 4 goes on with a
+	// regular succession of identity 2.
 	pin2p, err := ceremony.ReadPin(pin2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out3c := filepath.Join(dir, "out3c")
 	if code, _, e := p.exec("", "gomail-ceremony", "succeed", "--pin", pin2, "--out", out3c, "--compromised"); code != 2 ||
-		!strings.Contains(e, "noch nicht verfügbar: Widerruf einer Plattformgeneration ist nicht festgelegt (Q19)") {
+		!strings.Contains(e, "--revoke-at-size und --revoke-at-time sind nötig") {
 		t.Fatalf("succeed --compromised: %d %s", code, e)
 	}
 	if _, err := ceremony.Succeed(ceremony.SucceedOptions{UnlockOptions: ceremony.UnlockOptions{IdentityGen: 2, IdentityPub: pin2p.Pub,
@@ -298,6 +303,26 @@ func TestSuccessionEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(out3c); err == nil {
 		t.Fatal("export of a compromise written")
+	}
+	confirmed, err := cl1.Refresh(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res3c, err := ceremony.Succeed(ceremony.SucceedOptions{UnlockOptions: ceremony.UnlockOptions{IdentityGen: 2, IdentityPub: pin2p.Pub,
+		Prompter: holders(shares, 2, 4, 1)}, Out: out3c, Pin: pin2p, Compromised: true, HeadSize: confirmed.Size, HeadTime: confirmed.Time})
+	if err != nil {
+		t.Fatalf("ceremony.Succeed with Compromised and boundary: %v", err)
+	}
+	pin3c, err := ceremony.ReadPin(filepath.Join(out3c, "identity-3.pin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.PlatformRevoked{Role: store.KeyRoleIdentity, Gen: 2, AtSize: confirmed.Size, AtTime: confirmed.Time + 1}
+	if pin3c.Gen != 3 || res3c.Pin.Gen != 3 || len(pin3c.Revoked) != 1 || pin3c.Revoked[0] != want {
+		t.Fatalf("pin after the compromise: gen %d, field 7 %+v", pin3c.Gen, pin3c.Revoked)
+	}
+	if _, err := os.Stat(filepath.Join(out3c, "identity-3.succ")); err == nil {
+		t.Fatal("succession written after a compromise")
 	}
 
 	// 4. A regular succession of identity 2 to 3 that replaces the

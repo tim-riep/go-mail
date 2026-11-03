@@ -534,6 +534,9 @@ type ingestKey struct {
 	// which this generation signs nothing validly (ingestKeyFor).
 	until      int64
 	superseded bool
+	// gen and issuer (identity_gen of ingest-<gen>.cert) name the
+	// generation for the revocation rules of pin field 7 (revokedFor).
+	gen, issuer uint32
 }
 
 type epochRef struct {

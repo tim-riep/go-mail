@@ -40,15 +40,20 @@
 //  3. the server lock locks/server: a second server refuses here, before
 //     it reads the ingest key (task 14 addendum);
 //  4. the ingest key (ceremony.ReadKey): outside the data directory,
-//     role ingest;
+//     role ingest, and its generation not revoked by pin field 7 (D93,
+//     task 21b: exit status 2 with the fixed message ingestRevoked;
+//     ingest.New refuses it as well, ingest.ErrRevoked, and also a
+//     generation whose certificate a revoked identity generation issued,
+//     the cascade of D93, mapped to ingestRevoked as well);
 //  5. the log side (openLogSide): the pin against platform/
 //     (checkPlatformPin, translog.ErrMismatch: no identity generation
 //     the pin does not know, operating rule after a succession, Q10
 //     point 5, no contradiction to its identity list),
 //     platform/witnesses.rec, the working copy of the witnesses (a
 //     warning when it differs from the pin), and the operator log of the
-//     data directory opened against the pin's identity list and origin
-//     (translog.Open checks the tiles against tree.rec and the quorum);
+//     data directory opened against the pin's identity list, revocation
+//     list (field 7, D93) and origin (translog.Open checks the tiles
+//     against tree.rec and the quorum);
 //  6. ingest.New: the server lock locks/server, held exclusively until
 //     the end (a second server fails), the ingest key against its
 //     certificate, the certificate in the log, valid at the start (a
@@ -79,7 +84,10 @@
 // --listen; ingest checks every delivery against the same operator log.
 // "address add" logs the signed assignment with Append(KindAddress)
 // before it changes addresses.json, and only when the address is free
-// or already assigned to that mailbox (exit status 2 otherwise). On
+// or already assigned to that mailbox (exit status 2 otherwise), and
+// only with an admin key whose generation pin field 7 does not revoke,
+// nor the identity generation that issued its certificate (exit status 2
+// with the fixed message adminRevoked, D93 and its addendum). On
 // success it prints the normalized address and the mailbox on standard
 // output ("<address> -> <mailbox>"); no message on standard error names
 // the address, an error names the mailbox only (failAddr,
@@ -89,7 +97,12 @@
 // entries give (translog.OrphanEntriesError, task 15d) are reported
 // with their count and nothing is written (exit status 1); the operator
 // removes them on purpose and repairs again. On success it says that
-// no entry was reported or dropped. A running server never accepts the
+// no entry was reported or dropped. A head signed by an ingest
+// generation the pin revokes at its time (pin field 7, D93,
+// translog.ErrRevokedHead: after a ceremony that revokes it, also the
+// heads a thief signed) blocks SignHead and PublishHead; log repair moves
+// it to log/heads-revoked/ (translog.RepairTreeResult), names every
+// moved file and its new place on standard output, and counts them. A running server never accepts the
 // repaired tree; it is restarted afterwards.
 //
 // Both listeners accept only a loopback address unless
@@ -251,27 +264,28 @@ func checkListen(addr string, isolated bool) error {
 // device is refused, never waited for). A development pin is a
 // usageError in a build without the development ceremony (checkDevPin,
 // task 15k finding 1); every server command reads its pin here before it
-// takes a lock or opens the log.
-func readPin(path, root string) (*store.PlatformPin, []translog.Identity, error) {
+// takes a lock or opens the log. It returns the pin with its identity
+// list (field 8) and its revocation list (field 7, D93; empty without
+// field 7), with which every command opens the operator log
+// (translog.Options.Identities and Revoked), so that server, ceremony and
+// clients with the same pin judge every entry alike.
+func readPin(path, root string) (*store.PlatformPin, []translog.Identity, []translog.Revoked, error) {
 	rp, inside, err := outsideData(path, root, "Pin")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if inside {
-		return nil, nil, usageError{"der Pin darf nicht im Datenverzeichnis liegen"}
+		return nil, nil, nil, usageError{"der Pin darf nicht im Datenverzeichnis liegen"}
 	}
 	pin, err := readPinFile(rp)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := checkDevPin(pin); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	ids := make([]translog.Identity, 0, len(pin.Identities))
-	for _, id := range pin.Identities {
-		ids = append(ids, translog.Identity{Gen: id.Gen, Pub: id.Pub})
-	}
-	return pin, ids, nil
+	ids, rev := translog.AnchorFromPin(pin)
+	return pin, ids, rev, nil
 }
 
 // devPinRefused is the message for a development pin in a build without
@@ -283,6 +297,20 @@ const devPinRefused = "der Pin ist ein Entwicklungs-Pin (gomail-ceremony init --
 // (ingest.ErrNotYetValid, task 20a point 1, RUNBOOK 6 step 4).
 const ingestNotYetValid = "der Ingest-Schlüssel ist noch nicht gültig (valid_from seines Zertifikats liegt nach der Uhr dieses Rechners); " +
 	"den Server mit diesem Schlüssel erst ab valid_from starten, bis dahin mit dem bisherigen"
+
+// ingestRevoked is the message of serve for an ingest key whose
+// generation pin field 7 revokes, directly or through the identity
+// generation that issued its certificate (D93, task 21b;
+// ingest.ErrRevoked).
+const ingestRevoked = "der Ingest-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); " +
+	"den Server nur mit dem Schlüssel einer neu ausgestellten Ingest-Generation starten"
+
+// adminRevoked is the message of "address add" for an admin key whose
+// generation pin field 7 revokes, directly or through the identity
+// generation that issued its certificate (D93, task 21b): every
+// assignment it signs now is logged from revoked_at_size on and invalid.
+const adminRevoked = "der Admin-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); " +
+	"Zuordnungen nur mit dem Schlüssel einer neu ausgestellten Admin-Generation"
 
 // devPinWarning is printed by a build with the development ceremony when
 // it runs with a development pin.
@@ -405,7 +433,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	}
 	// The pin first (task 15k finding 1): a development pin in a
 	// production build stops serve before any check, lock or log.
-	pin, ids, err := readPin(*pinFile, st.Root)
+	pin, ids, rev, err := readPin(*pinFile, st.Root)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -435,7 +463,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 		return fail(stderr, err)
 	}
 	defer keys.Wipe(key)
-	op, side, signer, err := openLogSide(st, pin, ids, key, *headInterval, logger)
+	// D93, task 21b: a generation the pin revokes signs nothing a client
+	// with that pin accepts from revoked_at_time on.
+	if _, ok := translog.FindRevoked(rev, store.KeyRoleIngest, gen); ok {
+		return fail(stderr, usageError{ingestRevoked})
+	}
+	op, side, signer, err := openLogSide(st, pin, ids, rev, key, *headInterval, logger)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -443,7 +476,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 	// Close. PeerCheck only with --require-client-lock (D70: by default a
 	// server cannot require a running client; the client refuses without
 	// an effective server lock).
-	cfg := ingest.Config{Store: st, Log: op, IngestKey: key, IngestGen: gen, Logger: logger, PeerCheck: *requireClient}
+	cfg := ingest.Config{Store: st, Log: op, IngestKey: key, IngestGen: gen, Logger: logger, PeerCheck: *requireClient, Revoked: rev}
 	if err := testConfig(&cfg); err != nil {
 		return fail(stderr, err)
 	}
@@ -458,6 +491,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 			// Task 20a point 1: an operating error, refused like a usage
 			// error (exit status 2) with a fixed message.
 			err = usageError{ingestNotYetValid}
+		case errors.Is(err, ingest.ErrRevoked):
+			err = usageError{ingestRevoked}
 		}
 		return fail(stderr, err)
 	}
@@ -520,11 +555,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, onReady ready) 
 }
 
 // openLogSide checks platform/ against the pin read by readPin
-// (checkPlatformPin), opens the operator log of the pin and the log
+// (checkPlatformPin), opens the operator log of the pin (identity list
+// ids, revocation list rev) and the log
 // side of the server (task 11) and returns the log signer of key. A
 // development pin reaches it only in a build with the development
 // ceremony, which warns.
-func openLogSide(st *store.Store, pin *store.PlatformPin, ids []translog.Identity, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, note.Signer, error) {
+func openLogSide(st *store.Store, pin *store.PlatformPin, ids []translog.Identity, rev []translog.Revoked, key ed25519.PrivateKey, interval time.Duration, logger *slog.Logger) (translog.Operator, *loghttp.Server, note.Signer, error) {
 	if pin.Dev {
 		logger.Warn("development pin (gomail-ceremony init --dev)")
 	}
@@ -542,7 +578,7 @@ func openLogSide(st *store.Store, pin *store.PlatformPin, ids []translog.Identit
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin, Known: note.VerifierList(wvs...),
+	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Revoked: rev, Origin: pin.Origin, Known: note.VerifierList(wvs...),
 		Witnesses: wvs, MinWitnesses: ws.Min})
 	if err != nil {
 		return nil, nil, nil, err
@@ -601,14 +637,14 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	pin, ids, err := readPin(*pinFile, st.Root)
+	pin, ids, rev, err := readPin(*pinFile, st.Root)
 	if err != nil {
 		return fail(stderr, err)
 	}
 	if pin.Dev {
 		fmt.Fprintln(stderr, devPinWarning)
 	}
-	tl, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin})
+	tl, err := translog.Open(translog.Options{Store: st, Identities: ids, Revoked: rev, Origin: pin.Origin})
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -638,9 +674,19 @@ func address(args []string, stdout, stderr io.Writer) int {
 		return failAddr(stderr, err, pos[1], addr)
 	}
 	defer keys.Wipe(admin)
+	if _, ok := translog.FindRevoked(rev, store.KeyRoleAdmin, gen); ok {
+		return fail(stderr, usageError{adminRevoked})
+	}
 	cert, err := st.ReadPlatformCert(keys.RoleAdmin, gen)
 	if err != nil || !cert.Pub.Equal(admin.Public()) {
 		return fail(stderr, errors.New("der Admin-Schlüssel passt nicht zu admin-<gen>.cert"))
+	}
+	// The cascade (D93, addendum on task 21a): an assignment logged from
+	// revoked_at_size of the identity generation that issued
+	// admin-<gen>.cert on is invalid as well (translog
+	// RevokedCertAtIndex).
+	if _, ok := translog.FindRevoked(rev, store.KeyRoleIdentity, cert.IdentityGen); ok {
+		return fail(stderr, usageError{adminRevoked})
 	}
 	// Signed assignment for the log (2.3); addresses.json is the working copy.
 	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: time.Now().UnixMilli(), AdminGen: gen}
@@ -762,7 +808,7 @@ func logCmd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	pin, ids, err := readPin(*pinFile, st.Root)
+	pin, ids, rev, err := readPin(*pinFile, st.Root)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -775,7 +821,13 @@ func logCmd(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, fmt.Errorf("Server-Sperre: %w", err))
 	}
 	defer release()
-	if err := translog.RepairTree(translog.Options{Store: st, Identities: ids, Origin: pin.Origin}); err != nil {
+	res, err := translog.RepairTreeResult(translog.Options{Store: st, Identities: ids, Revoked: rev, Origin: pin.Origin})
+	// Heads of a generation the pin revokes (translog.ErrRevokedHead,
+	// D93): moved aside, never deleted; each is named with its new place.
+	for _, m := range res.RevokedHeads {
+		fmt.Fprintf(stdout, "%s von einer widerrufenen Generation signiert (Pin-Feld 7), verschoben nach %s\n", m.From, m.To)
+	}
+	if err != nil {
 		code := fail(stderr, err)
 		// Orphaned entries (task 15d point 2): reported, never removed.
 		var oe *translog.OrphanEntriesError
@@ -789,6 +841,7 @@ func logCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		return code
 	}
-	fmt.Fprintln(stdout, "log/tree.rec, Kacheln und keys/ aus den Einträgen und Köpfen neu gebaut; 0 verwaiste Einträge gemeldet, 0 verworfen")
+	fmt.Fprintf(stdout, "log/tree.rec, Kacheln und keys/ aus den Einträgen und Köpfen neu gebaut; 0 verwaiste Einträge gemeldet, 0 verworfen; "+
+		"%d Köpfe einer widerrufenen Generation nach %s verschoben\n", len(res.RevokedHeads), translog.RevokedHeadsDir)
 	return 0
 }

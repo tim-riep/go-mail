@@ -344,9 +344,9 @@ func TestLogForeignUserSuperseded(t *testing.T) {
 	}
 }
 
-// platformKeys derives identity 1 and ingest generation gen from the root
-// of the development ceremony of env (its key directory).
-func platformKeys(t *testing.T, env *testenv.Env, gen uint32) (identity, ingest ed25519.PrivateKey) {
+// rootSeed returns the root seed of the development ceremony of env (its
+// key directory).
+func rootSeed(t *testing.T, env *testenv.Env) keys.Seed {
 	t.Helper()
 	text := string(mustRead(t, filepath.Join(env.KeyDir, ceremony.RootFile)))
 	i := strings.Index(text, "seed: ")
@@ -359,8 +359,17 @@ func platformKeys(t *testing.T, env *testenv.Env, gen uint32) (identity, ingest 
 	}
 	var seed keys.Seed
 	copy(seed[:], b)
+	return seed
+}
+
+// platformKeys derives identity 1 and ingest generation gen from the root
+// of the development ceremony of env (its key directory).
+func platformKeys(t *testing.T, env *testenv.Env, gen uint32) (identity, ingest ed25519.PrivateKey) {
+	t.Helper()
+	seed := rootSeed(t, env)
 	p := keys.DerivePlatform(&seed)
 	defer p.Zero()
+	var err error
 	if identity, err = p.IdentityKey(1); err != nil {
 		t.Fatal(err)
 	}
