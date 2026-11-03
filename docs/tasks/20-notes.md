@@ -217,3 +217,15 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - `lockOnlyDir`: `keygen` ersetzt ein Verzeichnis, das nur die Sperrdatei von `Open` enthält → DECISIONS-Nachtrag beim Merge.
 - `internal/client` unter race bei geteilten CPUs bis 44 Minuten → HANDOFF: `-timeout 60m` mindestens.
 - P-2 aus `20-triage.md` (Vermerk für eigene neue Segmente) → 20e.
+
+### Fuzzing, zweiter Teil (auf 84ca174; `translog` und `store` gleich cb2344c, Ergebnis von 20b)
+- 6 Ziele, je 10 Minuten, zwei Bahnen: alle ohne Fund. Damit sind alle 25 Ziele aus 10.2 je 10 Minuten ohne Fund gelaufen. Protokolle im Scratchpad unter `orch/fz2/`.
+
+| Paket | Ziel | Ausführungen in 10 min |
+|---|---|---|
+| `internal/store` | `FuzzDecodeRecords` | 9.012.891 |
+| `internal/translog` | `FuzzAuditIndex` | 1.777.338 |
+| `internal/translog` | `FuzzDecodeEntry` | 6.482.206 |
+| `internal/translog` | `FuzzOpenHead` | 5.766.720 |
+| `internal/translog` | `FuzzParseHeadText` | 7.979.507 |
+| `internal/translog` | `FuzzProofs` | 4.926.791 |
