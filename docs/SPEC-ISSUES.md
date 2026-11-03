@@ -31,6 +31,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 ## Stand Auftrag 21 (D93)
 - Grundlage: D93 (Q8 und Q19 entschieden am 03.11.2026, Option A der Entscheidungsvorlage `docs/tasks/q19-q8-entscheidungsvorlage.md`). Die Spezifikation ist mit Auftrag 21d nachgeführt: 2.3 „Widerruf von Plattformgenerationen“, 9.2 und der Verweis in 10.1, jeweils mit dem Vermerk „Änderung nach D93“.
 - Erledigt durch D93: S24, S25 und S76; S28 im Q8-Anteil (Feld 7), der Q4-Anteil bleibt offen. Nachgeführt ist der Stand in S67 (Befehle der Zeremonie).
+- Zahl nach D93 (gezählt mit Auftrag 20q): 18 Punkte sind offen, vorher 21. Offen: S23 (Q12), S27 (Q9), S28 (Q4), S35 (ohne Frage), S43 (Q1), S44 (Q1), S48 (Q4), S52 (ohne Frage), S69 (ohne Frage), S71 (Q13), S72 (Q15), S73 (Q18), S75 (ohne Frage), S83 (ohne Frage), S87 (ohne Frage), S88 (ohne Frage), S89 (ohne Frage), S90 (Q11). Die Listen „Offen“ unter „Stand M1“ und „Stand Welle 4“ sind der Stand vor D93. In S24, S25 und S28 beschreibt die Zeile „Stand M1“ den Code vor Auftrag 21.
 - Der Code: 21a (`store`, `translog`) liegt im Arbeitsbranch (02ee7b5), 21c (Zeremonie; 12d48cc) und 21b (Client, Annahme, Server; 7cde738) ebenso, mit den Nacharbeiten nach ihren Prüfungen (Stand 9ad24a5). Spezifikation und RUNBOOK sind mit Auftrag 21e an diesen Code angeglichen; die Vermerke „vorläufig, Abgleich nach 21c“ sind entfallen. Die Nachträge zu D93 (Kaskade über die Identitätsgeneration, `revoked_at_time` = Kopfzeit + 1 ms, lückenlose Ingest-Nachfolge) stehen in 2.3, Regeln 2, 3 und 9. Offen nach M1 (ohne eigenen S-Punkt, D93 Nachtrag 21e): Eine Metadaten-Version ab 2 hält Schlüssel oder Zertifikats-Hash des Signierers von Version 1 nicht fest; der Client prüft nur, dass die Empfangszeit im Zeitraum einer gültigen, nicht widerrufenen Ingest-Generation liegt (`checkReceivedCovered`). Schließen lässt sich der Rest nur mit einer Formatänderung (3.6, Abschnitt 7: Version ab 2 nennt den Signierer von Version 1).
 
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
@@ -208,7 +209,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: erledigt durch D93; bis dahin offen (Q8).
 - Stelle: 2.3 „Wechsel der Identität“ und „Widerrufe und Aktualität“; 10.1 „Signatur einer kompromittierten Ingest- oder Identitätsgeneration“.
 - Problem: 2.3 kennt nur den Wechsel der Identität per Client-Update. Für eine kompromittierte Ingest- oder Admin-Generation gibt es keinen Datensatz, der sie widerruft.
-- Stand M1: Der Pin hat kein Feld 7 (`store.PlatformPinSchema`), `translog.Verifier.Revoked` bleibt leer, die Stellen tragen `TODO(ask)`.
+- Stand M1 (vor Auftrag 21, Verlauf): Der Pin hat kein Feld 7 (`store.PlatformPinSchema`), `translog.Verifier.Revoked` bleibt leer, die Stellen tragen `TODO(ask)`.
 - Ergänzung aus der Prüfung von 03b: Feld 7 braucht neben `revoked_at_size` auch `revoked_at_time`, weil Köpfe einer Größe mit späteren Zeiten neu signiert werden und die Kopfzeit zu `revoked_at_size` sonst nicht eindeutig ist (`internal/translog/doc.go`, „Platform generations“).
 - Vorschlag: Wie Q8 (a) und (b), mit `revoked_at_time` als viertem Bestandteil von Feld 7.
 - Siehe S76 (Q19) für die Kompromittierung der Plattformidentität selbst.
@@ -219,7 +220,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: erledigt durch D93; bis dahin offen (Q8).
 - Stelle: 2.3 „Für einen neuen Ingest-Schlüssel …“, 9.2 (`ingest-rotate`, keine Admin-Rotation).
 - Problem: Nach `ingest-rotate` bleibt der alte Ingest-Schlüssel nach 2.3 unbegrenzt gültig; ein gestohlener alter Schlüssel könnte Metadaten mit späterer Empfangszeit signieren. Für Admin-Generationen gilt dasselbe für Adresszuordnungen.
-- Stand M1: Strengste Lesart für Ingest: Generation g signiert gültig nur bis `valid_from` von `ingest-<g+1>.cert` (`translog.LogKey.Covers` für Köpfe, D72 (9)). Für Admin-Generationen gibt es kein Ende (Q8, Nachtrag).
+- Stand M1 (vor Auftrag 21, Verlauf): Strengste Lesart für Ingest: Generation g signiert gültig nur bis `valid_from` von `ingest-<g+1>.cert` (`translog.LogKey.Covers` für Köpfe, D72 (9)). Für Admin-Generationen gibt es kein Ende (Q8, Nachtrag).
 - Vorschlag: Wie Q8 (c), dieselbe Regel für Admin-Generationen, und Q8 (d) `admin-rotate`.
 
 ## S26 Umschaltzeitpunkt bei `ingest-rotate`
@@ -241,7 +242,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: offen (Q4; Q8-Anteil erledigt).
 - Stelle: 2.3 „öffentlicher Teil im Client hinterlegt“, „Wechsel der Identität“; 2.7 „Die öffentlichen Schlüssel der Zeugen sind im Client hinterlegt wie die Plattformidentität“.
 - Problem: 2.3 nennt den Pin, legt aber seine Felder nicht fest.
-- Stand M1: `store.PlatformPinSchema` mit Generation, Schlüssel, Entwicklungskennzeichen, Feld 4 `origin`, Feld 5 `witnesses`, Feld 6 `min_witnesses` und Feld 8 `identities` (alle Identitätsgenerationen), höchstens 64 KiB (D72 (7)); Feld 7 fehlt bis Q8 (S24). Der Server bekommt denselben Pin.
+- Stand M1 (vor Auftrag 21, Verlauf): `store.PlatformPinSchema` mit Generation, Schlüssel, Entwicklungskennzeichen, Feld 4 `origin`, Feld 5 `witnesses`, Feld 6 `min_witnesses` und Feld 8 `identities` (alle Identitätsgenerationen), höchstens 64 KiB (D72 (7)); Feld 7 fehlt bis Q8 (S24). Der Server bekommt denselben Pin.
 - Vorschlag: Die Felder in 2.3 aufnehmen, sobald Q4 und Q8 entschieden sind.
 
 ## S29 Probe-Rekonstruktion und Grenzen der Aufteilung
