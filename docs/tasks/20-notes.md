@@ -294,3 +294,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - D86 Nachtrag 20h: Marker `.incomplete`; Reste nur mit Marker und nur bekannte Namen; Sperrdatei vor und nach dem Sperren per `os.SameFile` verglichen (bis 8 Versuche, dann `ErrLocked`; Abweichung: `store.LockFile` gibt den Deskriptor nicht heraus); `ErrExists` für ein verlorenes Temp-Verzeichnis.
 - RUNBOOK: ein Temp-Verzeichnis ohne Marker (Abbruch zwischen Entfernen des Markers und Umbenennen) von Hand löschen.
 - Nachfolge möglich: `store`-Sperrfunktion, die den Deskriptor liefert, dann Inode direkt vergleichen.
+
+## Aus der Spezifikationsprüfung von 20h (keine Funde über niedrig)
+- `lockClientDir` (`internal/client/client.go`): Kommentar behauptet zu viel; der Vergleich der Pfad-Datei vor und nach `store.LockFile` hat eine theoretische Lücke bei Wiederverwendung der Inode-Nummer (ext4 vergibt sie sofort neu), wenn drei weitere Prozesse desselben Benutzers in ein Fenster von etwa 6 Systemaufrufen fallen. Abhilfe: Kommentar berichtigen und Restfall als bekannte Grenze (AUDIT R33/F2) nennen; später `store`-Variante, die den gesperrten Deskriptor prüft.
+- `TestDeviceChangeThenDeviceLost` könnte den Übernahme-Hinweis (`index.go:913`) positiv prüfen (optional).
+- Hinweis: `open()` ist Prüfen-dann-Handeln gegen ein gleichzeitiges `Close`; `Client` ist nicht als goroutinesicher dokumentiert (vorbestehend).
