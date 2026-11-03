@@ -32,6 +32,8 @@ go build -o <bin>/ ./cmd/...
 
 Das ist der **Produktionsbuild**: ohne Build-Tags. Er enthält weder die Entwicklungszeremonie (`gomail-ceremony init --dev`) noch einen Testschalter (`GOMAIL_TEST_MIN_FREE`, `GOMAIL_TEST_HEAD_GAP`, `GOMAIL_TEST_DEV_IDENTITY`, `GOMAILCTL_TEST_KEYGEN_PIPE`); ein Entwicklungs-Pin wird von allen Serverbefehlen mit Exit 2 abgelehnt. Die Tags `gomail_dev` und `gomail_test` sind nur für Tests (Abschnitt 9, `docs/AUDIT.md` R35). Ausgeliefert werden nur Produktionsbuilds.
 
+**Eigene Werkzeuge:** Wer im Modul ein eigenes Programm auf `internal/client` baut, ruft die Methoden eines `client.Client` nie aus mehreren Goroutinen zugleich auf, `Close` eingeschlossen: das Paket ist nicht goroutinesicher (die Sperre im `Client` schützt nur den Zustand „geschlossen“; nach `Close` liefert jede Methode mit Fehlerergebnis `client.ErrClosed`).
+
 ### 0.3 Verzeichnisse
 
 | Pfad | Inhalt | Regel |
@@ -199,8 +201,16 @@ gomailctl keygen --data <datenverzeichnis> --dir <client> --pin <pin>
 
 - `keygen` läuft **nur am Terminal**: Standardausgabe und Standardeingabe müssen ein Terminal sein, dessen Echo sich abschalten lässt; ein Pseudoterminal-Master gilt nicht. Sonst bricht es ab, bevor es etwas anzeigt oder schreibt (Exit 1).
 - Der Client fragt die Passphrase zweimal ab, löscht den Bildschirm samt Verlauf, zeigt die 24 Seed-Wörter und wartet auf die Eingabetaste, die erst nach dem Erscheinen der Wörter gilt („Seed notiert?“). Danach löscht er den Bildschirm und fragt drei der Wörter ohne Anzeige ab („Wort Nr. 7:“). Erst nach der richtigen Antwort und dem letzten Löschen entstehen Schlüsselspeicher, `user.rec` und `state.json` im Client-Verzeichnis.
-- Strg-C oder ein anderes Abbruchsignal löscht den Bildschirm und beendet `keygen` mit Exit 130, ohne etwas zu schreiben.
+- Nach der Passphrase, bis die Wörter abgefragt sind (mit `--shares`: bis der letzte Anteil bestätigt ist), löscht Strg-C oder ein anderes Abbruchsignal den Bildschirm und beendet `keygen` mit Exit 130, ohne etwas zu schreiben; danach beendet ein Signal den Prozess sofort (Client-Verzeichnis unten).
 - **Seed sichern:** Die 24 Wörter auf Papier, an einem sicheren Ort. Der Seed liegt danach nirgends auf der Platte. Gebraucht wird er nur für ein neues Gerät, einen Geräteverlust und die Wiederherstellung (Abschnitt 5).
+
+**Client-Verzeichnis** (gilt für `keygen` und `restore`, 5.2):
+
+- **Ziel:** `--dir` darf fehlen, leer sein oder nur die Datei `lock` enthalten (die legt jeder Befehl an, der das Client-Verzeichnis öffnet, etwa `sync` oder `mailbox create`, auch wenn er mangels registriertem Benutzer abbricht). Ein Verzeichnis mit Schlüsselspeicher wird abgelehnt (`client: this client directory already has a user`; bei `restore` auch eines mit `user.rec` oder `state.json`), eines mit anderen Einträgen ebenso (`store: file exists: the client directory <client> is not empty or in use by another client`); beides endet mit Exit 1. Diese Meldung kommt auch, wenn gleichzeitig ein anderer Befehl dasselbe Verzeichnis belegt; dann einmal wiederholen. Ein symbolischer Link als `--dir` wird verfolgt; Temp-Verzeichnis und Reste liegen dann neben dem Ziel des Links.
+- **In einem Schritt:** Der Befehl schreibt zuerst in ein Temp-Verzeichnis neben dem Ziel, `.<name>.keygen-<ziffern>` bzw. `.<name>.restore-<ziffern>` (`<name>` ist der letzte Teil von `--dir`, ist `--dir` ein symbolischer Link: des Ziels des Links; Rechte 0700), legt darin als Erstes die leere Markierung `.incomplete` an, entfernt sie unmittelbar vor dem Umbenennen und benennt es dann in `--dir` um. `<client>` ist also entweder nicht da oder vollständig. Ein Fehler vor dem Umbenennen entfernt das Temp-Verzeichnis selbst; ein Abbruch während des Schreibens (ein Signal, nachdem die Wörter abgefragt sind, SIGKILL, Absturz, Stromausfall) lässt es liegen. Es enthält den versiegelten Schlüsselspeicher, das öffentliche `user.rec` und `state.json`, nie den Seed.
+- **Aufräumen:** Der nächste erfolgreiche Lauf derselben Art für dasselbe `--dir` (`keygen` räumt nur `.<name>.keygen-*`, `restore` nur `.<name>.restore-*`) entfernt Reste, die die Markierung `.incomplete` enthalten, dem eigenen Benutzer gehören und zuletzt vor dem Anlegen seines eigenen Temp-Verzeichnisses geändert wurden (Zeit des Dateisystems), und darin nur die Dateien, die ein Lauf dort schreibt; ein Rest mit anderen Einträgen bleibt stehen. Einen Rest der anderen Art oder einen, der nicht mehr gebraucht wird, löscht der Benutzer von Hand.
+- **Rest ohne Markierung:** Bricht der Lauf genau zwischen dem Entfernen von `.incomplete` und dem Umbenennen ab, bleibt ein Temp-Verzeichnis ohne Markierung, das kein Lauf entfernt. Es von Hand löschen: `ls -la <eltern>` zeigt es, `rm -r -- <eltern>/.<name>.keygen-<ziffern>` (bzw. `.restore-`) löscht es; `<eltern>` ist das Verzeichnis über `--dir` (ist `--dir` ein symbolischer Link: über dem Ziel des Links). Nie das Verzeichnis `<client>` selbst löschen.
+- **Einhängepunkt:** Ist `--dir` selbst ein Einhängepunkt, lässt es sich nicht ersetzen: das Umbenennen scheitert mit `device or resource busy` (EBUSY) oder `invalid cross-device link` (EXDEV), der Befehl endet mit Exit 1 und entfernt sein Temp-Verzeichnis. Abhilfe: ein Unterverzeichnis des Einhängepunkts als `--dir` nehmen.
 
 Nur ein Testbuild (`-tags gomail_test`) beantwortet `keygen` ohne `--shares` mit `GOMAILCTL_TEST_KEYGEN_PIPE=1` über Pipes (Seed auf der Standardausgabe); das nutzen `TestRunbook` und das Zwei-Maschinen-Skript. Der Produktionsbuild kennt den Schalter nicht.
 
@@ -247,6 +257,8 @@ gomail-server address add <adresse> --mailbox <postfach-id> --data <datenverzeic
 ```
 
 Die Zuordnung wird mit dem Admin-Schlüssel signiert, ins Log eingetragen und danach in `addresses.json` (Arbeitskopie) übernommen. Das Postfach muss existieren. Eine Adresse, die einem anderen Postfach zugeordnet ist, wird abgelehnt (Exit 2); Umordnen und Entfernen gibt es im PoC nicht (R39). Fehlermeldungen nennen die Adresse nie; die Adresse steht aber in der Kommandozeile und in der Erfolgsmeldung (R19).
+
+**Bekannte Grenze (Uhr, P-1):** Der Beginn einer Zuordnung (`valid_from`) ist die Uhrzeit des Rechners, auf dem `address add` läuft, und muss im Log für jede Adresse steigen. Ist die Uhr seit der letzten Zuordnung derselben Adresse zurückgegangen, oder läuft `address add` auf einem anderen Rechner, dessen Uhr nachgeht, scheitert der Befehl an der Reihenfolge im Log (`translog: log entry violates a validity rule: valid_from does not increase`, Exit 1); es ist nichts geschrieben. Das betrifft nur die erneute Zuordnung zum selben Postfach, denn eine andere wird schon vorher abgelehnt (Exit 2). Steht die Uhr vor dem Beginn (`valid_from`) des Admin-Zertifikats, scheitert ebenso jede Zuordnung, auch die erste (`… assignment before the admin certificate`, Exit 1). Abhilfe: die Uhr prüfen und stellen (Abschnitt 10) und den Befehl erst wiederholen, wenn sie nach der Zeit der letzten Zuordnung dieser Adresse (bzw. dem Beginn des Admin-Zertifikats) steht, oder ihn auf dem Rechner mit der richtigen Uhr ausführen. Dass `address add` den Beginn selbst über den letzten geloggten Wert der Adresse hebt, ist als Abhilfe nach M1 vorgesehen (D80).
 
 ### 4.3 Mail einliefern
 
@@ -347,6 +359,8 @@ gomailctl restore $C
 ```
 
 Der Client fragt eine neue Passphrase (zweimal) und die 24 Wörter ab und richtet den Benutzer des Seeds auf diesem Gerät ein. Ausgabe: `Benutzer <id> auf diesem Gerät wiederhergestellt.` Ein so eingerichteter Client vertraut beim ersten Kontakt und warnt bei jedem Befehl „Noch kein bestätigter Zustand“, bis der Vermerk eines **anderen** Benutzer-Mitglieds mit seinem Kopf übereinstimmt; ein alleiniges Mitglied bleibt markiert (Q20, R22). Er übernimmt jedes Postfach, dessen Kopf den Benutzer nennt (R20).
+
+Für `--dir` gelten dieselben Regeln wie bei `keygen` (3.2, Client-Verzeichnis): fehlend, leer oder nur mit `lock`; das Temp-Verzeichnis heißt `.<name>.restore-<ziffern>`, und nur ein erfolgreiches `restore` räumt solche Reste auf. Falsche Wörter oder Anteile lassen `--dir` unverändert.
 
 `restore` erzeugt keine neue Generation. War das alte Gerät verloren, danach `device lost` ausführen (5.1).
 
@@ -472,6 +486,28 @@ Server, Zeuge und Clients enden mit SIGINT oder SIGTERM. Für Skripte, die Progr
 | `WARNUNG: Mail <id> wird nicht verarbeitet: …` | eine Prüfung aus 4.4 ist fehlgeschlagen; die Mail wird nicht angezeigt |
 | `452 4.3.1` beim Einliefern | weniger als 10 % freier Platz im Datenverzeichnis |
 | `451` beim Einliefern | inkonsistentes Log (8.1), abgelöste Ingest-Generation (6), Logfehler einer Epoche oder unbekannter freier Platz |
+| `WARNUNG: Epoche <n> von <postfach-id> widerspricht dem Transparenzlog: …` | Abschnitt 8.7 |
+| `store: file exists: the client directory … is not empty or in use by another client` | `keygen`/`restore` auf ein belegtes `--dir` (3.2, Client-Verzeichnis) |
+| `translog: log entry violates a validity rule: valid_from does not increase` bei `address add` | Uhr zurückgegangen oder nachgehend (4.2, bekannte Grenze) |
+
+### 8.7 Epoche widerspricht dem Log
+
+Steht im Log unter der Nummer einer Epoche eine andere `epoch.rec` als im Datenverzeichnis, gilt der Logeintrag (K2 Regel 4). Kein Client ersetzt die Datei, auch nicht durch den geloggten Inhalt; Änderungen am Postfach scheitern, bis der Betreiber sie behebt. Der Client warnt:
+
+```
+WARNUNG: Epoche <n> von <postfach-id> widerspricht dem Transparenzlog: dort ist eine andere Epoche <n> eingetragen. Sie wird nie ersetzt; das Postfach bleibt blockiert. Abhilfe (Betreiber): <abhilfe>.
+```
+
+- **Nach dem Kopf** (jenseits der Epoche, die `mailbox.rec` nennt, und der neuesten geloggten; nur eine Änderung oder `sync` liest sie): Abhilfe „die Datei entfernen, nachdem der Logeintrag geprüft wurde“.
+- **Am Kopf** (die Epoche, die `mailbox.rec` nennt, oder die neueste geloggte, je nachdem, welche höher ist): vorher die übliche Warnung, dass die Epochenkette bei Epoche `<n>` abbricht; Abhilfe „die Datei durch den Inhalt des Logeintrags ersetzen, nachdem er geprüft wurde“. Entfernen hilft hier nicht, die geloggte Epoche gehört an diese Stelle.
+- **Unter dem Kopf** nennt der Client nur den Abbruch der Kette, keine Abhilfe.
+
+Vorgehen des Betreibers:
+
+1. Die Datei ansehen: `gomailctl inspect <datenverzeichnis>/mailboxes/<postfach-id>/epochs/<n>/epoch.rec` (`number`, `reason`, `begin`, `members`, `signer_gen`).
+2. Den Logeintrag der Epoche finden und prüfen: Er liegt als `log/entries/<i>.rec` vor, das Feld `content` ist die geloggte `epoch.rec` Byte für Byte. Geprüft ist er, wenn er für dieses Postfach und diese Nummer steht und ein von den Zeugen bestätigter Kopf ihn deckt (i kleiner als dessen Größe und der Blatt-Hash des Eintrags per Inklusionsbeweis im Baum dieses Kopfes). **Einen Befehl dafür gibt es im PoC nicht:** Weder findet einer den Eintrag zu Postfach und Nummer, noch zeigt `inspect` Logeinträge (es kennt ihren Typ nicht), noch schreibt einer das Feld `content` heraus. Der Betreiber braucht dafür ein eigenes Werkzeug für das Datensatzformat (Abschnitt 3.6 des Plans).
+3. Die alte Datei als Beleg außerhalb des Datenverzeichnisses aufbewahren. Nach dem Kopf: die Datei `epochs/<n>/epoch.rec` entfernen. Am Kopf: sie durch den geprüften Inhalt ersetzen (atomar, Rechte 0660, Gruppe `gomail`).
+4. Prüfen: Ein Mitglied führt `gomailctl sync` aus; die Warnung darf nicht mehr erscheinen.
 
 ## 9. Zwei Maschinen
 
@@ -545,4 +581,4 @@ Ohne `--bin` baut das Skript im lokalen Modus die Programme selbst mit den Testb
 | 7.1 | `succeed`, `publish` neben dem Server verweigert, mit neuem Pin; Server mit altem Pin verweigert, mit neuem startet; Clients mit neuem und mit altem Pin |
 | 8.2 | `log repair` neben dem Server verweigert, danach erfolgreich; Client ohne Server verweigert |
 
-Nicht in `TestRunbook`: Exit 3 und 130 und die Terminalregeln (`cmd/gomailctl`, `cmd/gomail-ceremony`, Pseudoterminal-Tests), `--replace-witnesses` (`TestSuccessionEndToEnd`), Störungen 8.1 und 8.3 (`internal/translog`, `internal/client`), der Zwei-Maschinen-Test (`TestTwoHostScript`).
+Nicht in `TestRunbook`: Exit 3 und 130 und die Terminalregeln (`cmd/gomailctl`, `cmd/gomail-ceremony`, Pseudoterminal-Tests), `--replace-witnesses` (`TestSuccessionEndToEnd`), Störungen 8.1 und 8.3 (`internal/translog`, `internal/client`), die Warnungen aus 8.7 (`TestLogDuplicateNeverReplaced`, `TestLogContradictsAtHead`), die Regeln für das Client-Verzeichnis aus 3.2 (`TestKeygenAtomic`, `TestKeygenExistingDir`, `TestRestoreAtomic`, `TestClientDirLeftovers`, `TestLeftoverNeedsMarker`, `TestRunLosesTempDir` in `internal/client`), die bekannte Grenze aus 4.2 (kein Test), der Zwei-Maschinen-Test (`TestTwoHostScript`).

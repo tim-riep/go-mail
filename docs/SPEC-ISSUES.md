@@ -701,7 +701,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: klarstellend (D91 (5)).
 - Stelle: 7 (K5 Punkt 4).
 - Problem: K5 nennt „ab 16 Segmenten“ als Schwelle für das Zusammenfassen. Bei Ergebnissen aus mehreren Segmenten (große Epochen) würde jedes Mitglied bei jedem Index erneut zusammenfassen.
-- Stand: Der Client fasst zusammen, wenn das mindestens `MergeThreshold − 1` Segmente einspart (gezählt: verschiedene, gültige, nicht verbrauchte Segmente; abgezogen: die Segmente des Ergebnisses). Für ein Ergebnis aus einem Segment ist das „ab 16“.
+- Stand: Der Client fasst zusammen, wenn mindestens `MergeThreshold` (16) Segmente zählen und das Zusammenfassen mindestens `MergeThreshold − 1` Segmente einspart (gezählt: verschiedene, gültige, nicht verbrauchte Segmente; abgezogen: die Segmente des Ergebnisses; `mergeSegments` in `internal/client/index.go`). Für ein nicht leeres Ergebnis folgt die erste Bedingung aus der zweiten; für ein Ergebnis aus einem Segment ist das „ab 16“. Ein Angreifer mit Schreibzugriff kann damit wiederholtes Zusammenfassen erzwingen, sobald (D − 1) · k ≥ 15 (D Geräte, k Segmente je Ergebnis; bekannte Grenze in D91).
 - Vorschlag: In K5 Punkt 4 „wenn das Zusammenfassen mindestens 15 Segmente einspart“ statt „ab 16 Segmenten“.
 
 ## S95 Fremde Dateien in `log/heads/`
