@@ -266,7 +266,12 @@ func BenchmarkIndex(b *testing.B) {
 
 // TestIndex runs the setup of BenchmarkIndex with few mails and checks
 // that client.Index takes every mail in both kinds, and that putting
-// pending/ back makes it take them again.
+// pending/ back makes it take them again. The client stays open and its
+// directory as it is: since task 09g it indexes every pending entry that
+// checks and writes what no segment holds, so with the segments deleted
+// each round indexes every mail again, as in the first round (tasks 09d
+// to 09f noted the mails as indexed, and task 09f put the client
+// directory back for that).
 func TestIndex(t *testing.T) {
 	n := 40
 	if !testing.Short() {
@@ -275,7 +280,7 @@ func TestIndex(t *testing.T) {
 	for _, kind := range indexKinds {
 		t.Run(kind, func(t *testing.T) {
 			r, snap := newIndexRig(t, n, kind)
-			for round := range 2 {
+			for round := range 3 {
 				got, err := r.user.Client.Index(r.mbx)
 				if err != nil || got != n {
 					t.Fatalf("round %d: indexed %d of %d: %v %v", round, got, n, err, r.env.Warnings.Take())
@@ -300,53 +305,116 @@ func TestIndex(t *testing.T) {
 var segmentsStart = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 
 // indexSegmentRuns delivers n mails of the corpus in
-// client.MergeThreshold-1 parts in the order of receipt, each through
+// client.MergeThreshold parts in the order of receipt, each through
 // ingest with the worker and a final flush, and runs client.Index after
-// each part: index/ then holds one segment per part, all n mails
-// unmerged. Run client.MergeThreshold indexes the term lists of part 1
-// once more (pending/ put back as after the delivery of part 1, the same
-// mails), so its segment is the MergeThreshold-th and the client merges
-// them in the same run; the merge drops the duplicate mail IDs, so the
-// merged segments hold the same n mails. It returns the state of index/
-// after every run (bytes of all index/<n>/<device>-<seq>.gml).
+// each part: index/ then holds one segment per part. The Index of the
+// last part writes the client.MergeThreshold-th segment and merges the
+// segments in the same run. To see index/ right before the merge, the
+// test holds the mailbox lock during that Index: the client writes its
+// segment (Index takes no lock for that) and then waits for the lock in
+// the merge; once the segments of all n mails are there, their sizes are
+// taken and the lock is released. It returns the state of index/ after
+// every run before the last, right before the merge (all n mails
+// unmerged in client.MergeThreshold segments) and after the merge (bytes
+// of all index/<n>/<device>-<seq>.gml).
+//
+// Before task 09d, run client.MergeThreshold indexed the term lists of
+// part 1 once more to get the segment that starts the merge. Since then
+// the client writes no posting a segment holds, and the segment of part
+// 1 is there, so the merge needs a segment with new mails, as in
+// production.
 func indexSegmentRuns(tb testing.TB, n int) []segmentStat {
 	tb.Helper()
-	parts := client.MergeThreshold - 1
+	parts := client.MergeThreshold
 	if n < parts {
 		tb.Fatalf("%d mails for %d parts", n, parts)
 	}
 	r := newEnvRig(tb, CorpusRecipients...)
 	r.startIngest(tb)
 	corpus := Corpus(1, n, segmentsStart)
-	var first pendingFiles
 	var out []segmentStat
-	index := func(want int) {
-		got, err := r.user.Client.Index(r.mbx)
-		if err != nil || got != want {
-			tb.Fatalf("run %d: indexed %d of %d: %v %v", len(out)+1, got, want, err, r.env.Warnings.Take())
-		}
-		s := segmentStats(tb, r.st, r.mbx)
-		s.Mails = got
-		out = append(out, s)
-	}
 	for p := range parts {
 		part := corpus[p*n/parts : (p+1)*n/parts]
 		deliverCorpus(tb, r, part, true)
-		if p == 0 {
-			first = snapshotPending(tb, r.st, r.mbx)
+		if p < parts-1 {
+			got, err := r.user.Client.Index(r.mbx)
+			if err != nil || got != len(part) {
+				tb.Fatalf("run %d: indexed %d of %d: %v %v", p+1, got, len(part), err, r.env.Warnings.Take())
+			}
+			s := segmentStats(tb, r.st, r.mbx)
+			s.Mails = got
+			out = append(out, s)
+			continue
 		}
-		index(len(part))
+		before, after, got := indexHeld(tb, r, parts)
+		if got != len(part) {
+			tb.Fatalf("run %d: indexed %d of %d: %v", p+1, got, len(part), r.env.Warnings.Take())
+		}
+		before.Mails, after.Mails = got, got
+		out = append(out, before, after)
 	}
-	restorePending(tb, r.st, r.mbx, first)
-	index(n / parts)
 	return out
+}
+
+// indexHeld runs client.Index while the test holds the mailbox lock and
+// returns the state of index/ once it holds segments segments (the
+// client waits for the lock in the merge then), the state after the
+// Index, and the number of entries it indexed.
+func indexHeld(tb testing.TB, r *rig, segments int) (before, after segmentStat, got int) {
+	tb.Helper()
+	unlock, err := r.st.LockMailbox(r.mbx)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	locked := true
+	release := func() {
+		if locked {
+			locked = false
+			unlock()
+		}
+	}
+	defer release()
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := r.user.Client.Index(r.mbx)
+		done <- result{n, err}
+	}()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		if before = segmentStats(tb, r.st, r.mbx); before.Segments >= segments {
+			break
+		}
+		select {
+		case res := <-done:
+			tb.Fatalf("Index returned before the merge: %d %v, %+v", res.n, res.err, before)
+		default:
+		}
+		if time.Now().After(deadline) {
+			release()
+			<-done
+			tb.Fatalf("no segment %d within the deadline: %+v", segments, before)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	release()
+	res := <-done
+	if res.err != nil {
+		tb.Fatal(res.err)
+	}
+	return before, segmentStats(tb, r.st, r.mbx), res.n
 }
 
 // BenchmarkIndexSegments is point 3 of docs/tasks/12: bytes on the disk
 // of the index segments per 1,000 mails of the corpus (10 senders, 3
 // recipients, 30 days, 20 % attachments, threads), per segment and
-// merged (indexSegmentRuns). One operation is the whole procedure; run
-// it with -benchtime=1x. The sizes do not depend on the machine.
+// merged (indexSegmentRuns): unmerged are the client.MergeThreshold
+// segments of all mails right before the merge. One operation is the
+// whole procedure; run it with -benchtime=1x. The sizes do not depend on
+// the machine.
 func BenchmarkIndexSegments(b *testing.B) {
 	const n = 1000
 	b.Run("mails=1000", func(b *testing.B) {
@@ -364,17 +432,17 @@ func BenchmarkIndexSegments(b *testing.B) {
 }
 
 // TestIndexSegments runs indexSegmentRuns briefly and checks it: one new
-// segment per run before the merge, growing bytes, the sizes read
-// through store equal to those of every *.gml in index/<n>/ and to the
-// length ReadIndexSegment returns, and after run MergeThreshold fewer
-// segments with fewer bytes than the unmerged ones.
+// segment per run up to the merge, growing bytes, every mail in the
+// segments right before the merge, and after the merge fewer segments
+// with fewer bytes than the unmerged ones. TestSegmentStats checks the
+// sizes against the files and ReadIndexSegment.
 func TestIndexSegments(t *testing.T) {
 	n := 160
 	if !testing.Short() {
 		n = 1000
 	}
 	runs := indexSegmentRuns(t, n)
-	if len(runs) != client.MergeThreshold {
+	if len(runs) != client.MergeThreshold+1 {
 		t.Fatalf("%d runs", len(runs))
 	}
 	mails := 0

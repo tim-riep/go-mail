@@ -191,3 +191,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   - Läufe: race client und bench grün, Abdeckung 87,9 %, 22 Mutationen, alle getötet außer einer gleichwertigen.
   - Wachstum ohne Schlüssel: +300 B je Runde (777 Tage); bei 17 Geräten mit Ergebnissen aus zwei Segmenten +9,1 KB je Runde (26 Tage). Das liegt unter dem 30-Tage-Kriterium und gilt nur für sehr viele Geräte; Bewertung durch die Prüfung.
   - Der 386-Lauf läuft. Spezifikations- und Angreiferprüfung laufen mit dem stärkeren Modell.
+- **09g zusammengeführt (Linie 09b abgeschlossen, Q22 erledigt, D91).** Beide Prüfungen ohne Funde über niedrig. Volllauf auf 7ffed5c grün: gofmt, vet, race mit und ohne Tags und 386 je Paket, e2e; 67 Schritte, mit dem fortsetzbaren Laufskript über einen Neustart hinweg. Phase-0-Vektoren unverändert. Wachstum ohne Schlüssel bei Schreibzugriff als bekannte Grenze angenommen (D91, R27); S94 neu; Niedrige in `docs/tasks/20-notes.md`.

@@ -1,6 +1,10 @@
 package client
 
-import "github.com/tim-riep/go-mail/internal/store"
+import (
+	"fmt"
+
+	"github.com/tim-riep/go-mail/internal/store"
+)
 
 // MetaTerms is metaTerms, for tests.
 var MetaTerms = metaTerms
@@ -34,12 +38,12 @@ func (c *Client) Segments(mbx store.ID, n uint32) ([]*store.IndexSegment, error)
 	if err != nil {
 		return nil, err
 	}
-	segs, err := c.readSegments(ch, e)
+	run, err := c.readSegments(ch, e, false)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*store.IndexSegment, 0, len(segs))
-	for _, s := range segs {
+	out := make([]*store.IndexSegment, 0, len(run.segs))
+	for _, s := range run.segs {
 		out = append(out, s.seg)
 	}
 	return out, nil
@@ -83,3 +87,91 @@ func SplitPostings(mbx store.ID, marks, ids int) [][]int {
 	}
 	return out
 }
+
+// SetMergeHook sets the hook that runs in mergeSegments right before the
+// mailbox lock is taken (see mergeHook) until the test ends.
+func SetMergeHook(t interface{ Cleanup(func()) }, f func()) {
+	mergeHook = f
+	t.Cleanup(func() { mergeHook = nil })
+}
+
+// SetSaveHook sets the hook that runs before every save of the state
+// (see saveHook) until the test ends.
+func SetSaveHook(t interface{ Cleanup(func()) }, f func(dirty bool) error) {
+	saveHook = f
+	t.Cleanup(func() { saveHook = nil })
+}
+
+// SetResignHook sets the hook that runs in resignSegment right before the
+// mailbox lock is taken (see resignHook) until the test ends.
+func SetResignHook(t interface{ Cleanup(func()) }, f func()) {
+	resignHook = f
+	t.Cleanup(func() { resignHook = nil })
+}
+
+// SetSegmentLimits sets the limits of one run of readSegments (see
+// maxReadSegments, maxReadBytes) until the test ends.
+func SetSegmentLimits(t interface{ Cleanup(func()) }, files int, bytes int64) {
+	of, ob := maxReadSegments, maxReadBytes
+	maxReadSegments, maxReadBytes = files, bytes
+	t.Cleanup(func() { maxReadSegments, maxReadBytes = of, ob })
+}
+
+// SegmentMemoKey returns the key of the check record of the index
+// segment data of device dev in epoch n (segmentMemo), for tests.
+func SegmentMemoKey(n uint32, dev store.ID, data []byte) string { return segmentMemo(n, dev, data) }
+
+// SetResignMetaHook sets the hook that runs in resignMeta before the new
+// version is sealed (see resignMetaHook) until the test ends.
+func SetResignMetaHook(t interface{ Cleanup(func()) }, f func()) {
+	resignMetaHook = f
+	t.Cleanup(func() { resignMetaHook = nil })
+}
+
+// SetLockHook sets the hook that runs in withMailboxLock right before the
+// lock is taken (see lockHook) until the test ends.
+func SetLockHook(t interface{ Cleanup(func()) }, f func(mbx store.ID)) {
+	lockHook = f
+	t.Cleanup(func() { lockHook = nil })
+}
+
+// WriteSegment writes one new index segment of epoch n of mbx with the
+// postings of term for ids, signed by c, as Index does, and returns its
+// reference, for tests that need different segments.
+func (c *Client) WriteSegment(mbx store.ID, n uint32, term string, ids ...store.ID) (store.IndexSegmentRef, error) {
+	ch, err := c.verifyChain(mbx)
+	if err != nil {
+		return store.IndexSegmentRef{}, err
+	}
+	e, err := ch.usable(n)
+	if err != nil {
+		return store.IndexSegmentRef{}, err
+	}
+	k, err := c.keysFor(ch, e)
+	if err != nil {
+		return store.IndexSegmentRef{}, err
+	}
+	dev, err := c.device()
+	if err != nil {
+		return store.IndexSegmentRef{}, err
+	}
+	p := postings{}
+	for _, id := range ids {
+		p.add(mark(k, term), id)
+	}
+	w, err := c.writeSegments(ch, e, dev, p)
+	if err != nil || len(w) != 1 {
+		return store.IndexSegmentRef{}, fmt.Errorf("write segment: %d %v", len(w), err)
+	}
+	return w[0].ref, nil
+}
+
+// RecordChecked is recordChecked (the check record of file key noted in
+// the state in memory, not saved), for tests.
+func (c *Client) RecordChecked(mbx store.ID, key string, data []byte, signer store.ID, gen uint32) bool {
+	return c.recordChecked(mbx, key, data, signer, gen)
+}
+
+// Reissuing reports whether c works as in step 4 of DeviceLost or its
+// continuation (see reissuing), for tests.
+func (c *Client) Reissuing() bool { return c.reissuing }

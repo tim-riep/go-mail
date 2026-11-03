@@ -6,92 +6,37 @@ import (
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/terms"
 )
 
 // metaTerms returns the term list of a mail from its checked metadata
 // (6.2 step 2): for an entry marked unprocessed the client derives the
-// terms itself, with the rules the server applies in ingest.Terms (5.4,
-// DECISIONS D55) to the header values the metadata keep:
-//
-//   - from: and fromdomain: from the address in From, else from the
-//     envelope sender,
-//   - day: and month: from the receipt in UTC,
-//   - has:attachment if the metadata say so,
-//   - thread: from the Message-ID (the metadata keep neither References
-//     nor In-Reply-To, so the root of a reply is its own Message-ID here,
-//     not the root the server would have found; SPEC-ISSUES S23),
-//   - to: from the envelope recipients of this mailbox, To and Cc, last,
-//
-// all lower case, cleaned, NFC, at most store.MaxTerms terms. If the
-// server did not evaluate the header (HeadersParsed false), only the
-// envelope counts.
-//
-// The code is a copy of the rules of ingest.Terms, not a call: package
-// ingest imports client in its own tests, so client cannot import ingest.
-// TestMetaTermsMatchServer checks both against each other.
+// terms itself with the rules of package terms, which the server applies
+// in ingest.Terms (5.4, DECISIONS D55), from the header values the
+// metadata keep: From (decoded; else the envelope sender), the envelope
+// recipients of this mailbox, To and Cc, the receipt, the attachment
+// flag and, as the thread root, the Message-ID (the metadata keep
+// neither References nor In-Reply-To, so the root of a reply is its own
+// Message-ID here, not the root the server would have found; SPEC-ISSUES
+// S23, TODO(Q12)). If the server did not evaluate the header
+// (HeadersParsed false), only the envelope counts. Values the metadata
+// cut (package terms) can make the from: and to: terms differ from the
+// server's; TestMetaTermsMatchServer checks both against each other.
 func metaTerms(m *store.MailMeta) []string {
-	var fromAddr, thread string
-	rcpts := append([]string(nil), m.Recipients...)
-	attachment := false
+	in := terms.Mail{
+		EnvelopeFrom: m.EnvelopeFrom,
+		EnvelopeTo:   m.Recipients,
+		Received:     time.UnixMilli(m.Received),
+	}
 	if m.HeadersParsed {
-		fromAddr = addressOf(m.From)
+		in.FromAddr = addressOf(m.From)
 		for _, v := range []string{m.To, m.Cc} {
-			rcpts = append(rcpts, addressesOf(v)...)
+			in.HeaderTo = append(in.HeaderTo, addressesOf(v)...)
 		}
-		attachment = m.Attachment
-		thread = firstMsgID(m.MessageID)
+		in.Attachment = m.Attachment
+		in.Thread = terms.ThreadRoot("", "", m.MessageID)
 	}
-	if fromAddr == "" {
-		fromAddr = m.EnvelopeFrom
-	}
-	var out []string
-	seen := map[string]bool{}
-	add := func(t string) {
-		if t == "" || seen[t] || len(out) >= store.MaxTerms {
-			return
-		}
-		seen[t] = true
-		out = append(out, t)
-	}
-	if fromAddr != "" {
-		add(termOf("from:", fromAddr))
-		if at := strings.LastIndexByte(fromAddr, '@'); at >= 0 && at < len(fromAddr)-1 {
-			add(termOf("fromdomain:", fromAddr[at+1:]))
-		}
-	}
-	u := time.UnixMilli(m.Received).UTC()
-	add(termOf("day:", u.Format("2006-01-02")))
-	add(termOf("month:", u.Format("2006-01")))
-	if attachment {
-		add("has:attachment")
-	}
-	if thread != "" {
-		add(termOf("thread:", thread))
-	}
-	for _, a := range rcpts {
-		add(termOf("to:", a))
-	}
-	return out
-}
-
-// termOf normalizes one term like the server (5.4): lower case, Unicode
-// NFC, valid UTF-8 without control characters, at most store.MaxTermLen
-// bytes.
-func termOf(prefix, value string) string {
-	return store.CleanText(strings.ToLower(prefix+value), store.MaxTermLen)
-}
-
-// firstMsgID returns the first "<...>" token of a header value.
-func firstMsgID(v string) string {
-	i := strings.IndexByte(v, '<')
-	if i < 0 {
-		return ""
-	}
-	j := strings.IndexByte(v[i:], '>')
-	if j < 0 {
-		return ""
-	}
-	return v[i : i+j+1]
+	return terms.List(&in)
 }
 
 // addressOf returns the address of a decoded header value (the metadata

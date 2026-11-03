@@ -314,18 +314,28 @@ func TestDeviceLostWrongSeed(t *testing.T) {
 // the old mail before: epoch 1 is a past period for him (he became a
 // member after it), its wrap signed by the revoked generation is not
 // issued again (task 06f, reissueTarget), and he reads it with his
-// wrap-accept (S13).
+// wrap-accept (S13). Alice set flags on the old mail and indexed it with
+// generation 1 (task 09c): her metadata and her segment are signed again
+// with generation 2 (crash points meta-resigned, segment-resigned), and
+// the mail is found once.
 func TestDeviceLostCrash(t *testing.T) {
 	points := []string{
 		"devicelost-prepared", "devicelost-user", "devicelost-logged", "devicelost-wrap",
 		"epoch-wraps", "epoch-folders", "epoch-written", "immediate", "supply", "mailbox",
-		"devicelost-foreign", "folders-resigned", "devicelost-local",
+		"devicelost-foreign", "folders-resigned", "meta-resigned", "segment-resigned", "segment-superseded", "devicelost-local",
 	}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {
 			f := newFixture(t)
 			alice := f.u
 			old := f.deliver(t, "old", "before the loss")
+			f.flush(t)
+			if _, err := alice.Client.SetFlags(f.mbx, old.ID, []string{"seen"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := alice.Client.Index(f.mbx); err != nil || n != 1 {
+				t.Fatalf("index: %d %v", n, err)
+			}
 			bob := f.env.NewUser("bob")
 			f.env.Clock.Advance(time.Hour)
 			f.env.Share(alice, f.mbx, bob, client.ShareOptions{From: 1})
@@ -367,6 +377,25 @@ func TestDeviceLostCrash(t *testing.T) {
 				t.Fatalf("device lost again: %d, %v", gen, err)
 			}
 			f.env.Reopen(alice)
+			if s, g, _ := signerOf(t, f, old.ID); s != alice.ID || g != 2 {
+				t.Fatalf("metadata signed by %s generation %d", s, g)
+			}
+			refs, err := f.env.Store.ListIndexSegments(f.mbx, old.Epoch)
+			if err != nil || len(refs) == 0 {
+				t.Fatalf("segments %v %v", refs, err)
+			}
+			for _, r := range refs {
+				data, err := f.env.Store.ReadIndexSegment(f.mbx, old.Epoch, r.Device, r.Seq)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tr := parse(t, data).Trailer; tr == nil || store.ID(tr.Signer.ID) != alice.ID || tr.Signer.Gen != 2 {
+					t.Fatalf("segment %v not signed by generation 2", r)
+				}
+			}
+			if got := search(t, alice.Client, f.mbx, "from:s@x.example", ""); got != "old" {
+				t.Fatalf("search after device lost: %q (%q)", got, f.env.Warnings.Take())
+			}
 			fresh := f.deliver(t, "new", "after the loss")
 			readBody(t, f.env, alice.Client, f.mbx, old.ID, "before the loss")
 			readBody(t, f.env, alice.Client, f.mbx, fresh.ID, "after the loss")

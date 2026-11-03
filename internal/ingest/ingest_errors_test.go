@@ -11,6 +11,7 @@ import (
 
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/terms"
 	"github.com/tim-riep/go-mail/internal/testenv"
 )
 
@@ -151,11 +152,11 @@ func TestRecoverCleansEverything(t *testing.T) {
 func TestTerms(t *testing.T) {
 	now := time.Date(2026, 10, 25, 23, 30, 0, 0, time.FixedZone("x", 2*3600))
 	h := "From: =?UTF-8?Q?M=C3=BCller?= <Rechnung@Lieferant.DE>\r\nTo: undisclosed-recipients:;\r\nSubject: =?UTF-8?B?R3LDvMOfZQ==?=\r\nIn-Reply-To: <Parent@X>\r\nContent-Type: text/plain\r\n\r\n"
-	terms, ok := Terms([]byte(h), now, "", nil)
+	list, ok := Terms([]byte(h), now, "", nil)
 	if !ok {
 		t.Fatal("not parsed")
 	}
-	got := strings.Join(terms, " ")
+	got := strings.Join(list, " ")
 	want := "from:rechnung@lieferant.de fromdomain:lieferant.de day:2026-10-25 month:2026-10 thread:<parent@x>"
 	if got != want {
 		t.Fatalf("terms %q, want %q", got, want)
@@ -168,7 +169,7 @@ func TestTerms(t *testing.T) {
 	if d := decodeText("=?x-unknown?Q?abc?="); d != "=?x-unknown?Q?abc?=" {
 		t.Fatal(d)
 	}
-	if firstMsgID("<abc") != "" || firstMsgID("none") != "" || firstMsgID("x <a@b> <c@d>") != "<a@b>" {
+	if terms.FirstMsgID("<abc") != "" || terms.FirstMsgID("none") != "" || terms.FirstMsgID("x <a@b> <c@d>") != "<a@b>" {
 		t.Fatal("firstMsgID")
 	}
 	if _, ok := Terms(nil, now, "", nil); ok {
@@ -182,9 +183,9 @@ func TestTerms(t *testing.T) {
 	for i := 0; i < 400; i++ {
 		to = append(to, "u"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+"@d"+strings.Repeat("y", i/26)+".de")
 	}
-	terms, _ = Terms([]byte("From: a@b.c\r\nTo: "+strings.Join(to, ", ")+"\r\nMessage-Id: <m@x>\r\n\r\n"), now, "", nil)
-	if len(terms) != store.MaxTerms || !strings.Contains(strings.Join(terms, " "), "thread:<m@x>") {
-		t.Fatalf("%d terms", len(terms))
+	list, _ = Terms([]byte("From: a@b.c\r\nTo: "+strings.Join(to, ", ")+"\r\nMessage-Id: <m@x>\r\n\r\n"), now, "", nil)
+	if len(list) != store.MaxTerms || !strings.Contains(strings.Join(list, " "), "thread:<m@x>") {
+		t.Fatalf("%d terms", len(list))
 	}
 }
 

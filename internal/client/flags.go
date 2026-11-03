@@ -36,6 +36,11 @@ const maxFlagAttempts = 5
 // in production.
 var flagsHook func()
 
+// resignMetaHook is called by tests in resignMeta before the new version
+// is sealed and written, to remove or change the file. It is nil in
+// production.
+var resignMetaHook func()
+
 // FlagNames returns the names of the known flags set in flags, sorted.
 func FlagNames(flags uint32) []string {
 	var out []string
@@ -137,6 +142,31 @@ func (c *Client) setFlags(mbx, id store.ID, on, off uint32) (*Mail, error) {
 	}
 	next := *cur.Meta
 	next.Version, next.Flags = cur.Meta.Version+1, flags
+	data, err := c.sealMetaVersion(mbx, e, &next)
+	if err != nil {
+		return nil, err
+	}
+	if flagsHook != nil {
+		flagsHook()
+	}
+	if err := c.replaceMeta(mbx, folder, id, cur.file, data); err != nil {
+		return nil, err
+	}
+	m := &Mail{ID: id, Epoch: e.Number, Meta: &next, file: sha256.Sum256(data)}
+	if err := c.noteVersion(mbx, e.Number, &next, m.file); err != nil {
+		return nil, err
+	}
+	// The new file is signed by this user's current generation: its check
+	// record proves that this client verified it (2.2 rule 4).
+	c.noteCheckedLater(mbx, metaMemo(id), data, c.me, c.ks.Generation)
+	return m, c.saveSeen()
+}
+
+// sealMetaVersion seals metadata next of epoch e as a new metadata file
+// (section 7, K4): created is the receipt time, the version is that of
+// next, sealed for the meta key of e and signed with this user's identity
+// over meta-signed.
+func (c *Client) sealMetaVersion(mbx store.ID, e *store.Epoch, next *store.MailMeta) ([]byte, error) {
 	plain, err := next.Encode()
 	if err != nil {
 		return nil, err
@@ -148,46 +178,109 @@ func (c *Client) setFlags(mbx, id store.ID, on, off uint32) (*Mail, error) {
 	}
 	signer := c.signer()
 	signer.Extra = extra
-	data, err := envelope.Seal(
-		envelope.Header{Kind: envelope.KindMeta, MailboxID: mbx, Epoch: e.Number, FileID: id, Created: next.Received, Version: next.Version},
+	return envelope.Seal(
+		envelope.Header{Kind: envelope.KindMeta, MailboxID: mbx, Epoch: e.Number, FileID: next.MailID, Created: next.Received, Version: next.Version},
 		[]envelope.Recipient{{Type: envelope.RecipientEpochMeta, ID: mbx, Gen: e.Number, PublicKey: e.MetaPub}},
 		plain, &envelope.SealOptions{Signer: signer})
-	if err != nil {
-		return nil, err
-	}
-	if flagsHook != nil {
-		flagsHook()
-	}
-	if err := c.replaceMeta(mbx, folder, id, cur.file, data); err != nil {
-		return nil, err
-	}
-	m := &Mail{ID: id, Epoch: e.Number, Meta: &next, file: sha256.Sum256(data)}
-	if err := c.noteVersion(mbx, e.Number, &next); err != nil {
-		return nil, err
-	}
-	return m, c.saveSeen()
 }
 
 // replaceMeta replaces the metadata file of mail id with data under the
-// mailbox lock if it is still the file with SHA-256 old (K4 point 1);
+// mailbox lock (withMailboxLock: taken here unless the running change
+// holds it) if it is still the file with SHA-256 old (K4 point 1);
 // otherwise errStale.
 func (c *Client) replaceMeta(mbx, folder, id store.ID, old [32]byte, data []byte) error {
-	if !c.skipLock {
-		unlock, err := c.st.LockMailbox(mbx)
+	return c.withMailboxLock(mbx, func() error {
+		now, err := c.st.ReadMeta(mbx, folder, id)
 		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("%w: metadata: %v", ErrNotFound, err)
+			}
 			return err
 		}
-		defer unlock()
-	}
-	now, err := c.st.ReadMeta(mbx, folder, id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: metadata: %v", ErrNotFound, err)
+		if sha256.Sum256(now) != old {
+			return errStale
 		}
-		return err
+		return store.WriteFileAtomic(c.st.MetaFile(mbx, folder, id), data)
+	})
+}
+
+// resignMeta signs the metadata cur of mail id in folder of epoch e again
+// after checkMeta took them over (they were signed by a revoked generation
+// and this client's check record from before the revocation names the
+// file, 2.2 rule 4): a new file with the same content, version one above
+// and created unchanged, signed by this user, which replaces the file
+// only while it is still the one checked (replaceMeta). Only a user member
+// of e whose key store holds its current generation and that may write
+// does it; otherwise cur is returned as checked. If the file changed
+// meanwhile, the key store's generation is not the current one by
+// user.rec and the log, or the version is the highest one, cur is
+// returned as checked and the next read checks the file in place, except
+// in step 4 of DeviceLost and its continuation (c.reissuing), where it is
+// errNotReissued (task 09e: no silent exits). If sealing or writing the
+// new file fails, a warning says so and cur is returned as checked as
+// well (task 09c), except in step 4 of DeviceLost and its continuation,
+// where it is errNotReissued (task 09d); a file that is gone is always an
+// error. It returns the metadata in place afterwards.
+func (c *Client) resignMeta(ch *chain, e *store.Epoch, folder store.ID, cur *Mail) (*Mail, error) {
+	mbx := ch.mailbox.ID
+	if c.writable() != nil || c.ks == nil || !c.isUserMember(e) {
+		return cur, nil
 	}
-	if sha256.Sum256(now) != old {
-		return errStale
+	// In step 4 of DeviceLost and its continuation these are not issued
+	// again (task 09e: notIssued); elsewhere they are used as checked.
+	if cur.Meta.Version == math.MaxUint32 {
+		return c.metaNotIssued(cur, errVersionLimit)
 	}
-	return store.WriteFileAtomic(c.st.MetaFile(mbx, folder, id), data)
+	if err := c.ownGenValid(); err != nil {
+		return c.metaNotIssued(cur, err)
+	}
+	next := *cur.Meta
+	next.Version++
+	if resignMetaHook != nil {
+		resignMetaHook()
+	}
+	data, err := c.sealMetaVersion(mbx, e, &next)
+	if err == nil {
+		err = c.replaceMeta(mbx, folder, cur.ID, cur.file, data)
+	}
+	switch {
+	case errors.Is(err, errStale):
+		return c.metaNotIssued(cur, fmt.Errorf("%w: %w", errChanged, err))
+	case errors.Is(err, ErrNotFound):
+		return nil, err
+	case err != nil && c.reissuing:
+		// Step 4 of DeviceLost or its continuation (task 09d): a failure
+		// of the mailbox; reissueMetaAndSegments warns and marks it.
+		return nil, fmt.Errorf("%w: %w: %w", errNotReissued, errResign, err)
+	case err != nil:
+		// The file checked; only signing it again failed (task 09c):
+		// it is used as it is, and a later read signs it again.
+		c.warn("WARNUNG: Die Metadaten der Mail %s waren von einer widerrufenen Generation signiert und wurden nicht neu signiert: %s. Sie werden geprüft verwendet; ein späterer Lauf holt die Neusignatur nach.", cur.ID, warnCause(fmt.Errorf("%w: %w", errResign, err)))
+		return cur, nil
+	}
+	c.warn("Hinweis: Die Metadaten der Mail %s waren von einer widerrufenen Generation signiert; sie wurden übernommen und neu signiert.", cur.ID)
+	m := &Mail{ID: cur.ID, Epoch: e.Number, Meta: &next, file: sha256.Sum256(data)}
+	if err := c.noteVersion(mbx, e.Number, &next, m.file); err != nil {
+		return nil, err
+	}
+	c.noteCheckedLater(mbx, metaMemo(cur.ID), data, c.me, c.ks.Generation)
+	if crash("meta-resigned") {
+		return nil, errCrashed
+	}
+	return m, nil
+}
+
+// errVersionLimit is the fixed cause of metadata taken over that are not
+// signed again because their version is the highest one (math.MaxUint32).
+var errVersionLimit = errors.New("client: the version of the metadata is exhausted")
+
+// metaNotIssued is the result of resignMeta for metadata cur taken over
+// that it does not sign again for cause (notIssued): cur as checked in
+// Search, List and Read, errNotReissued in step 4 of DeviceLost and its
+// continuation (task 09e).
+func (c *Client) metaNotIssued(cur *Mail, cause error) (*Mail, error) {
+	if err := c.notIssued(cause); err != nil {
+		return nil, fmt.Errorf("%w: %w", errNotReissued, err)
+	}
+	return cur, nil
 }

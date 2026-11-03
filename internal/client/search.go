@@ -3,10 +3,10 @@ package client
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/terms"
 )
 
 // SearchOptions configure Search.
@@ -17,25 +17,15 @@ type SearchOptions struct {
 	Since string
 }
 
-// termPrefixes are the kinds of terms of 5.4 that take a value.
-var termPrefixes = []string{"from:", "fromdomain:", "to:", "day:", "month:", "thread:"}
-
 // normalizeTerm normalizes a search term exactly like the server
-// normalizes the terms of a term list (5.4, ingest): lower case, cleaned,
-// Unicode NFC, at most store.MaxTermLen bytes. It accepts only the terms
-// of 5.4: from:, fromdomain:, to:, day:, month:, thread: with a value,
-// and has:attachment. The error never contains the term.
+// normalizes the terms of a term list and accepts only the terms of 5.4
+// (terms.Query). The error never contains the term.
 func normalizeTerm(q string) (string, error) {
-	t := termOf("", strings.TrimSpace(q))
-	if t == "has:attachment" {
-		return t, nil
+	t, ok := terms.Query(q)
+	if !ok {
+		return "", ErrQuery
 	}
-	for _, p := range termPrefixes {
-		if v, ok := strings.CutPrefix(t, p); ok && strings.TrimSpace(v) != "" {
-			return t, nil
-		}
-	}
-	return "", ErrQuery
+	return t, nil
 }
 
 // parseSince returns the first millisecond of the month "YYYY-MM" in UTC,
@@ -76,6 +66,10 @@ func (ch *chain) inPeriod(i int, since int64) bool {
 // entry marked unprocessed). Every hit is then checked like in List; only
 // mails that pass every check, belong to the epoch whose index named them
 // and lie in a folder of folders.gml are returned, sorted like List.
+//
+// If an epoch has more index segments than one run reads
+// (maxReadSegments, maxReadBytes), the mails found are returned with
+// ErrPartial and a warning (task 09c).
 //
 // Neither the term nor anything derived from it appears in a warning or
 // an error.
@@ -131,11 +125,16 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
 			continue
 		}
 		mk := mark(k, term)
-		segs, err := c.readSegments(ch, e)
+		run, err := c.readSegments(ch, e, true)
 		if err != nil {
 			return nil, err
 		}
-		for _, s := range segs {
+		if !run.complete && first == nil {
+			// Warned; the hits found are returned, never silently
+			// incomplete (task 09c).
+			first = fmt.Errorf("%w: epoch %d of %s: %w", ErrPartial, e.Number, mbx, errSegmentLimit)
+		}
+		for _, s := range run.segs {
 			for _, id := range lookup(s.seg, mk) {
 				hit(id, e.Number)
 			}
@@ -169,7 +168,13 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
 	for id, epochs := range hits {
 		folder, ok := where[id]
 		if !ok {
-			continue // no such mail in a folder of folders.gml
+			if _, there := all[id]; there {
+				// As in List: a mail in a folder directory that
+				// folders.gml does not name is not shown; say so, with
+				// the mail ID only.
+				c.warn("WARNUNG: Mail %s liegt in einem Ordner, der nicht in folders.gml steht, und wird nicht angezeigt.", id)
+			}
+			continue
 		}
 		m := checked[id]
 		if m == nil {

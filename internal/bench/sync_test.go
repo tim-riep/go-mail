@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/testenv"
@@ -203,5 +204,11 @@ func TestSync(t *testing.T) {
 	}
 	if s := segmentStats(t, r.st, r.mbx); s.Segments == 0 {
 		t.Fatalf("no segments after Sync: %+v", s)
+	}
+	for _, term := range []string{"to:" + CorpusRecipients[0], "has:attachment"} {
+		hits, err := r.user.Client.Search(r.mbx, term, client.SearchOptions{})
+		if err != nil || len(hits) == 0 {
+			t.Fatalf("search %d after index=on: %d hits, %v", len(term), len(hits), err)
+		}
 	}
 }

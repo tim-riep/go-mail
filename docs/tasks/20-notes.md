@@ -168,3 +168,11 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - R3/6.5: Abbruch „etwa 1,5 s plus wenige `abortFloor`“ (TestAbortBounded 1,61 s), mit RUNBOOK 2 abgleichen.
 - R14: „bis dahin muss der Server mit dem bisherigen Schlüssel weiterlaufen bzw. neu gestartet werden“.
 - R3: Beleg 15b (Flusssteuerung auf beiden Terminals geräumt, Bildschirmschreiben nicht unter Handler-Sperre) wieder aufnehmen.
+
+## Aus den Prüfungen von 09g (niedrig) und dem Merge der Linie 09b
+- Testlücke: Einsparregel für Ergebnisse ab 32 Segmenten (Ergebnis aus zwei und mehr Segmenten, Schwelle `counted − written ≥ MergeThreshold − 1`).
+- Belegtests der Prüfung von 09f (`zz_v09f_spec_test.go`, `TestZZV09f…`, Scratchpad der Prüfung) in die Tests übernehmen, soweit nicht schon durch `takeover09g_test.go` abgedeckt.
+- P3-f in `internal/client/index.go` kommentieren.
+- Wachstum je Epoche in `internal/client/index.go` ausdrücklich nennen (Formel aus D91: etwa 270 B · D · k je Sync, ab (D − 1) · k ≥ 16; ein Gerät 300 B · k).
+- AUDIT: R27, 6.5 und 8.1 Punkt 3 auf den Stand nach D91 bringen (Übernahme für Metadaten und Segmente, `internal/terms`, Wachstumsformel und Messwerte); Zeile 5 und Kopf aktualisieren.
+- D79-Nachtrag: SHA-256 der Metadatendatei im Merkzettel und `from:`/`to:` aus gekürzten Werten prüfen, ob 09b sie erledigt hat, sonst in AUDIT nennen.

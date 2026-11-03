@@ -9,6 +9,24 @@
 // Private keys come only from the key store of package keys. Nothing the
 // client writes into the data directory is plaintext except public keys,
 // signed records and the plain mailbox record.
+//
+// Two versions of the same metadata (task 09b point 5, ErrMetaChanged).
+// The client remembers, per mail, the SHA-256 of the metadata file of the
+// highest version it has seen. Another file with that version is rejected
+// (strictest reading): two valid files with the same version only exist
+// after a fork (the server shows members different files, or the mailbox
+// lock did not hold between two machines, K2 rule 3, K4). The client
+// that sees it cannot resolve this state by itself: say it wrote or saw
+// version n+1, and the file in place is another valid version n+1. Read
+// and List reject the file, and SetFlags, which reads the version in
+// place first, fails the same way, so this client cannot write n+2;
+// taking the file in place as the base of n+2 would be the loosening that
+// point 5 rules out, and the client does not keep the content of its own
+// version n+1 to write n+2 from it. The mail stays hidden for this client
+// (a warning names the mail ID) until another user member, for whom the
+// file in place checks, writes version n+2 with any flag change: a higher
+// version is accepted (TestAttack09bMetaChangedNoRecovery). This is the
+// way out; a client never accepts the other version n+1.
 package client
 
 import (
@@ -83,7 +101,8 @@ var (
 	ErrRevoked = errors.New("client: signed by a revoked generation")
 	// ErrMetaChanged rejects a metadata version whose receipt time
 	// (created) or mail hash differs from the one remembered for the mail:
-	// both stay the same over all versions (section 7, task 09).
+	// both stay the same over all versions (section 7, task 09); or another
+	// metadata file with the version already seen (task 09b).
 	ErrMetaChanged = errors.New("client: metadata version changes receipt time or mail hash")
 	// ErrConflict reports a flag change that lost the race for the next
 	// metadata version in every attempt (K4 point 2).
@@ -241,9 +260,18 @@ type mailboxState struct {
 	Folders map[string]uint32 `json:"folders,omitempty"`
 	// Checked is the local check record for files outside the log that
 	// a user signed (2.2 rule 4 "Übernahme durch andere Mitglieder",
-	// S13): per file ("folders/<n>") the hash, signer and generation of the
-	// last version this client verified while the signer's generation was
-	// valid. Only hashes, IDs and numbers.
+	// S13): per file ("folders/<n>", "meta/<mail-id>", and per content
+	// for a segment, "index/<n>/<device>/<sha-256>", task 09c) the hash,
+	// signer and generation of the last version this client verified
+	// while the signer's generation was valid, and the size of the
+	// reference tree it verified against. Only hashes, IDs and numbers.
+	// Records of segments in the format before task 09c
+	// ("index/<n>/<device>-<seq>") stay (no path makes Checked smaller);
+	// no new ones are made, and one counts only for the file at its place
+	// whose hash it names (task 09d, oldSegmentMemo). The record of a
+	// segment whose content this client issued again or merged is marked
+	// in place, without growing (checkMemo.Next, supersede, task 09d):
+	// records are changed, never removed.
 	Checked map[string]*checkMemo `json:"checked,omitempty"`
 	// Reissue is set by DeviceLost to the new generation if it could not
 	// issue every file of this mailbox again (ErrPartial); DeviceLost run
@@ -254,13 +282,24 @@ type mailboxState struct {
 	Reissue uint32 `json:"reissue,omitempty"`
 	// Mails holds, per mail, the epoch, the receipt time and the SHA-256
 	// of the mail file of the first metadata version seen: every later version
-	// must carry the same (section 7, task 09). Only hashes over
-	// ciphertext and times that stand in clear in the header.
+	// must carry the same (section 7, task 09); and the SHA-256 of the
+	// metadata file of the highest version seen (task 09b); and, in state
+	// files of tasks 09d to 09f, whether this client indexed a pending
+	// entry of the mail (no longer used, task 09g). Only hashes over
+	// ciphertext, times that stand in clear in the header and epoch
+	// numbers.
 	Mails map[string]*mailMemo `json:"mails,omitempty"`
 	// IndexSeq holds, per epoch, the next sequence number of this
 	// device's index segments (6.2, K5); it is checked against the
 	// existing files before a segment is created.
 	IndexSeq map[string]uint64 `json:"index_seq,omitempty"`
+	// Merged and MergedResult held the limit of tasks 09e and 09f on
+	// merges (the postings and the segments of the own last merge result
+	// per epoch). Since task 09g (Q22 variant A) they are no longer made
+	// or used; a state file that holds them is read, and they are kept as
+	// they are (D84 (2)).
+	Merged       map[string]uint64   `json:"merged,omitempty"`
+	MergedResult map[string][]string `json:"merged_result,omitempty"`
 }
 
 // mailMemo is what the client remembers of one mail besides its version.
@@ -268,6 +307,24 @@ type mailMemo struct {
 	Epoch    uint32 `json:"epoch"`
 	Received int64  `json:"received"`
 	MailHash string `json:"mail_hash"`
+	// FileVersion and FileHash name the highest version of the metadata
+	// seen and the SHA-256 (hex) of its metadata file (task 09b): another
+	// file with the same version is ErrMetaChanged. Only a hash over
+	// ciphertext.
+	FileVersion uint32 `json:"file_version,omitempty"`
+	FileHash    string `json:"file_hash,omitempty"`
+	// IndexedMarker and IndexedTerms noted, per kind of pending entry,
+	// the epoch in which this client indexed an entry of the mail first
+	// (tasks 09d, 09e), and Index did not index an entry of that kind
+	// again. Since task 09g every entry that checks is indexed, and only
+	// the postings no segment of the epoch holds are written, so that
+	// pending/ and index/ restored from a backup stay searchable. The
+	// fields are no longer made or used; a state file that holds them is
+	// read, and they are kept as they are. A memo that Index made before
+	// the metadata of its mail were checked holds only these fields
+	// (MailHash empty); noteVersion fills it on the first check.
+	IndexedMarker uint32 `json:"indexed,omitempty"`
+	IndexedTerms  uint32 `json:"indexed_terms,omitempty"`
 }
 
 // epochMemo is what the client remembers of one epoch.
@@ -276,6 +333,11 @@ type epochMemo struct {
 	Immediate bool  `json:"immediate"`
 	Discarded bool  `json:"discarded"`
 }
+
+// saveHook is called by tests before the state is saved, with c.dirty
+// (versions or check records noted and not saved yet); an error makes the
+// save fail. It is nil in production.
+var saveHook func(dirty bool) error
 
 func loadState(path string) (*state, error) {
 	data, err := store.ReadFileLimited(path, 64<<20)
@@ -346,6 +408,17 @@ type Client struct {
 	// revoked generation with a check record is only checked, not signed
 	// again; step 4 signs it with the new generation (reissueFolders).
 	noTakeover bool
+	// reissuing is set while step 4 of DeviceLost or its continuation in
+	// Sync issues again the metadata and index segments a revoked
+	// generation signed (reissueMetaAndSegments, task 09d): a file taken
+	// over that cannot be signed again is then a failure of the mailbox
+	// (errNotReissued), not a warning as in Search, List and Read.
+	reissuing bool
+	// checkedOwn is set only during a DeviceLost run: step 4 then checks
+	// the own files it does not find (missingOwnFiles), and step 2, if
+	// the run does it, notes per mailbox the own segments it checked
+	// (task 09f, finding low 2; ownFiles).
+	checkedOwn map[store.ID]*ownFiles
 	// dirty is set when a metadata version or mail memo was noted in the
 	// state but not yet saved (checkMeta); saveSeen writes it once per
 	// List, Read, Search, Index or SetFlags.
@@ -527,6 +600,11 @@ func (c *Client) save() error {
 	if c.rk != nil {
 		// RecoverRead keeps its state in memory (first contact, 2.7).
 		return nil
+	}
+	if saveHook != nil {
+		if err := saveHook(c.dirty); err != nil {
+			return err
+		}
 	}
 	return saveState(c.cfg.statePath(), c.state)
 }

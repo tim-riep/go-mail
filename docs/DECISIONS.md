@@ -570,3 +570,30 @@ Format je Eintrag: Stelle in der Spezifikation, Frage, Entscheidung, Begründung
   - Beide Prüfungen von 20a fanden nichts über niedrig.
   - Eine falsch nachgehende Server-Uhr verweigert den neuen Schlüssel. Das betrifft nur die Verfügbarkeit (RUNBOOK 10).
 
+
+### D91 S13 für Metadaten und Indexsegmente, gemeinsame Begriffsregeln, begrenztes Wachstum des Client-Zustands (Auftrag 09b, 09c–09g; Q22)
+- Stelle: 2.2 Punkt 4, 5.4, 6, 7 (K4, K5), 9.3; D55, D79, D84, D88; S13, S90.
+- Entscheidung:
+  - (1) **Gemeinsame Begriffsregeln:** Die Regeln aus D55 stehen genau einmal in `internal/terms`, ebenso Thread-Wurzel und Anhangserkennung; `ingest` und `client` rufen sie auf.
+  - (2) **Übernahme nach Widerruf (S13):** Metadaten mit Benutzersignatur und Indexsegmente einer widerrufenen Generation gelten nur mit einem Prüfvermerk, der vor dem im Log belegten Widerruf entstand (Feld `tree`, Vergleich mit dem Logindex des Widerrufs). Sie werden dann neu signiert: Metadaten als Version + 1, Segmente als neues Segment des eigenen Geräts unter der Postfachsperre.
+  - (3) **`device lost`:** Schritt 2 vermerkt eigene Dateien, Schritt 4 stellt sie neu aus. Fehler am Datenverzeichnis blockieren den Widerruf nie; sie führen zu Warnung, Vormerkung und `ErrPartial`. Eine gescheiterte Neuausstellung meldet `ErrPartial`; `Sync` setzt fort.
+  - (4) **Vermerke für Segmente** sind an Epoche, `file_id` und SHA-256 gebunden. Byte-gleiche Kopien werden einmal verarbeitet. Ein verbrauchter Inhalt (`next`, bei mehreren Teilen ein Hash über alle Teil-Hashes) gilt nur dann als verbraucht, wenn sein Nachfolger vollständig angenommen ist.
+  - (5) **Zusammenfassen:** Nur verschiedene, gültige, nicht verbrauchte Segmente zählen. Zusammengefasst wird, wenn mindestens `MergeThreshold − 1` Segmente eingespart werden; bei Ergebnissen aus einem Segment heißt das ab 16. Index schreibt keine Einträge, die ein angenommenes Segment schon enthält.
+  - (6) **Leitregel für den Client-Zustand** (ersetzt die +0-Byte-Forderung aus 09c): kein Stillstand in kurzer Zeit, begrenztes Wachstum mit dokumentierter Rate, kein Datenverlust im ehrlichen Betrieb. D84 (2) gilt weiter: Kein Pfad entfernt Einträge aus `Checked`; ein Eintrag darf an Ort und Stelle in fester Größe geändert werden, etwa zu `{hash, next}` oder durch `part`.
+  - (7) **Merkmal „indexiert“ (09d/09e) und Grenze `merged` (09e/09f) sind entfallen.** Ihre Felder bleiben in `state.json` lesbar und ungenutzt. Grund: Sie führten zu Datenverlust nach der Wiederherstellung eines Backups und zu Blockaden des Zusammenfassens.
+- Begründung:
+  - Fünf Nacharbeitsrunden (09c–09g) mit Spezifikations- und Angreiferprüfung je Runde.
+  - Nach drei Runden Haltepunkt 3 (Q22); vierte Runde auf Antwort des Auftraggebers; fünfte Runde (Vereinfachung) auf seinen Auftrag „Deine Entscheidungen“. Das ist eine Abweichung von Regel 6.
+  - Abschlussprüfung 09g mit dem stärkeren Modell: in beiden Rollen keine Funde über niedrig. Alle Angriffe aus 09b–09f sind abgewehrt, der ehrliche Betrieb (Wiederherstellung an jedem Punkt, Absturz bei Ergebnissen aus mehreren Teilen) ist ohne Verlust.
+- **Bekannte Grenze, Wachstum ohne Schlüssel bei Schreibzugriff auf das Datenverzeichnis:**
+  - je Sync und angegriffener Epoche etwa 270 B · D · k (D zusammenfassende Geräte, k Segmente je Ergebnis, k ≈ Mails der Epoche / 4096), sobald (D − 1) · k ≥ 16;
+  - mit einem Gerät nur durch Zurücklegen von `pending` nach Löschen des Segments: 300 B · k je Runde und Epoche.
+  - Gemessen bei einem Sync je 5 Minuten:
+    - 17 Geräte, k = 2: 26 Tage;
+    - 2 Geräte, k = 17: 24 Tage;
+    - 17 Geräte, k = 17: etwa 3 Tage;
+    - ein Gerät mit 4146 Mails: 259 Tage.
+  - Mehrere Epochen addieren sich.
+  - Der Orchestrator nimmt das als bekannte Grenze an (AUDIT, Restrisiko), nicht als Fund. Gründe: Kein Stillstand in Stunden; linear in den Syncs. Der Angreifer braucht Schreibzugriff, der ohnehin das Löschen aller Daten erlaubt. Die Wirkung ist sichtbar (Client öffnet nicht mehr), ohne Leck.
+  - Abhilfe nach M1: Vermerke von Segmenten aufräumen, die es nicht mehr gibt (Ausnahme von D84 (2), Q22 Variante B), oder `state.json` je Epoche begrenzen.
+- Niedrig, an 20: Testlücke bei der Einsparregel für Ergebnisse ab 32 Segmenten; Belegtests der Prüfung von 09f (`TestZZV09f…`) übernehmen; P3-f kommentieren; Wachstum je Epoche in `index.go` ausdrücklich nennen; SPEC-ISSUES S94 (Einsparregel statt „ab 16“).

@@ -17,6 +17,18 @@ func warnCause(err error) string {
 	switch {
 	case err == nil:
 		return "ohne Angabe"
+	case errors.Is(err, errResign):
+		return "die neue Datei, die Postfachsperre oder der lokale Zustand konnte nicht geschrieben werden"
+	case errors.Is(err, errChanged):
+		return "die Datei wurde zwischen Lesen und Sperren ersetzt oder entfernt"
+	case errors.Is(err, errOwnGen):
+		return "die aktuelle Generation dieses Benutzers ist durch user.rec und das Transparenzlog nicht bestätigt"
+	case errors.Is(err, errVersionLimit):
+		return "die Versionsnummer der Metadaten ist erschöpft"
+	case errors.Is(err, errSegmentLimit):
+		return "mehr Indexsegmente in der Epoche, als ein Lauf liest"
+	case errors.Is(err, errNotChecked):
+		return "von einer widerrufenen Generation signiert und vorher nicht geprüft"
 	case errors.Is(err, ErrRevoked):
 		return "von einer widerrufenen Generation signiert und nicht gegengezeichnet"
 	case errors.Is(err, ErrDiscardedEpoch):
@@ -53,7 +65,7 @@ func warnCause(err error) string {
 		return "nicht im Transparenzlog oder im Widerspruch dazu"
 	case errors.Is(err, store.ErrChain):
 		return "die Epochenkette prüft nicht"
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, ErrNotFound):
 		return "Datei fehlt"
 	case errors.Is(err, store.ErrRecord), errors.Is(err, store.ErrTooLarge), errors.Is(err, envelope.ErrTooLarge),
 		errors.Is(err, envelope.ErrMagic), errors.Is(err, envelope.ErrVersion), errors.Is(err, envelope.ErrTruncated),

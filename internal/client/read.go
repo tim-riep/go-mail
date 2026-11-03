@@ -123,9 +123,14 @@ type Mail struct {
 //   - version 1 signed by a certified ingest key valid at the time of
 //     receipt; a later version (a flag change, section 7, K4) signed by a
 //     user member (kind 1) of the epoch with the current generation of
-//     its user.rec (TODO(S13): strictest reading, as for wraps). A user
-//     signature on version 1 and an ingest signature on a later version
-//     are rejected,
+//     its user.rec, or with a revoked generation if this client's check
+//     record names exactly this file and was made before the revocation
+//     the log shows (2.2 rule 4, S13, task 09b; checkedBefore): then the
+//     client takes the file over and signs it again as version + 1
+//     (resignMeta), except during step 2 of DeviceLost. Without such a
+//     record the file is not used (errNotChecked, the caller warns with
+//     the mail ID only). A user signature on version 1 and an ingest
+//     signature on a later version are rejected,
 //   - signature over the file and the fields of section 7 (meta-signed),
 //   - receipt time equal to the creation time of the file and version
 //     equal to the header,
@@ -134,11 +139,13 @@ type Mail struct {
 //   - the address assignment at receipt in the log,
 //   - version not older than the highest seen, and epoch, receipt time
 //     and mail hash equal to those remembered for the mail (the first
-//     version seen).
+//     version seen), and for the highest version seen the same file
+//     (SHA-256 of the metadata file, task 09b).
 //
-// The highest version and the memo are noted in the state in memory
-// only; the caller saves them once with saveSeen before it returns
-// anything that depends on them (task 09, addendum).
+// The highest version, the memo and the check record of a file signed by
+// a user are noted in the state in memory only; the caller saves them
+// once with saveSeen before it returns anything that depends on them
+// (task 09, addendum).
 func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	mbx := ch.mailbox.ID
 	data, err := c.st.ReadMeta(mbx, folder, id)
@@ -166,6 +173,11 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 	var pub ed25519.PublicKey
 	validFrom, ingest := int64(0), false
 	superseded, until := false, int64(0)
+	// signer and gen of a user signature; taken: by a revoked generation,
+	// accepted through the check record.
+	var signer store.ID
+	var gen uint32
+	userSigned, taken := false, false
 	switch ref := f.Trailer.Signer; {
 	case ref.Type == envelope.SignerIngest && ref.ID == ([16]byte{}):
 		if h.Version != 1 {
@@ -184,7 +196,18 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 		if _, ok := e.Member(store.ID(ref.ID)); !ok {
 			return nil, fmt.Errorf("%w: metadata signed by a user who is not a user member of epoch %d", ErrSigner, e.Number)
 		}
-		if pub, err = c.userKey(store.ID(ref.ID), ref.Gen, nil); err != nil {
+		signer, gen, userSigned = store.ID(ref.ID), ref.Gen, true
+		pub, err = c.userKey(signer, gen, nil)
+		if errors.Is(err, ErrRevoked) {
+			// A file outside the log (2.2 rule 4): only through this
+			// client's check record from before the revocation.
+			if !c.checkedBefore(mbx, metaMemo(id), data, signer, gen) {
+				return nil, fmt.Errorf("%w: %w", errNotChecked, err)
+			}
+			pub, err = c.revokedKey(signer, gen)
+			taken = true
+		}
+		if err != nil {
 			return nil, err
 		}
 	default:
@@ -246,18 +269,30 @@ func (c *Client) checkMeta(ch *chain, folder, id store.ID) (*Mail, error) {
 			return nil, err
 		}
 	}
-	if err := c.noteVersion(mbx, e.Number, m); err != nil {
+	mail := &Mail{ID: id, Epoch: e.Number, Meta: m, file: sha256.Sum256(data)}
+	if err := c.noteVersion(mbx, e.Number, m, mail.file); err != nil {
 		return nil, err
 	}
-	return &Mail{ID: id, Epoch: e.Number, Meta: m, file: sha256.Sum256(data)}, nil
+	switch {
+	case taken && !c.noTakeover:
+		// Checked before the revocation: signed again by this user
+		// (2.2 rule 4 "Übernahme durch andere Mitglieder").
+		return c.resignMeta(ch, e, folder, mail)
+	case userSigned && !taken:
+		c.noteCheckedLater(mbx, metaMemo(id), data, signer, gen)
+	}
+	return mail, nil
 }
 
 // noteVersion applies the rules against replay (section 7) to checked
-// metadata m of epoch n and notes them in the state in memory: the
-// version must not be older than the highest seen, and epoch, receipt
-// time (created) and mail hash must equal those remembered for the mail.
-// A higher version and the first memo set c.dirty; saveSeen writes them.
-func (c *Client) noteVersion(mbx store.ID, n uint32, m *store.MailMeta) error {
+// metadata m of epoch n in the metadata file with SHA-256 file and notes
+// them in the state in memory: the version must not be older than the
+// highest seen, epoch, receipt time (created) and mail hash must equal
+// those remembered for the mail, and the highest version seen must be the
+// file remembered for it (task 09b: the same version with other content
+// is ErrMetaChanged). A higher version, the first memo and a new file
+// hash set c.dirty; saveSeen writes them.
+func (c *Client) noteVersion(mbx store.ID, n uint32, m *store.MailMeta, file [32]byte) error {
 	ms := c.mailboxState(mbx)
 	key := m.MailID.String()
 	seen := ms.Versions[key]
@@ -265,19 +300,37 @@ func (c *Client) noteVersion(mbx store.ID, n uint32, m *store.MailMeta) error {
 		return fmt.Errorf("%w: version %d, seen %d", ErrReplay, m.Version, seen)
 	}
 	hash := hex.EncodeToString(m.MailHash[:])
+	fileHash := hex.EncodeToString(file[:])
 	if ms.Mails == nil {
 		ms.Mails = map[string]*mailMemo{}
 	}
-	if memo := ms.Mails[key]; memo != nil {
+	memo := ms.Mails[key]
+	switch {
+	case memo != nil && memo.MailHash == "":
+		// Made by Index of tasks 09d to 09f (IndexedMarker,
+		// IndexedTerms) before any metadata were checked: nothing of the
+		// mail is remembered yet. Index makes none since task 09g, but a
+		// state file may hold one.
+		memo.Epoch, memo.Received, memo.MailHash = n, m.Received, hash
+		c.dirty = true
+	case memo != nil:
 		if memo.Epoch != 0 && memo.Epoch != n || memo.Received != m.Received || memo.MailHash != hash {
 			return fmt.Errorf("%w: version %d", ErrMetaChanged, m.Version)
 		}
-	} else {
-		ms.Mails[key] = &mailMemo{Epoch: n, Received: m.Received, MailHash: hash}
+		if memo.FileHash != "" && memo.FileVersion == m.Version && memo.FileHash != fileHash {
+			return fmt.Errorf("%w: version %d with another file", ErrMetaChanged, m.Version)
+		}
+	default:
+		memo = &mailMemo{Epoch: n, Received: m.Received, MailHash: hash}
+		ms.Mails[key] = memo
 		c.dirty = true
 	}
 	if m.Version > seen {
 		ms.Versions[key] = m.Version
+		c.dirty = true
+	}
+	if m.Version >= memo.FileVersion && (memo.FileVersion != m.Version || memo.FileHash != fileHash) {
+		memo.FileVersion, memo.FileHash = m.Version, fileHash
 		c.dirty = true
 	}
 	return nil

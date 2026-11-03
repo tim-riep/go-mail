@@ -2,10 +2,12 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,9 +69,15 @@ func sameGenerations(a, b []*keys.GenerationCert) bool {
 //  2. While g is still valid, every own wrap of every mailbox is checked
 //     with the key store of g (keysFor) and countersigned by g+1
 //     (members/<me>.accept, wrap-accept), and folders.gml of every epoch
-//     with access is checked (check record in state.json): after the
-//     revocation these are the proofs that the client checked them before
-//     (2.2 rule 4).
+//     with access, every index segment of these epochs and the metadata of
+//     every mail that this user signed (a flag change) are checked (check
+//     records in state.json): after the revocation these are the proofs
+//     that the client checked them before (2.2 rule 4). A failure on a
+//     file of the data directory here (a directory where a wrap-accept,
+//     the index or the mails belong, an unreadable directory) never stops
+//     the revocation (task 09c): the mailbox is warned about with a fixed
+//     cause and marked, the result is ErrPartial, and the files not
+//     checked are not taken over afterwards.
 //  3. users/<id>/user.rec is replaced (store.ReplaceUser) and appended to
 //     the log (record first, then log entry, translog doc.go "Who writes").
 //  4. For every mailbox, in two parts that do not depend on each other
@@ -80,12 +88,22 @@ func sameGenerations(a, b []*keys.GenerationCert) bool {
 //     signed epoch.rec names and for the confirmed recovery recipient,
 //     each only after the old wrap checked with the old key store
 //     (checkTemplate); folders.gml of every epoch signed by a revoked
-//     generation (taken over through the check record of step 2). Wraps
-//     of readers of past periods are not issued again: their template is
-//     signed by the revoked generation g (reissueTarget, TODO(Q15)).
-//     TODO(task-09): metadata signed by g (flags). Then an epoch
-//     generation-revoked with immediate effect names (me, g+1), discards
-//     the supply (K1 point 4) and the supply is created again.
+//     generation (taken over through the check record of step 2); the
+//     metadata of every mail signed by a revoked generation, as version +
+//     1 (checkMeta, resignMeta), and every index segment signed by one, as
+//     a new segment of this device (readSegments, resignSegment), each
+//     taken over through the check record of step 2 or of an earlier
+//     check, task 09b; a file without such a record is warned about and
+//     left. Here, unlike in Search, List and Read, a file taken over that
+//     cannot be signed again, and metadata signed by a revoked generation
+//     that do not check, make the mailbox incomplete (task 09d:
+//     errNotReissued, mark, ErrPartial, a warning that it was not issued
+//     again); Sync goes on with them while the mailbox is marked
+//     (syncGenerations). Wraps of readers of past periods are not issued again: their
+//     template is signed by the revoked generation g (reissueTarget,
+//     TODO(Q15)). Then an epoch generation-revoked with immediate effect
+//     names (me, g+1), discards the supply (K1 point 4) and the supply is
+//     created again.
 //  5. user.rec in cfg.Dir, and as the very last step the key store with
 //     g+1, which replaces the old one.
 //
@@ -167,7 +185,13 @@ func DeviceLost(cfg Config, passphrase []byte, seedWords []string) (uint32, erro
 		return 0, err
 	}
 	defer zeroAll(prev)
-	if err := c.adoptMemberships(); err != nil {
+	// Failures on files of the data directory before the revocation never
+	// stop it (task 09c, 06h finding b): they are warned about, marked
+	// and make the result ErrPartial.
+	var steps stepFailures
+	if err := c.adoptMemberships(); errors.Is(err, errNotListed) {
+		steps.unlisted = true
+	} else if err != nil {
 		return 0, err
 	}
 	ksData, err := nks.Seal(passphrase, nil)
@@ -176,13 +200,21 @@ func DeviceLost(cfg Config, passphrase []byte, seedWords []string) (uint32, erro
 	}
 	defer keys.Wipe(ksData)
 
+	// Step 4 of this run compares the own files with what it finds, and
+	// with the segments step 2 checked (task 09f).
+	c.checkedOwn = map[store.ID]*ownFiles{}
+	defer func() { c.checkedOwn = nil }()
 	fresh := remote.Current().Gen == old.Generation
 	if fresh {
 		// Step 2, while generation g is valid.
 		c.noAccept, c.noTakeover = true, true
 		for _, mbx := range c.Mailboxes() {
-			if err := c.prepareDeviceLost(mbx, nks); err != nil {
+			checked, err := c.prepareDeviceLost(mbx, nks)
+			if err != nil {
 				return 0, err
+			}
+			if !checked {
+				steps.unchecked = append(steps.unchecked, mbx)
 			}
 		}
 		c.noAccept, c.noTakeover = false, false
@@ -217,6 +249,14 @@ func DeviceLost(cfg Config, passphrase []byte, seedWords []string) (uint32, erro
 	if err != nil {
 		return 0, err
 	}
+	// A mailbox that step 2 could not check completely stays marked, also
+	// if step 4 completed it.
+	for _, mbx := range steps.unchecked {
+		if ms, ok := c.state.Mailboxes[mbx.String()]; ok {
+			ms.Reissue = gen
+		}
+	}
+	out.steps = steps
 	// The marks of the mailboxes not completed are saved before the key
 	// store of g+1 replaces the old one.
 	if err := c.save(); err != nil {
@@ -245,12 +285,57 @@ type reissueOutcome struct {
 	// noFolders are the failed mailboxes of a sole user member without a
 	// checked folder list of the epoch (Q18): no remedy at present.
 	noFolders []string
+	// steps are the failures before the revocation (step 2 and the
+	// adoption of memberships).
+	steps stepFailures
 }
 
+// stepFailures are the failures on files of the data directory before
+// the revocation (task 09c): they never stop it, and make the result of
+// DeviceLost ErrPartial.
+type stepFailures struct {
+	// unchecked are the mailboxes that step 2 could not check
+	// completely: a file not checked has no check record and is not
+	// taken over after the revocation (fail closed).
+	unchecked []store.ID
+	// unlisted reports that the mailboxes of the data directory could
+	// not be listed (adoptMemberships): only those of the local state
+	// were worked on.
+	unlisted bool
+}
+
+// errNotListed is the fixed cause of a data directory whose mailboxes
+// cannot be listed (adoptMemberships).
+var errNotListed = errors.New("client: the mailboxes of the data directory cannot be listed")
+
 // err returns ErrPartial naming the mailboxes not completed and the
-// remedy, with ErrRecovery if a recovery record must be confirmed first;
-// nil if every mailbox is complete.
+// remedy, with ErrRecovery if a recovery record must be confirmed first,
+// joined with ErrPartial for the failures before the revocation; nil if
+// every mailbox is complete and nothing failed before.
 func (o *reissueOutcome) err() error {
+	var errs []error
+	if err := o.failedErr(); err != nil {
+		errs = append(errs, err)
+	}
+	if len(o.steps.unchecked) > 0 {
+		list := make([]string, 0, len(o.steps.unchecked))
+		for _, id := range o.steps.unchecked {
+			list = append(list, id.String())
+		}
+		sort.Strings(list)
+		errs = append(errs, fmt.Errorf("%w: mailboxes %s were not completely checked before the revocation; files not checked then are not taken over", ErrPartial, strings.Join(list, ", ")))
+	}
+	if o.steps.unlisted {
+		errs = append(errs, fmt.Errorf("%w: %w; only the mailboxes known on this device were worked on", ErrPartial, errNotListed))
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return errors.Join(errs...)
+}
+
+// failedErr is the part of err for the mailboxes step 4 did not complete.
+func (o *reissueOutcome) failedErr() error {
 	if len(o.failed) == 0 {
 		return nil
 	}
@@ -400,11 +485,15 @@ func zeroAll(list []*keys.Keystore) {
 // before this call.
 //
 // An existing entry is never replaced or touched: the memory of a mailbox
-// is never made smaller (mailboxState).
+// is never made smaller (mailboxState). If the mailboxes of the data
+// directory cannot be listed, it warns and returns errNotListed.
 func (c *Client) adoptMemberships() error {
 	boxes, err := userMailboxes(c.st, c.me)
 	if err != nil {
-		return err
+		// A file of the data directory (task 09c): DeviceLost goes on
+		// with the mailboxes of the local state.
+		c.warn("WARNUNG: Die Postfächer des Datenverzeichnisses können nicht aufgelistet werden (%s); device lost bearbeitet nur die auf diesem Gerät bekannten Postfächer.", warnCause(err))
+		return fmt.Errorf("%w: %w", errNotListed, err)
 	}
 	for _, id := range boxes {
 		if _, ok := c.state.Mailboxes[id.String()]; ok {
@@ -591,10 +680,11 @@ func nextGeneration(c *Client, seed *keys.Seed, local, remote *store.User, gen u
 
 // prepareDeviceLost is step 2 of DeviceLost for mailbox mbx, while the
 // generation of the key store is still valid: every own wrap that checks
-// is countersigned by the new generation (nks), and folders.gml of every
-// epoch with access is checked, which records it (check record). A file
-// that is taken over through an earlier check record is only checked
-// here (c.noTakeover): step 4 signs it with g+1, once.
+// is countersigned by the new generation (nks), and folders.gml and the
+// index segments of every epoch with access and the metadata this user
+// signed are checked, which records them (check records, checkOwnFiles).
+// A file that is taken over through an earlier check record is only
+// checked here (c.noTakeover): step 4 signs it with g+1, once.
 //
 // A mailbox that cannot be checked is not skipped silently: a warning
 // names it and a fixed cause, and it is marked for the continuation
@@ -606,12 +696,22 @@ func nextGeneration(c *Client, seed *keys.Seed, local, remote *store.User, gen u
 // local state stays. Only mailboxes with a local state are worked on
 // here: adoptMemberships adds a mailbox never opened only with a valid
 // chain, so a mark always belongs to a remembered or a valid mailbox.
-func (c *Client) prepareDeviceLost(mbx store.ID, nks *keys.Keystore) error {
+//
+// No failure on a file of the data directory stops DeviceLost before the
+// revocation (task 09c, 06h finding b): a wrap-accept that cannot be
+// written, an index directory, a mail directory or a folder that cannot
+// be read, more segments than one run reads. Each is warned about per
+// mailbox with a fixed cause, the mailbox is marked, and checked is
+// false, which makes the result ErrPartial; the check goes on with the
+// other files of the mailbox. A file that was not checked has no check
+// record and is not taken over after the revocation (fail closed). Only
+// failures on the own local files (state.json) are returned as errors.
+func (c *Client) prepareDeviceLost(mbx store.ID, nks *keys.Keystore) (checked bool, err error) {
 	ch, err := c.verifyChain(mbx)
 	if err != nil || ch.err != nil {
 		if _, rerr := c.st.ReadMailbox(mbx); errors.Is(rerr, store.ErrNotFound) {
 			c.warn("WARNUNG: %s wird für den Gerätewechsel nicht vorbereitet: mailbox.rec fehlt im Datenverzeichnis.", mbx)
-			return nil
+			return true, nil
 		}
 		cause := "die Epochenkette prüft nicht"
 		if err != nil {
@@ -619,8 +719,9 @@ func (c *Client) prepareDeviceLost(mbx store.ID, nks *keys.Keystore) error {
 		}
 		c.warn("WARNUNG: %s wird für den Gerätewechsel nicht vorbereitet: %s. Die eigenen Verpackungen werden nicht gegengezeichnet; die Neuausstellung bleibt vorgemerkt (Sync oder device lost erneut ausführen, sobald das Postfach prüft).", mbx, cause)
 		c.mailboxState(mbx).Reissue = nks.Generation
-		return c.save()
+		return false, c.save()
 	}
+	var failed error
 	for _, e := range ch.epochs {
 		if ch.discarded[e.Number] || !c.ownWrapExists(mbx, e.Number) {
 			continue
@@ -638,13 +739,352 @@ func (c *Client) prepareDeviceLost(mbx store.ID, nks *keys.Keystore) error {
 		}
 		c.mu.Unlock()
 		if err := c.writeAccept(mbx, e.Number, data, nks); err != nil {
-			return err
+			c.warn("WARNUNG: Die Gegenzeichnung der eigenen Verpackung der Epoche %d von %s für die neue Generation wurde nicht geschrieben: %s.", e.Number, mbx, warnCause(err))
+			failed = cmp.Or(failed, err)
 		}
 		if _, _, _, err := c.foldersAt(ch, e.Number); err != nil {
 			c.warn("Hinweis: folders.gml der Epoche %d von %s prüft nicht und wird nicht vermerkt.", e.Number, mbx)
 		}
 	}
-	return nil
+	if err := c.checkOwnFiles(ch); err != nil {
+		failed = cmp.Or(failed, err)
+	}
+	if err := c.saveSeen(); err != nil {
+		return false, err
+	}
+	if failed == nil {
+		return true, nil
+	}
+	c.warn("WARNUNG: %s wurde vor dem Widerruf nicht vollständig geprüft: %s. Der Widerruf wird trotzdem ausgeführt; Dateien, die nicht geprüft wurden, werden danach nicht übernommen. Die Neuausstellung bleibt vorgemerkt.", mbx, warnCause(failed))
+	c.mailboxState(mbx).Reissue = nks.Generation
+	return false, c.save()
+}
+
+// checkOwnFiles is the part of step 2 of DeviceLost for the files that
+// readers check one by one (task 09b): every index segment of every epoch
+// with access (readSegments records each that checks) and the metadata of
+// every mail signed by this user (checkMeta records it). A file that does
+// not check is skipped; readSegments warns about it, and so does step 4.
+// The records are saved by the caller (saveSeen). A directory that cannot
+// be read, or an epoch with more segments than one run reads, does not
+// stop the check of the others (task 09c); the first such error is
+// returned.
+//
+// The own segments that check (signed by this user) are noted for step 4
+// of the same run (c.checkedOwn, ownFiles, task 09f).
+func (c *Client) checkOwnFiles(ch *chain) error {
+	mbx := ch.mailbox.ID
+	var own *ownFiles
+	if c.checkedOwn != nil {
+		own = &ownFiles{segments: map[string]uint32{}}
+		c.checkedOwn[mbx] = own
+	}
+	var first error
+	for _, e := range ch.epochs {
+		if ch.discarded[e.Number] || !c.ownWrapExists(mbx, e.Number) {
+			continue
+		}
+		run, err := c.readSegments(ch, e, false)
+		if err == nil && !run.complete {
+			err = errSegmentLimit
+		}
+		first = cmp.Or(first, err)
+		if run == nil || own == nil {
+			continue
+		}
+		for _, s := range run.segs {
+			if s.signer == c.me {
+				own.segments[segmentMemoSum(e.Number, s.ref.Device, s.sum)] = e.Number
+			}
+		}
+	}
+	where, err := c.readableMails(mbx)
+	first = cmp.Or(first, err)
+	for id, folder := range where {
+		if signer, _, ok := metaSigner(c.st, mbx, folder, id); ok && signer == c.me {
+			c.checkMeta(ch, folder, id)
+		}
+	}
+	return first
+}
+
+// ownFiles are the own index segments (signed by this user) of one
+// mailbox that step 2 of a DeviceLost run checked (checkOwnFiles, task
+// 09f, finding low 2), by the key of the record of their content
+// (segmentMemoSum), with their epoch. They live only in memory, for step
+// 4 of the same run (missingOwnFiles).
+type ownFiles struct {
+	segments map[string]uint32
+}
+
+// errOwnFileGone is the fixed cause of an own file that this client
+// checked before the revocation and that step 4 of DeviceLost did not
+// find again (removed, replaced or an older version put back), so it was
+// not issued again.
+var errOwnFileGone = errors.New("client: an own file checked before the revocation was not found again and not issued again")
+
+// missingOwnFiles is the check of step 4 of a DeviceLost run (task 09f,
+// finding low 2: no silent success while a file is hidden) for mailbox
+// mbx, after the files signed by a revoked generation were issued again:
+//
+//   - every own segment that step 2 of the same run checked (ownFiles)
+//     must be issued again (the record of its content names a successor:
+//     resignSegment, or a merge) or have been found by step 4 (present:
+//     then a failure to sign it again is reported already);
+//   - every mail whose check record (meta/<id>) still names this user
+//     with a revoked generation must be listed and its metadata must
+//     check (checkMeta, which also takes them over and signs them again,
+//     and which updates the record to the version found): metadata
+//     removed or replaced for the whole run are found this way, also
+//     without step 2 (a run that continues an interrupted one). Only
+//     mails of epochs this user is a user member of with an own wrap
+//     count, and none step 4 reported already (reported). A file of an
+//     older version than one seen (metaOlder) is not missing (task 09g):
+//     as in step 4 itself (task 09f, finding low 3), every reader that
+//     saw the newer version rejects it (ErrReplay), and the record, which
+//     no check of the older file changes, would make every later
+//     DeviceLost end with ErrPartial for as long as the file lies there.
+//
+// Each file missing is warned about, naming the epoch or the mail ID, and
+// the result is errNotReissued, so the mailbox stays marked and DeviceLost
+// reports ErrPartial. This never blocks the mark for good: Sync
+// (syncGenerations) works without this check, so a file put back is
+// issued again there, and one that stays gone leaves nothing signed by
+// the revoked generation, which clears the mark (after one Sync). An own
+// segment that was hidden for the whole run, step 2 included, is not
+// found: its record cannot tell it from a segment another client merged
+// and removed, which is normal. It is taken over and signed again by the
+// next Search of this client once it is back (its record is from before
+// the revocation); a known limit, availability only.
+func (c *Client) missingOwnFiles(ch *chain, where map[store.ID]store.ID, present map[string]bool, reported map[store.ID]bool) error {
+	mbx := ch.mailbox.ID
+	ms := c.mailboxState(mbx)
+	var first error
+	if own := c.checkedOwn[mbx]; own != nil {
+		names := make([]string, 0, len(own.segments))
+		for k := range own.segments {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			if m := ms.Checked[k]; m != nil && m.Next != "" || present[k] {
+				continue
+			}
+			c.warn("WARNUNG: Ein eigenes Indexsegment der Epoche %d von %s wurde vor dem Widerruf geprüft, jetzt aber nicht wieder vorgefunden; es wurde nicht neu ausgestellt. Die Neuausstellung bleibt vorgemerkt.", own.segments[k], mbx)
+			first = cmp.Or(first, fmt.Errorf("%w: index segment of epoch %d: %w", errNotReissued, own.segments[k], errOwnFileGone))
+		}
+	}
+	stale := func(id store.ID) bool {
+		m := ms.Checked[metaMemo(id)]
+		return m != nil && m.Signer == c.me.String() && m.Gen < c.ks.Generation
+	}
+	var ids []store.ID
+	for k := range ms.Checked {
+		id, err := store.ParseID(strings.TrimPrefix(k, "meta/"))
+		if !strings.HasPrefix(k, "meta/") || err != nil || reported[id] || !stale(id) {
+			continue
+		}
+		memo := ms.Mails[id.String()]
+		if memo == nil {
+			continue
+		}
+		e, err := ch.usable(memo.Epoch)
+		if err != nil || !c.isUserMember(e) || !c.ownWrapExists(mbx, e.Number) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	for _, id := range ids {
+		if folder, ok := where[id]; ok {
+			if c.metaOlder(mbx, folder, id) {
+				continue
+			}
+			if _, err := c.checkMeta(ch, folder, id); errors.Is(err, errCrashed) {
+				return err
+			}
+			if !stale(id) {
+				continue
+			}
+		}
+		c.warn("WARNUNG: Die Metadaten der Mail %s wurden vor dem Widerruf geprüft, jetzt aber nicht wieder vorgefunden (entfernt oder ersetzt); sie wurden nicht neu ausgestellt. Die Neuausstellung bleibt vorgemerkt.", id)
+		first = cmp.Or(first, fmt.Errorf("%w: metadata of mail %s: %w", errNotReissued, id, errOwnFileGone))
+	}
+	return first
+}
+
+// readableMails maps every mail ID of mailbox mbx to the folder that
+// holds it, like mailFolders, but a folder directory that cannot be read
+// does not hide the mails of the others (task 09c): it returns the mails
+// found with the first error.
+func (c *Client) readableMails(mbx store.ID) (map[store.ID]store.ID, error) {
+	dirs, err := c.st.ListFolders(mbx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[store.ID]store.ID{}
+	var first error
+	for _, d := range dirs {
+		ids, err := c.st.ListMails(mbx, d)
+		if err != nil {
+			first = cmp.Or(first, err)
+			continue
+		}
+		for _, id := range ids {
+			out[id] = d
+		}
+	}
+	return out, first
+}
+
+// metaSigner returns the user and generation that signed the metadata
+// file of mail id, from its trailer and without any check; ok is false if
+// the file cannot be read or is not signed by a user.
+func metaSigner(st *store.Store, mbx, folder, id store.ID) (store.ID, uint32, bool) {
+	data, err := st.ReadMeta(mbx, folder, id)
+	if err != nil {
+		return store.ID{}, 0, false
+	}
+	f, err := envelope.Parse(data)
+	if err != nil || f.Trailer == nil || f.Trailer.Signer.Type != envelope.SignerUser {
+		return store.ID{}, 0, false
+	}
+	return store.ID(f.Trailer.Signer.ID), f.Trailer.Signer.Gen, true
+}
+
+// reissueMetaAndSegments is the part of step 4 of DeviceLost, and of its
+// continuation in Sync (syncGenerations), for the metadata and index
+// segments of ch that a revoked generation signed (task 09b, 2.2 rule 4):
+// reading them takes them over through the check record (checkMeta and
+// resignMeta, readSegments and resignSegment), with the current
+// generation. Only epochs this user is a user member of are written to.
+//
+// Unlike in Search, List and Read, a failure here is a failure of the
+// mailbox (task 09d, c.reissuing): a segment or metadata file taken over
+// that cannot be signed again (errNotReissued), and metadata signed by a
+// revoked generation that do not check (a file without a check record
+// from before the revocation, ...), each with a warning that names the
+// segment or the mail ID and says that it was not issued again; metadata
+// that are gone meanwhile are not, and neither is an older version than
+// one seen, which every reader rejects anyway (ErrReplay, task 09f), as
+// an index segment that fails a check. In a DeviceLost run, an own file
+// checked before the revocation that step 4 does not find again is a
+// failure as well (missingOwnFiles, task 09f). So are an index
+// directory that cannot be read and an epoch with more segments than one
+// run reads (task 09c). None of these stops the others: every epoch and
+// every mail is worked on, and the first failure is returned, so the
+// mailbox stays marked (Reissue) and the result is ErrPartial. A segment
+// that fails a check is ignored with a warning, as in every reader, and
+// is no failure: anybody with write access to the data directory can put
+// such a file there. Spent segments (readSegments) are removed, under the
+// mailbox lock the caller's change holds.
+func (c *Client) reissueMetaAndSegments(ch *chain, gens genCache) error {
+	mbx := ch.mailbox.ID
+	c.reissuing = true
+	defer func() { c.reissuing = false }()
+	var first error
+	// present are the contents of the segments that checked, reported the
+	// metadata already found not issued again (missingOwnFiles).
+	present := map[string]bool{}
+	reported := map[store.ID]bool{}
+	for _, e := range ch.epochs {
+		if ch.discarded[e.Number] || !c.isUserMember(e) || !c.ownWrapExists(mbx, e.Number) {
+			continue
+		}
+		run, err := c.readSegments(ch, e, true)
+		if errors.Is(err, errCrashed) {
+			return err
+		}
+		if err == nil && !run.complete {
+			err = errSegmentLimit
+		}
+		if err == nil {
+			err = run.notReissued
+			for _, s := range run.segs {
+				present[segmentMemoSum(e.Number, s.ref.Device, s.sum)] = true
+			}
+			// Spent files (copies, contents whose successor is there) are
+			// removed under the mailbox lock that the change holds, as a
+			// merge does: among them a segment signed by the revoked
+			// generation whose successor was written and noted before a
+			// crash removed it (task 09f).
+			for _, r := range run.spent {
+				if rerr := c.st.RemoveIndexSegment(mbx, e.Number, r.Device, r.Seq); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+					err = cmp.Or(err, rerr)
+				}
+			}
+		}
+		first = cmp.Or(first, err)
+	}
+	where, err := c.readableMails(mbx)
+	first = cmp.Or(first, err)
+	ids := make([]store.ID, 0, len(where))
+	for id := range where {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	for _, id := range ids {
+		folder := where[id]
+		signer, gen, ok := metaSigner(c.st, mbx, folder, id)
+		if !ok || !c.revokedGen(gens, signer, gen) {
+			continue
+		}
+		_, err := c.checkMeta(ch, folder, id)
+		switch {
+		case err == nil:
+		case errors.Is(err, errCrashed):
+			return err
+		case c.metaGone(mbx, folder, id):
+			// Removed meanwhile: nothing is left to issue again.
+		case errors.Is(err, ErrReplay) || c.metaOlder(mbx, folder, id):
+			// An older version than one seen, put back (task 09f,
+			// finding low 3): every reader that saw the newer one rejects
+			// it (Versions), as an index segment that fails a check is
+			// ignored; it is warned about and keeps no mark. Signed by a
+			// revoked generation, it fails the check record (which names
+			// the newer file) before the version is compared, hence the
+			// version from its header. If this client checked a newer
+			// own version, missingOwnFiles does not report it either
+			// (task 09g).
+			c.warnRejected(id, "wird nicht neu ausgestellt", fmt.Errorf("%w: %w", ErrReplay, err))
+		default:
+			c.warnRejected(id, "wird nicht neu ausgestellt", err)
+			reported[id] = true
+			first = cmp.Or(first, fmt.Errorf("%w: metadata of mail %s: %w", errNotReissued, id, err))
+		}
+	}
+	if c.checkedOwn != nil {
+		if err := c.missingOwnFiles(ch, where, present, reported); errors.Is(err, errCrashed) {
+			return err
+		} else {
+			first = cmp.Or(first, err)
+		}
+	}
+	return cmp.Or(c.saveSeen(), first)
+}
+
+// metaOlder reports whether the metadata file of mail id in folder names
+// in its header a version below the highest this client saw for the mail
+// (Versions): a reader that saw the newer one rejects it (ErrReplay),
+// whoever signed it. The header is not checked here; a file whose header
+// lies fails every reader's check anyway.
+func (c *Client) metaOlder(mbx, folder, id store.ID) bool {
+	data, err := c.st.ReadMeta(mbx, folder, id)
+	if err != nil {
+		return false
+	}
+	f, err := envelope.Parse(data)
+	if err != nil || f.Header.Kind != envelope.KindMeta {
+		return false
+	}
+	return f.Header.Version < c.mailboxState(mbx).Versions[id.String()]
+}
+
+// metaGone reports whether the metadata file of mail id in folder is no
+// longer in the data directory.
+func (c *Client) metaGone(mbx, folder, id store.ID) bool {
+	_, err := os.Lstat(c.st.MetaFile(mbx, folder, id))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // errRecoveryPending reports that a recovery.wrap signed by the revoked
@@ -688,9 +1128,7 @@ func (c *Client) reissue(mbx store.ID) error {
 				return err
 			}
 		}
-		// TODO(task-09): metadata (flags) signed by the revoked generation
-		// are issued again here, with version + 1.
-		return nil
+		return c.reissueMetaAndSegments(ch, gens)
 	})
 	if errors.Is(filesErr, errCrashed) {
 		return filesErr
@@ -1349,7 +1787,13 @@ func (c *Client) staleGeneration(head *store.Epoch) (others, own bool) {
 // (a hint, the mark stays); if this user is the only user member, nobody
 // else can, and Sync reports ErrPartial with a fixed cause (the mark
 // stays), so that the user runs device lost again.
-func (c *Client) syncGenerations(ch *chain, now time.Time) (bool, error) {
+//
+// While the mailbox is marked, the metadata and index segments signed by
+// a revoked generation are issued again as in step 4
+// (reissueMetaAndSegments, task 09d): a failure keeps the mark and is
+// returned as partial (ErrPartial), after which Sync still creates the
+// supply; err is a failure that stops it.
+func (c *Client) syncGenerations(ch *chain, now time.Time) (done bool, partial, err error) {
 	head, _ := ch.head()
 	others, own := c.staleGeneration(head)
 	stale := others || own
@@ -1382,28 +1826,44 @@ func (c *Client) syncGenerations(ch *chain, now time.Time) (bool, error) {
 		// members are not issued again either: a fixed cause, no raw
 		// error text (task 14, 06h point 3).
 		c.warn("WARNUNG: Die Verpackungen anderer Mitglieder von %s werden nicht neu ausgestellt: %s.", ch.mailbox.ID, warnCause(err))
-		return true, fmt.Errorf("%w: mailbox %s: the wraps of other members are not issued again without access to the newest epoch", ErrPartial, ch.mailbox.ID)
+		return true, nil, fmt.Errorf("%w: mailbox %s: the wraps of other members are not issued again without access to the newest epoch", ErrPartial, ch.mailbox.ID)
 	}
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if stale {
 		c.warn("Hinweis: Ein Mitglied von %s hat eine Generation widerrufen; eine neue Epoche beginnt sofort.", ch.mailbox.ID)
 		if err := c.immediate(ch, store.ReasonGenerationRevoked, head.Members); err != nil {
-			return true, err
+			return true, nil, err
+		}
+	}
+	ms := c.mailboxState(ch.mailbox.ID)
+	// The continuation of DeviceLost for the metadata and index segments
+	// signed by a revoked generation (task 09d): as in step 4, a file
+	// taken over that is not issued again keeps the mark and makes the
+	// result ErrPartial, which does not stop the supply.
+	if ms.Reissue != 0 {
+		err := c.reissueMetaAndSegments(ch, genCache{})
+		if errors.Is(err, errCrashed) {
+			return false, nil, err
+		}
+		if err != nil {
+			left = true
+			c.warn("WARNUNG: Die Dateien von %s wurden nicht vollständig neu ausgestellt; die Vormerkung bleibt. Abhilfe: das Hindernis beseitigen, dann Sync oder device lost erneut ausführen.", ch.mailbox.ID)
+			partial = fmt.Errorf("%w: files of mailbox %s not issued again (%w); Sync or device lost run again completes it", ErrPartial, ch.mailbox.ID, err)
 		}
 	}
 	// own && !stale: the head still names this user's revoked generation.
-	if ms := c.mailboxState(ch.mailbox.ID); !left && !(own && !stale) && ms.Reissue != 0 {
+	if !left && !(own && !stale) && ms.Reissue != 0 {
 		ms.Reissue = 0
 		if err := c.save(); err != nil {
-			return stale, err
+			return stale, nil, err
 		}
 	}
 	if blocked != nil {
-		return false, blocked
+		return false, nil, errors.Join(blocked, partial)
 	}
-	return stale || hinted, nil
+	return stale || hinted, partial, nil
 }
 
 // errNoCheckedFolders is the fixed cause of a sole user member who cannot

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/testenv"
@@ -154,63 +153,6 @@ func TestEpochChoiceAndChange(t *testing.T) {
 		if _, _, err := u.Client.Read(mbx, m.ID); err != nil {
 			t.Fatal(err)
 		}
-	}
-}
-
-func TestSupplyEmptyFallback(t *testing.T) {
-	env := testenv.New(t)
-	u := env.NewUser("alice")
-	mbx := env.Mailbox(u, "A", "info@example.org")
-	in := newIngest(t, env)
-	// Five months later nobody logged in: the supply (epoch 4, January)
-	// ran out; the server keeps using epoch 4 and notes it.
-	env.Clock.Set(time.Date(2027, 3, 15, 12, 0, 0, 0, time.UTC))
-	if err := deliver(t, in, "s@x", []string{"info@example.org"}, message("late", "1")); err != nil {
-		t.Fatal(err)
-	}
-	env.Clock.Advance(time.Minute)
-	deliver(t, in, "s@x", []string{"info@example.org"}, message("late2", "2"))
-	note, err := env.Store.ReadNote(mbx)
-	if err != nil || note == nil || note.Epoch != 4 || note.Count != 2 {
-		t.Fatalf("note %+v %v", note, err)
-	}
-	list, _ := u.Client.List(mbx, store.ID{})
-	if len(list) != 2 || list[0].Epoch != 4 {
-		t.Fatalf("fallback mails must be valid: %d %v", len(list), env.Warnings.Take())
-	}
-	// The next client creates an epoch with immediate begin and the supply.
-	c := env.Reopen(u)
-	if err := c.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if n, _ := env.Store.ReadNote(mbx); n != nil {
-		t.Fatal("note must be removed after the new epoch")
-	}
-	e5, _, err := env.Store.ReadEpoch(mbx, 5)
-	if err != nil || e5.Reason != store.ReasonRegular || e5.Begin != env.Clock.Now().Add(client.ImmediateDelay).UnixMilli() {
-		t.Fatalf("immediate epoch %+v %v", e5, err)
-	}
-	m, _ := env.Store.ReadMailbox(mbx)
-	if m.Epoch != 8 {
-		t.Fatalf("head %d, want 8", m.Epoch)
-	}
-	// Within the delay the server still uses epoch 4; afterwards 5.
-	deliver(t, in, "s@x", []string{"info@example.org"}, message("before", "3"))
-	env.Clock.Advance(client.ImmediateDelay)
-	deliver(t, in, "s@x", []string{"info@example.org"}, message("after", "4"))
-	list, err = c.List(mbx, store.ID{})
-	if err != nil || len(list) != 4 {
-		t.Fatalf("%d mails %v %v", len(list), err, env.Warnings.Take())
-	}
-	if list[2].Epoch != 4 || list[3].Epoch != 5 {
-		t.Fatalf("epochs %d %d", list[2].Epoch, list[3].Epoch)
-	}
-	// A second Sync in the same month changes nothing.
-	if err := c.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if m, _ := env.Store.ReadMailbox(mbx); m.Epoch != 8 {
-		t.Fatal("second sync must not add epochs")
 	}
 }
 

@@ -218,3 +218,4 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
   - `scripts/bench.sh` beschreibt den alten Ablauf;
   - zwei Testlücken.
 - **Antwort des Auftraggebers (03.11., 00:24 Uhr):** „Deine Entscheidungen.“ Der Orchestrator wählt **(A) Vereinfachen**: Auftrag 09g auf dem Stand von 09f, siehe `docs/tasks/09g-client-simplify.md`. Abweichung von Regel 6 (fünfte Runde) auf ausdrücklichen Auftrag; Begründung in DECISIONS beim Merge.
+- Stand: erledigt mit 09g (D91). Beide Prüfungen von 09g fanden nichts über niedrig, der Volllauf auf 7ffed5c ist grün (67 Schritte). Das Wachstum ohne Schlüssel bei Schreibzugriff ist als bekannte Grenze angenommen (D91, R27); Variante (B) bleibt die Abhilfe nach M1.

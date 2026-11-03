@@ -106,6 +106,11 @@ func (c *Client) checkUser(id store.ID, raw []byte) error {
 	return err
 }
 
+// lockHook is called by tests in withMailboxLock right before the lock
+// of a mailbox is taken (task 09d: TestResignSegmentHoldsLock releases
+// the lock it holds there). It is nil in production.
+var lockHook func(mbx store.ID)
+
 // withMailboxLock runs f under the lock of mailbox mbx: directly when
 // the running change holds it (mutate) or the test skips the lock,
 // otherwise it takes the lock for f (lock order mailbox, log: f appends
@@ -113,6 +118,9 @@ func (c *Client) checkUser(id store.ID, raw []byte) error {
 func (c *Client) withMailboxLock(mbx store.ID, f func() error) error {
 	if c.skipLock || (c.locked == mbx && c.mbxUnlock != nil) {
 		return f()
+	}
+	if lockHook != nil {
+		lockHook(mbx)
 	}
 	unlock, err := c.st.LockMailbox(mbx)
 	if err != nil {

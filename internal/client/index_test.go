@@ -197,8 +197,10 @@ func TestSearchArguments(t *testing.T) {
 	}
 }
 
-// TestIndexTwoClients: two clients index the same pending entries; the
-// duplicate hits are merged when reading (K5 point 3).
+// TestIndexTwoClients: two clients see the same pending entries; the
+// second finds their postings in the segment of the first and writes
+// none (task 09d), and segments of two devices are read together (K5
+// point 3).
 func TestIndexTwoClients(t *testing.T) {
 	f := newFixture(t)
 	bob := f.env.NewUser("bob")
@@ -231,7 +233,19 @@ func TestIndexTwoClients(t *testing.T) {
 	for id, data := range saved {
 		store.WriteFileAtomic(f.env.Store.PendingFile(f.mbx, ep, id), data)
 	}
+	// Bob processes them as well, finds their postings in alice's
+	// segment and writes none (task 09d).
 	if n, err := bob.Client.Index(f.mbx); err != nil || n != 2 {
+		t.Fatalf("bob: %d: %v", n, err)
+	}
+	if refs, _ := f.env.Store.ListIndexSegments(f.mbx, ep); len(refs) != 1 || pendingCount(t, f.env, f.mbx, ep) != 0 {
+		t.Fatalf("segments %+v", refs)
+	}
+	// A pending file that alice has not processed yet: bob writes his
+	// own segment.
+	f.send(t, "s@x.example", header("s@x.example", "m2b"))
+	f.flush(t)
+	if n, err := bob.Client.Index(f.mbx); err != nil || n != 1 {
 		t.Fatalf("bob: %d: %v", n, err)
 	}
 	refs, _ := f.env.Store.ListIndexSegments(f.mbx, ep)
@@ -239,7 +253,7 @@ func TestIndexTwoClients(t *testing.T) {
 		t.Fatalf("segments %+v", refs)
 	}
 	for _, c := range []*client.Client{f.u.Client, bob.Client} {
-		if got := search(t, c, f.mbx, "from:s@x.example", ""); got != "m1,m2" {
+		if got := search(t, c, f.mbx, "from:s@x.example", ""); got != "m1,m2,m2b" {
 			t.Fatalf("search: %q", got)
 		}
 	}
@@ -280,13 +294,14 @@ func TestIndexTwoClients(t *testing.T) {
 		t.Fatalf("next sequence number after a foreign file: %v", err)
 	}
 	f.env.Warnings.Take()
-	if got := search(t, c, f.mbx, "from:s@x.example", ""); got != "m1,m2,m3,m4" {
+	if got := search(t, c, f.mbx, "from:s@x.example", ""); got != "m1,m2,m2b,m3,m4" {
 		t.Fatalf("search: %q", got)
 	}
-	// The copy under another sequence number is a valid segment of the
-	// same device: accepted, its hits merged.
-	if warned(f.env, "Indexsegment") {
-		t.Fatal("a copied segment of the same device is warned about")
+	// The copy under another sequence number is byte for byte the same
+	// file as a segment of the same device: it is not processed again,
+	// and a warning says so (task 09b point 4, task 09d, Q11).
+	if !warned(f.env, "byte-gleich") {
+		t.Fatal("a copied segment of the same device is not warned about")
 	}
 }
 
@@ -350,8 +365,9 @@ func TestIndexMerge(t *testing.T) {
 }
 
 // TestIndexCrashAfterSegment: a crash after the segment is written and
-// before pending/ is cleaned leaves both; the next run indexes again and
-// the duplicate hits are merged (K5 point 2 and 3).
+// before pending/ is cleaned leaves both; the next run processes the
+// pending file again, finds its postings in the segment and writes no
+// new one (task 09d), and removes it (K5 point 2 and 3).
 func TestIndexCrashAfterSegment(t *testing.T) {
 	f := newFixture(t)
 	f.send(t, "s@x.example", header("s@x.example", "m1"))
@@ -367,7 +383,7 @@ func TestIndexCrashAfterSegment(t *testing.T) {
 	if n, err := f.u.Client.Index(f.mbx); err != nil || n != 1 {
 		t.Fatalf("%d: %v", n, err)
 	}
-	if pendingCount(t, f.env, f.mbx, 1) != 0 || segmentCount(t, f.env, f.mbx, 1) != 2 {
+	if pendingCount(t, f.env, f.mbx, 1) != 0 || segmentCount(t, f.env, f.mbx, 1) != 1 {
 		t.Fatal("second run")
 	}
 	if got := search(t, f.u.Client, f.mbx, "from:s@x.example", ""); got != "m1" {

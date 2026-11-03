@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -1026,10 +1027,11 @@ func (c *Client) loggedUser(id store.ID) (*store.User, error) {
 // userKey returns the identity key of generation gen of user id, for a
 // signature on data. A revoked generation (2.2 rule 4, S13) counts for a
 // logged record (epoch.rec) if the log shows it before the revocation;
-// for a file that is never logged (wraps, folders.gml) it is rejected
-// with ErrRevoked: such a file counts only through a wrap-accept of the
-// reader (keysFor) or the reader's own check record before the
-// revocation (takeover, readFolders).
+// for a file that is never logged (wraps, folders.gml, metadata after a
+// flag change, index segments) it is rejected with ErrRevoked: such a
+// file counts only through a wrap-accept of the reader (keysFor) or the
+// reader's own check record before the revocation (takeover:
+// readFolders, checkMeta, readSegment; checkedBefore).
 func (c *Client) userKey(id store.ID, gen uint32, logged []byte) (ed25519.PublicKey, error) {
 	g, revoked, err := c.userGen(id, gen)
 	if err != nil {
@@ -1656,8 +1658,9 @@ func (c *Client) syncMailbox(id store.ID) error {
 		}
 		now := c.cfg.Now()
 		// Generations revoked by members (2.2 point 5, K1 point 4).
-		if done, err := c.syncGenerations(ch, now); done || err != nil {
-			return err
+		done, partial, err := c.syncGenerations(ch, now)
+		if done || err != nil {
+			return cmp.Or(err, partial)
 		}
 		folders := c.currentFolders(ch)
 		note, err := c.st.ReadNote(id)
@@ -1693,7 +1696,7 @@ func (c *Client) syncMailbox(id store.ID) error {
 				return err
 			}
 		}
-		return nil
+		return partial
 	})
 }
 

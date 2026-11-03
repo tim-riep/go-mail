@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/tim-riep/go-mail/internal/client"
 	"github.com/tim-riep/go-mail/internal/keys"
@@ -485,22 +486,91 @@ func TestSyncHealsRevokedSigner(t *testing.T) {
 	readBody(t, f.env, f.env.Reopen(bob), f.mbx, m.ID, "for bob and carol")
 }
 
+// wholeWords returns the words of s in lower case: the runs of letters
+// and digits.
+func wholeWords(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		out[w] = true
+	}
+	return out
+}
+
+// leakedWord returns a word of words that msg holds as a whole word and
+// that ref, the same message for an input made of other words, does not
+// hold, "" if there is none: a word of the fixed message itself (such as
+// "word" or "list" in "keys: word is not in the BIP-39 list") is no leak
+// when it happens to be a seed word (task 09g).
+func leakedWord(msg, ref string, words []string) string {
+	in, fixed := wholeWords(msg), wholeWords(ref)
+	for _, w := range words {
+		if w = strings.ToLower(w); in[w] && !fixed[w] {
+			return w
+		}
+	}
+	return ""
+}
+
+// TestLeakedWord checks leakedWord on the fixed message of an unknown
+// word, with seed words that are words of that message.
+func TestLeakedWord(t *testing.T) {
+	const fixed = "keys: word is not in the BIP-39 list: word 4"
+	if w := leakedWord(fixed, fixed, []string{"word", "list", "abandon"}); w != "" {
+		t.Fatalf("a word of the fixed message counted as a leak: %q", w)
+	}
+	if w := leakedWord(fixed+" (abandon)", fixed+" (zoo)", []string{"word", "abandon"}); w != "abandon" {
+		t.Fatalf("leak not found: %q", w)
+	}
+	if w := leakedWord("keys: Abandoned", fixed, []string{"abandon"}); w != "" {
+		t.Fatalf("part of a word counted as a leak: %q", w)
+	}
+}
+
 // TestWordErrorsNameNoInput: unknown words or a wrong number of words
 // give an error that does not name the input; NFKD width characters and
-// upper case are normalized like every word input.
+// upper case are normalized like every word input. A seed word counts as
+// named only if the error holds it as a whole word and the same error for
+// other words does not (leakedWord): the fixed message holds BIP-39 words
+// itself.
 func TestWordErrorsNameNoInput(t *testing.T) {
 	f := newFixture(t)
 	cfg := f.env.ClientConfig(f.u.Dir)
 	f.u.Client.Close()
-	bad := append([]string(nil), f.u.Words...)
-	bad[3] = "Zebraxyz"
-	for name, in := range map[string][]string{"unknown": bad, "few": f.u.Words[:5], "nfkd": {"① " + strings.Join(f.u.Words, "　")}} {
+	// other holds as many BIP-39 words as the seed, none of them a seed
+	// word, for the same error made with other words.
+	seed := map[string]bool{}
+	for _, w := range f.u.Words {
+		seed[strings.ToLower(w)] = true
+	}
+	var other []string
+	for _, w := range keys.Wordlist() {
+		if len(other) < len(f.u.Words) && !seed[w] {
+			other = append(other, w)
+		}
+	}
+	inputs := func(words []string) map[string][]string {
+		bad := append([]string(nil), words...)
+		bad[3] = "Zebraxyz"
+		return map[string][]string{"unknown": bad, "few": words[:5], "nfkd": {"① " + strings.Join(words, "　")}}
+	}
+	refs := inputs(other)
+	for name, in := range inputs(f.u.Words) {
 		_, err := client.DeviceLost(cfg, testenv.Passphrase, in)
 		if err == nil {
 			t.Fatalf("%s: no error", name)
 		}
-		if s := err.Error(); strings.Contains(strings.ToLower(s), "zebraxyz") || strings.Contains(s, f.u.Words[0]) {
+		_, ref := client.DeviceLost(cfg, testenv.Passphrase, refs[name])
+		if ref == nil {
+			t.Fatalf("%s with other words: no error", name)
+		}
+		s := err.Error()
+		if strings.Contains(strings.ToLower(s), "zebraxyz") {
 			t.Fatalf("%s: error names the input: %v", name, err)
+		}
+		if w := leakedWord(s, ref.Error(), f.u.Words); w != "" {
+			t.Fatalf("%s: error names the seed word %q: %v", name, w, err)
 		}
 	}
 	fancy := []string{strings.ToUpper(strings.Join(f.u.Words, "　"))}

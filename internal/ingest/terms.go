@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"mime"
 	"net/mail"
-	"strings"
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/terms"
 )
 
 // headerFields are the header values a client lists, cleaned for storage
@@ -29,19 +29,6 @@ func decodeText(v string) string {
 		v = d
 	}
 	return store.CleanText(v, store.MaxTextLen)
-}
-
-// firstMsgID returns the first "<...>" token of a header value.
-func firstMsgID(v string) string {
-	i := strings.IndexByte(v, '<')
-	if i < 0 {
-		return ""
-	}
-	j := strings.IndexByte(v[i:], '>')
-	if j < 0 {
-		return ""
-	}
-	return v[i : i+j+1]
 }
 
 // parseHeader parses a captured header (5.3: net/mail, at most 1 MB and
@@ -74,9 +61,7 @@ func parseHeader(h []byte) (headerFields, bool) {
 	f.subject = decodeText(hd.Get("Subject"))
 	f.date = decodeText(hd.Get("Date"))
 	f.messageID = decodeText(hd.Get("Message-Id"))
-	if mt, _, err := mime.ParseMediaType(hd.Get("Content-Type")); err == nil && mt == "multipart/mixed" {
-		f.attachment = true
-	}
+	f.attachment = terms.HasAttachment(hd.Get("Content-Type"))
 	if a, err := mail.ParseAddress(hd.Get("From")); err == nil {
 		f.fromAddr = a.Address
 	}
@@ -89,70 +74,28 @@ func parseHeader(h []byte) (headerFields, bool) {
 			}
 		}
 	}
-	// The thread root: the first References entry, else In-Reply-To, else
-	// the message's own ID.
-	for _, name := range []string{"References", "In-Reply-To", "Message-Id"} {
-		if id := firstMsgID(hd.Get(name)); id != "" {
-			f.thread = id
-			break
-		}
-	}
+	f.thread = terms.ThreadRoot(hd.Get("References"), hd.Get("In-Reply-To"), hd.Get("Message-Id"))
 	return f, true
 }
 
-// term normalizes one term: lower case, Unicode NFC, valid UTF-8 without
-// control characters, at most store.MaxTermLen bytes (5.4).
-func term(prefix, value string) string {
-	return store.CleanText(strings.ToLower(prefix+value), store.MaxTermLen)
-}
-
-// Terms returns the term list of a mail (5.4) received at t: from and
-// fromdomain from the header From (the envelope sender if From has no
-// parsable address), to from To, Cc and the envelope recipients of this
-// mailbox (so that a Bcc copy is found by its address), day, month,
-// has:attachment and thread. It reports false if the header cannot be
-// evaluated.
+// Terms returns the term list of a mail (5.4) received at t, by the rules
+// of package terms: from and fromdomain from the header From (the
+// envelope sender if From has no parsable address), to from the envelope
+// recipients of this mailbox (so that a Bcc copy is found by its
+// address), To and Cc, day, month, has:attachment and thread. It reports
+// false if the header cannot be evaluated.
 func Terms(header []byte, received time.Time, envelopeFrom string, rcpts []string) ([]string, bool) {
 	f, ok := parseHeader(header)
 	if !ok {
 		return nil, false
 	}
-	if f.fromAddr == "" && envelopeFrom != "" {
-		f.fromAddr = envelopeFrom
-	}
-	f.rcptAddrs = append(append([]string(nil), rcpts...), f.rcptAddrs...)
-	return termsOf(&f, received), true
-}
-
-func termsOf(f *headerFields, received time.Time) []string {
-	var out []string
-	seen := map[string]bool{}
-	add := func(t string) {
-		if t == "" || seen[t] || len(out) >= store.MaxTerms {
-			return
-		}
-		seen[t] = true
-		out = append(out, t)
-	}
-	if f.fromAddr != "" {
-		add(term("from:", f.fromAddr))
-		if at := strings.LastIndexByte(f.fromAddr, '@'); at >= 0 && at < len(f.fromAddr)-1 {
-			add(term("fromdomain:", f.fromAddr[at+1:]))
-		}
-	}
-	u := received.UTC()
-	add(term("day:", u.Format("2006-01-02")))
-	add(term("month:", u.Format("2006-01")))
-	if f.attachment {
-		add("has:attachment")
-	}
-	if f.thread != "" {
-		add(term("thread:", f.thread))
-	}
-	// Recipients last: a mail to many addresses must not push out the
-	// other terms when the list reaches store.MaxTerms.
-	for _, a := range f.rcptAddrs {
-		add(term("to:", a))
-	}
-	return out
+	return terms.List(&terms.Mail{
+		FromAddr:     f.fromAddr,
+		EnvelopeFrom: envelopeFrom,
+		EnvelopeTo:   rcpts,
+		HeaderTo:     f.rcptAddrs,
+		Received:     received,
+		Attachment:   f.attachment,
+		Thread:       f.thread,
+	}), true
 }

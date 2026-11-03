@@ -695,3 +695,9 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Stand: `ingest.New` verweigert ihn ohne Toleranz (`ErrNotYetValid`), `serve` endet mit Exit 2. Clients prüfen die Empfangszeit ohne Toleranz gegen `valid_from`; eine Toleranz ließe den Server Mails signieren, die alle Clients ablehnen.
 - Vorschlag: In 2.3 festhalten: „Der Server nimmt einen Ingest-Schlüssel erst ab dessen `valid_from` nach eigener Uhr in Betrieb.“
 
+## S94 Schwelle für das Zusammenfassen von Indexsegmenten
+- Art: klarstellend (D91 (5)).
+- Stelle: 7 (K5 Punkt 4).
+- Problem: K5 nennt „ab 16 Segmenten“ als Schwelle für das Zusammenfassen. Bei Ergebnissen aus mehreren Segmenten (große Epochen) würde jedes Mitglied bei jedem Index erneut zusammenfassen.
+- Stand: Der Client fasst zusammen, wenn das mindestens `MergeThreshold − 1` Segmente einspart (gezählt: verschiedene, gültige, nicht verbrauchte Segmente; abgezogen: die Segmente des Ergebnisses). Für ein Ergebnis aus einem Segment ist das „ab 16“.
+- Vorschlag: In K5 Punkt 4 „wenn das Zusammenfassen mindestens 15 Segmente einspart“ statt „ab 16 Segmenten“.

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -288,10 +290,22 @@ func TestSeenVersionsSavedOnce(t *testing.T) {
 // TestMetaTermsMatchServer: the terms a client derives from the metadata
 // of an unprocessed mail equal the terms of the server's term list for
 // the same mail (5.4, 6.2 step 2), for mails without References or
-// In-Reply-To.
+// In-Reply-To and without overlong header values. A To header of 5 KiB
+// pins the difference that package terms documents (task 09b point 6):
+// the metadata keep To cut to 4096 bytes, so the client derives to:
+// terms only for the addresses before the cut, the server for all.
 func TestMetaTermsMatchServer(t *testing.T) {
 	f := newFixture(t)
+	var long []string
+	for i := 0; i < 140; i++ {
+		long = append(long, fmt.Sprintf("Name %03d <addr%03d@recipients.example>", i, i))
+	}
+	longTo := strings.Join(long, ", ")
+	if len(longTo) < 5000 || len(longTo) > 5600 {
+		t.Fatalf("To has %d bytes", len(longTo))
+	}
 	msgs := []string{
+		"From: s@x.example\r\nTo: " + longTo + "\r\nSubject: long\r\nMessage-ID: <long@x.example>\r\n\r\nbody\r\n",
 		"From: \"Müller, Hans\" <Hans.Mueller@Example.DE>\r\nTo: A <a@example.org>, b@other.example\r\nCc: c@other.example\r\nSubject: s1\r\nMessage-ID: <S1@x.example>\r\n\r\nbody\r\n",
 		"From: =?utf-8?q?M=C3=BCller=2C_Hans?= <h@x.de>\r\nTo: a@example.org\r\nSubject: s2\r\nContent-Type: multipart/mixed; boundary=x\r\nMessage-ID: <s2@x>\r\n\r\n--x--\r\n",
 		"From: no address here\r\nTo: a@example.org\r\nSubject: s3\r\n\r\nbody\r\n",
@@ -320,6 +334,19 @@ func TestMetaTermsMatchServer(t *testing.T) {
 	}
 	for _, m := range list {
 		got := client.MetaTerms(m.Meta)
+		if m.Meta.Subject == "long" {
+			// The client's list is the server's, cut after the last
+			// address before byte 4096 of To.
+			srv := server[m.ID]
+			if len(got) >= len(srv) || !reflect.DeepEqual(got, srv[:len(got)]) {
+				t.Fatalf("long To: client %d terms, server %d", len(got), len(srv))
+			}
+			if !slices.Contains(srv, "to:addr139@recipients.example") || slices.Contains(got, "to:addr139@recipients.example") ||
+				!slices.Contains(got, "to:addr000@recipients.example") {
+				t.Fatal("long To: the cut is not where the metadata cut To")
+			}
+			continue
+		}
 		if !reflect.DeepEqual(got, server[m.ID]) {
 			t.Fatalf("%s: client %q, server %q", m.Meta.Subject, got, server[m.ID])
 		}
