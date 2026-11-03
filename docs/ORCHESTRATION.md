@@ -199,3 +199,15 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - 20b fertig (Commit cb2344c im Worktree agent-a1eb92777f183eed4; alle 10 Punkte, Läufe des Implementierers grün, Abdeckung unverändert, `client` 87,9 %). Spezifikations- und Angreiferprüfung laufen (stärkeres Modell), Volllauf auf cb2344c läuft. `translog` und `store` sind zwischen 84ca174 und cb2344c unverändert, das Fuzzing dort gilt also für 20b.
 - Fuzzing abgeschlossen: alle 25 Ziele je 10 Minuten ohne Fund (19 auf bf427c2, 6 in `translog`/`store` auf dem Stand von 20b). Tabellen in `docs/tasks/20-notes.md`; Auftrag 20 überträgt sie nach HANDOFF.
 - 20b: Spezifikations- und Angreiferprüfung (stärkeres Modell) ohne Funde über niedrig; Niedrige in `docs/tasks/20-notes.md` (für 20e und den Merge). Merge wartet auf den Volllauf auf cb2344c (`orch/fr-20b`, fortsetzbar).
+
+## 6. Stand beim Anhalten (03.11.2026, 07:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+- **Zusammengeführt seit dem Stopp vom 28.10.:** 13e/13f, 18/18b/18c, 19/19b, 15i–15n, 20a, Linie 09b (09b–09g, D91, 3e06f23), 20c (a76fc16), 20d (b2a15fa). Fuzzing aller 25 Ziele je 10 Minuten ohne Fund.
+- **Laufend beim Anhalten:** kein Agent. Ein Neustart des Containers um 06:00 UTC hat den Volllauf auf 20b unterbrochen.
+- **20b nicht zusammengeführt:** Worktree `.claude/worktrees/agent-a1eb92777f183eed4`, Branch `worktree-agent-a1eb92777f183eed4`, Commit cb2344c (Basis bf427c2). Spezifikations- und Angreiferprüfung ohne Funde über niedrig; Läufe des Implementierers vollständig grün. Volllauf `orch/fullrun2.sh` mit Zustand in `orch/fr-20b`: 13 Schritte grün (gofmt, vet, alle `cmd/`-Pakete unter race mit und ohne Tags und 386), kein Fehler; Rest fehlt. Fortsetzen: `scratchpad/orch/fullrun2.sh <worktree> scratchpad/orch/fr-20b`.
+- **Nächste Schritte:**
+  1. Volllauf 20b zu Ende; Merge mit Nachträgen (D86 Abhilfe am Kopf, `lockOnlyDir`, AUDIT R33/R41 und D86 „Zurückgestellt“, RUNBOOK); `translog`/`store`-Fuzzing gilt für cb2344c.
+  2. Auftrag 20e (`docs/tasks/20e-small-fixes.md`, geschrieben): P-2, `restore` atomar, Temp-Verzeichnisse, L1, `newestHeadSize`; zwei Prüfungen.
+  3. Auftrag 17 MEASUREMENTS auf ruhiger Maschine (M1-Kriterium D).
+  4. Auftrag 20 Abnahme: Pflichttests 10.1, Abdeckung je Paket, Volllauf, HANDOFF endgültig (Fuzzing-Tabellen aus `docs/tasks/20-notes.md`), AUDIT endgültig, Abschlussbericht nach §7.
+- **Offene Fragen:** Q18, Q20 (strengste Lesart gebaut), Q19 (Haltepunkt 2, `succeed --compromised` gesperrt). Q22 erledigt (D91).
