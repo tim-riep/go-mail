@@ -350,3 +350,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - 21c muss `valid_from` der neu ausgestellten Ingest-Generation = `revoked_at_time` erzwingen und das Zertifikat loggen, bevor der Server den neuen Pin lädt; gilt auch beim nachträglichen Widerruf einer älteren Identitätsgeneration.
 - Client: nur `Verifier.RevokedCertAtTime` mit `identity_gen` des Zertifikats nutzen; `IsRevoked`/`RevokedAtTime` kennen die Kaskade ohne `LogKeys` nicht → Kommentarwarnung.
 - RUNBOOK: Zuordnungen, die eine kaskadenhaft widerrufene Admin-Generation zwischen N und dem Pinwechsel geloggt hat, neu vornehmen; F2/F3 als Betriebsregeln.
+
+## Aus der Spezifikationsprüfung von 21c
+- Mittel (außerhalb der Dateien von 21c): zwei e2e-Tests erwarten den alten „Q19“-Text (`internal/e2e/runbook_test.go:799-801`, `succession_test.go:291-293`) → in 21b angepasst; Merge von 21c nur zusammen mit 21b.
+- Niedrig: (1) `ingest-rotate` nach `succeed --compromised` verweigert ein `valid_from` später als die Grenze nicht (erst `publish`); (2) `boundOf` nimmt das eigene Ingest-Element statt des früheren von eigenem und Kaskade (Sackgasse bei Bedienfehler); (3) toter Teil `es[0].Index >= r.AtSize` in `checkRevocations`; Hinweis: Reihenfolge „log repair, dann publish“ in RUNBOOK 7.3.
