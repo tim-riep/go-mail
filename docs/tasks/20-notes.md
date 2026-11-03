@@ -360,3 +360,6 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - L2: Zweig ErrRevoked in `addressErr` ist heute nicht erreichbar (Index lässt ungültige Zuordnungen weg); Kommentar an `checkMeta` überzeichnet.
 - L3: Auffrischen nach ErrOrder ungetestet.
 - Hinweis: Client-Integrationstest für den Widerruf einer Identität (Kaskade bis zur Mail) fehlt noch; bisher Einheitstest und translog-Tests.
+
+## Aus der Nachprüfung (Angriff) von 21c (keine Funde über niedrig)
+- R-low: `publish` heilt `data/platform/` nicht, wenn nach geloggter Neuausstellung ein Dieb die Datei überschreibt (Name mit gültigem Eintrag wird nie ersetzt, auch wenn die Exportdatei genau dieser Eintrag ist); ebenso einzelne fremde `.pub`. Abhilfe: Name gilt als frei, wenn die Exportdatei gleich dem gültigen Eintrag ist; `.pub` ersetzen, wenn das Zertifikat der gültige Eintrag ist. Tests im Scratchpad `verify21c-attack/internal/ceremony/replace21c_attack_test.go`.
