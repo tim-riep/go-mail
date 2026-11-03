@@ -253,3 +253,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - F-2 (S9) nach Q19/Q8; F-3 (S7) außerhalb M1.
 - Prüfung (niedrig): `TestTypedRoundTripOutsideStore` doppelt bestehende Tests, Kommentar „vier Arten“ falsch → entfernen oder berichtigen; `TestAllSchemasListed` sucht per Regex (übersieht Struct-Literale und Aliasimporte, meldet auskommentierte Aufrufe) → mit `go/parser`; Text „Höchstlänge“ in der Testbeschreibung → „bis 300 Byte bzw. höchstens MaxLen“. → 20g.
 - AUDIT 6.2 und HANDOFF (Abdeckungstabelle, Kriterium E) nach Vorschlag in 20f → 20.
+
+## Aus 20g (Implementierer, Produktivcode, für 20h)
+- `client.(*Client).CreateMailbox` nach `Close` panikt (nil-Dereferenz in `prepareMailbox`, `internal/client/mailbox.go:556`; `Close` setzt `c.ks` auf nil). Fehler über `errors.Is` statt Panik, für alle öffentlichen Methoden nach `Close` prüfen.
+- Kommentar an `testenv.ImmediateEpoch` beschreibt einen Fall (reguläre Epoche mit Verwürfen), den der Code nicht erzeugt.
