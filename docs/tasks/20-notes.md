@@ -258,3 +258,11 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - `client.(*Client).CreateMailbox` nach `Close` panikt (nil-Dereferenz in `prepareMailbox`, `internal/client/mailbox.go:556`; `Close` setzt `c.ks` auf nil). Fehler über `errors.Is` statt Panik, für alle öffentlichen Methoden nach `Close` prüfen.
 - Kommentar an `testenv.ImmediateEpoch` beschreibt einen Fall (reguläre Epoche mit Verwürfen), den der Code nicht erzeugt.
 - Prüfung von 20g (niedrig): die meisten `fatalOn`/`expectFatal`-Fälle in `internal/testenv/dev_test.go` prüfen nur, dass Fatal kam, nicht den Grund → Teiltext je Fall prüfen (20h oder später).
+
+## Aus 20e (Implementierer, für den Merge und 20)
+- Commit bc0d0f9 im Worktree agent-ad3c9d3b67fe2389b (Squash-Basis 018bb56 = 2bbe23b + 20b). Alle Läufe grün (386 `client` nach Testberichtigung: Jahr 2200 passt nicht in 32-Bit-`time_t`); `client` 88,1 %.
+- `Restore` verweigert jetzt ein nicht leeres Verzeichnis (`ErrExists`); neues Temp-Präfix `.<name>.restore-*`; Aufräumregel (nur eigene Art, eigener Benutzer, echte Verzeichnisse, älter als der eigene Lauf) → RUNBOOK und DECISIONS-Nachtrag (D84 oder D91) beim Merge.
+- D91-Nachtrag: Seit 20e legt ein Schreiber den Vermerk für sein eigenes Segment beim Schreiben an (`noteWritten`); die gemessenen Raten sind unverändert.
+- AUDIT R33/L3: Reste werden beim nächsten erfolgreichen Lauf derselben Art entfernt; ein Rest der anderen Art bleibt.
+- `internal/client` unter race mit Tags bis 3401 s bei geteilten CPUs → HANDOFF: `-timeout 60m` knapp; Abschlussläufe ohne parallele Last.
+- `translog/files.go` geändert → Fuzzing von `translog` nach dem Merge wiederholen (5 Ziele).
