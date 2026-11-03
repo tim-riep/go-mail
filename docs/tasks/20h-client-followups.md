@@ -1,7 +1,7 @@
 # Auftrag 20h: Gerätewechsel-Test, Panik nach `Close`, genauere testenv-Prüfungen
 
 Welle 5. Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich.
-- Basis: Arbeitsbranch `claude/quirky-keller-hjsl5i` nach dem Merge von 20e (der Orchestrator nennt den Commit), in einem eigenen Worktree.
+- Basis: Arbeitsbranch `claude/quirky-keller-hjsl5i` bei d85da00 (nach dem Merge von 20e) oder später, in einem eigenen Worktree.
 - Darf ändern: `internal/client/**`, Testdateien in `internal/testenv`.
 - Nicht ändern: Dateiformate, signierte Datensätze, Signaturdomänen, Prüfregeln der Clients, Phase-0-Vektoren.
 - Quelle: `docs/tasks/20-mandatory-tests.md` (F-1), `docs/tasks/20-notes.md` Abschnitte „Aus 20g“ und „Aus 20f und seiner Prüfung“.
