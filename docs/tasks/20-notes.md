@@ -208,3 +208,12 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 | `internal/witness` | `FuzzParseProof` | 4.227.219 |
 | `internal/witness` | `FuzzPoll` | 1.327.905 |
 | `internal/words` | `FuzzNormalize` | 2.960.008 |
+
+## Aus 20b (Implementierer, außerhalb des Auftrags)
+- `client.Restore` (`restore.go`) schreibt das Client-Verzeichnis nicht atomar (wie `keygen` vor 20b) → Auftrag 20e.
+- Ein abgebrochenes `keygen` hinterlässt `.<name>.keygen-*` neben dem Client-Verzeichnis (versiegelter Schlüsselspeicher, öffentliches `user.rec`); nichts räumt es auf → 20e oder HANDOFF/RUNBOOK.
+- `ListIndexSegments` liest Namen, die keine Segmente sind, in `index/<n>/` ohne Grenze; nur Segmentnamen zählen zur Grenze → AUDIT oder 20e.
+- Neue Abhilfe am Kopf (`warnContradicts`, „Datei durch den Inhalt des geprüften Logeintrags ersetzen“) → RUNBOOK und D86-Nachtrag beim Merge.
+- `lockOnlyDir`: `keygen` ersetzt ein Verzeichnis, das nur die Sperrdatei von `Open` enthält → DECISIONS-Nachtrag beim Merge.
+- `internal/client` unter race bei geteilten CPUs bis 44 Minuten → HANDOFF: `-timeout 60m` mindestens.
+- P-2 aus `20-triage.md` (Vermerk für eigene neue Segmente) → 20e.
