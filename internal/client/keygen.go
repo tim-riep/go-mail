@@ -210,19 +210,36 @@ func writeClientDir(dir, kind string, userData, ksData []byte, st *state) error 
 // the client directory not empty.
 var errDirNotEmpty = errors.New("client: client directory not empty")
 
+// errInUse is the error of a keygen or restore that lost the client
+// directory dir to another client: the rename found it not empty, or a
+// concurrent run of the same kind removed the temporary directory of
+// this one (removeLeftovers, task 20h point 6).
+func errInUse(dir string) error {
+	return fmt.Errorf("%w: the client directory %s is not empty or in use by another client", store.ErrExists, dir)
+}
+
+// incompleteMarker is the file that marks the temporary directory of a
+// keygen or restore before its rename (task 20h point 4).
+const incompleteMarker = ".incomplete"
+
 // createClientDir creates the client directory dir of a user in one step
 // (task 20b point 1; Restore since task 20e point 2): write fills a new
-// temporary directory .<name>.<kind>-* next to dir (each file synced on
-// its own), the temporary directory is synced, renamed to dir and the
-// parent of dir is synced. kind is the run, keygen or restore. A signal
-// or a failed write at any point leaves either no client directory or a
-// complete one with key store, user.rec and state.json, so a second run
-// succeeds after an interrupted one, and a complete directory is never
-// half overwritten. Before the rename a failure removes the temporary
-// directory; a killed process may leave it behind next to dir, holding
-// only the sealed key store, the public user.rec and state.json, and no
-// client reads it. The next run of the same kind for dir that succeeds
-// removes it (removeLeftovers, task 20e point 3).
+// temporary directory .<name>.<kind>-<digits> next to dir (each file
+// synced on its own), the temporary directory is synced, renamed to dir
+// and the parent of dir is synced. kind is the run, keygen or restore. A
+// signal or a failed write at any point leaves either no client
+// directory or a complete one with key store, user.rec and state.json,
+// so a second run succeeds after an interrupted one, and a complete
+// directory is never half overwritten. Before the rename a failure
+// removes the temporary directory; a killed process may leave it behind
+// next to dir, holding only the sealed key store, the public user.rec and
+// state.json, and no client reads it. The first file of the temporary
+// directory is the marker .incomplete (task 20h point 4); it is removed,
+// and the removal synced, right before the rename, so a client directory
+// never holds it. The next run of the same kind for dir that succeeds
+// removes a leftover with the marker (removeLeftovers, task 20e point 3).
+// A process killed between the removal of the marker and the rename
+// leaves a temporary directory without it, which stays.
 //
 // dir may exist as an empty directory, which the rename replaces, or as
 // one that holds only the lock file (lockOnlyDir); a directory with
@@ -231,10 +248,12 @@ var errDirNotEmpty = errors.New("client: client directory not empty")
 // before, ErrRegistered). An Open of the same directory may create its
 // lock file again between lockOnlyDir and the rename (L1 of the review of
 // task 20b): the rename is tried once more, and a directory that is still
-// not empty is refused as "not empty or in use by another client". A
-// symbolic link as dir is followed, as before: the directory it names is
-// created or replaced. A mount point as dir cannot be replaced: the
-// rename fails with EBUSY or EXDEV and the run with it.
+// not empty is refused as "not empty or in use by another client"
+// (errInUse), as is a run whose temporary directory a concurrent run of
+// the same kind removed (task 20h point 6). A symbolic link as dir is
+// followed, as before: the directory it names is created or replaced. A
+// mount point as dir cannot be replaced: the rename fails with EBUSY or
+// EXDEV and the run with it.
 func createClientDir(dir, kind string, write func(tmp string) error) (err error) {
 	if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if dir, err = filepath.EvalSymlinks(dir); err != nil {
@@ -250,14 +269,27 @@ func createClientDir(dir, kind string, write func(tmp string) error) (err error)
 	if err != nil {
 		return err
 	}
+	renamed := false
 	defer func() {
-		// A simulated crash leaves everything as a killed process would.
-		if err != nil && !errors.Is(err, errCrashed) {
-			os.RemoveAll(tmp)
+		// A simulated crash leaves everything as a killed process would;
+		// after the rename tmp is the client directory.
+		if err == nil || errors.Is(err, errCrashed) || renamed {
+			return
 		}
+		// A temporary directory that is gone was removed by a run of the
+		// same kind that succeeded meanwhile (removeLeftovers): dir is
+		// taken, whatever step failed on the missing directory.
+		if _, lerr := os.Lstat(tmp); errors.Is(lerr, os.ErrNotExist) {
+			err = errInUse(dir)
+			return
+		}
+		os.RemoveAll(tmp)
 	}()
 	// MkdirTemp creates the directory with 0700 less the umask.
 	if err := os.Chmod(tmp, 0o700); err != nil {
+		return err
+	}
+	if err := writeMarker(tmp); err != nil {
 		return err
 	}
 	// The time of the file system at the start of this run: a temporary
@@ -272,19 +304,17 @@ func createClientDir(dir, kind string, write func(tmp string) error) (err error)
 	if err := write(tmp); err != nil {
 		return err
 	}
-	if err := store.SyncDir(tmp); err != nil {
-		return err
-	}
 	err = replaceDir(tmp, dir, kind)
 	if errors.Is(err, errDirNotEmpty) {
 		err = replaceDir(tmp, dir, kind)
 	}
 	if errors.Is(err, errDirNotEmpty) {
-		return fmt.Errorf("%w: the client directory %s is not empty or in use by another client", store.ErrExists, dir)
+		return errInUse(dir)
 	}
 	if err != nil {
 		return err
 	}
+	renamed = true
 	if err := dirStep(kind, "renamed"); err != nil {
 		return err
 	}
@@ -295,8 +325,20 @@ func createClientDir(dir, kind string, write func(tmp string) error) (err error)
 	return nil
 }
 
+// writeMarker creates the empty marker .incomplete in the new temporary
+// directory tmp.
+func writeMarker(tmp string) error {
+	f, err := os.OpenFile(filepath.Join(tmp, incompleteMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 // replaceDir renames tmp to dir under lockOnlyDir; errDirNotEmpty if
-// dir is a directory that is not empty.
+// dir is a directory that is not empty. Right before the rename it
+// removes the marker of tmp (gone already on the second try) and syncs
+// tmp.
 func replaceDir(tmp, dir, kind string) error {
 	release, err := lockOnlyDir(dir)
 	if err != nil {
@@ -304,6 +346,12 @@ func replaceDir(tmp, dir, kind string) error {
 	}
 	defer release()
 	if err := dirStep(kind, "locked"); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(tmp, incompleteMarker)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := store.SyncDir(tmp); err != nil {
 		return err
 	}
 	// syscall.Rename, because os.Rename refuses every existing directory
@@ -324,11 +372,12 @@ func replaceDir(tmp, dir, kind string) error {
 // that lock the file is removed and the rename replaces the then empty
 // directory; release ends the lock. A directory with any other entry is
 // left alone, and the rename refuses it. The directory is opened with
-// store.OpenDir (task 20e point 4). The content of lock is not checked
-// (L2 of the review of task 20b): any regular file of that name is taken
-// for the lock file of Open and removed while nobody holds a lock on it;
-// that takes write access to the directory, which allows removing it
-// anyway.
+// store.OpenDir (task 20e point 4). The lock is taken by lockClientDir,
+// so the file removed is the one locked (task 20h point 5). The content
+// of lock is not checked (L2 of the review of task 20b): any regular
+// file of that name is taken for the lock file of Open and removed while
+// nobody holds a lock on it; that takes write access to the directory,
+// which allows removing it anyway.
 func lockOnlyDir(dir string) (release func(), err error) {
 	release = func() {}
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
@@ -344,7 +393,7 @@ func lockOnlyDir(dir string) (release func(), err error) {
 		return release, nil
 	}
 	lock := filepath.Join(dir, "lock")
-	unlock, err := store.LockFile(lock)
+	unlock, err := lockClientDir(lock)
 	if err != nil {
 		return release, err
 	}
@@ -355,20 +404,27 @@ func lockOnlyDir(dir string) (release func(), err error) {
 	return unlock, nil
 }
 
-// leftoverBatch is the number of names read from the parent of a client
-// directory at a time (removeLeftovers).
+// leftoverBatch is the number of names read from a directory at a time
+// (removeLeftovers).
 const leftoverBatch = 256
 
-// removeLeftovers removes the temporary directories prefix* in parent
-// that a run of the same kind for the same client directory left behind
-// when it was killed before its rename (createClientDir; task 20e point
-// 3): only directories (a symbolic link is neither followed nor
-// removed), owned by the user of this process (ownedByMe), and last
-// changed before start, the time of the file system when this run made
-// its own. A run of the same kind that is still under way and loses its
-// temporary directory this way fails (its client directory is taken by
-// now in any case, store.ErrExists). Errors are ignored: this run has
-// succeeded, and what is left is removed by a later one.
+// removeLeftovers removes the temporary directories prefix<digits> in
+// parent that a run of the same kind for the same client directory left
+// behind when it was killed before its rename (createClientDir; task 20e
+// point 3, task 20h points 4 and 7): only names in which the digits of
+// os.MkdirTemp follow prefix, only directories (a symbolic link is
+// neither followed nor removed), owned by the user of this process
+// (ownedByMe), last changed before start, the time of the file system
+// when this run made its own, and holding the marker .incomplete as a
+// regular file. In such a directory only the files a run writes there
+// are removed (leftoverFile), the marker last, and then the directory
+// itself, which fails if anything else is left; a directory with another
+// entry keeps that entry and its marker. A renamed client directory has
+// no marker and stays whole. A run of the same kind that is still under
+// way and loses its temporary directory this way fails with
+// store.ErrExists, "not empty or in use by another client" (errInUse;
+// its client directory is taken by now in any case). Errors are ignored:
+// this run has succeeded, and what is left is removed by a later one.
 func removeLeftovers(parent, prefix string, start time.Time) {
 	d, err := store.OpenDir(parent)
 	if err != nil {
@@ -378,7 +434,7 @@ func removeLeftovers(parent, prefix string, start time.Time) {
 	for {
 		names, err := d.Readdirnames(leftoverBatch)
 		for _, n := range names {
-			if !strings.HasPrefix(n, prefix) {
+			if !strings.HasPrefix(n, prefix) || !mkdirTempDigits(n[len(prefix):]) {
 				continue
 			}
 			p := filepath.Join(parent, n)
@@ -386,12 +442,95 @@ func removeLeftovers(parent, prefix string, start time.Time) {
 			if err != nil || !fi.IsDir() || !ownedByMe(fi) || !fi.ModTime().Before(start) {
 				continue
 			}
-			os.RemoveAll(p)
+			removeLeftover(p)
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// removeLeftover removes the leftover temporary directory p if it holds
+// the marker: the files a run writes there, the marker last and then p.
+func removeLeftover(p string) {
+	marker := filepath.Join(p, incompleteMarker)
+	if fi, err := os.Lstat(marker); err != nil || !fi.Mode().IsRegular() {
+		return
+	}
+	d, err := store.OpenDir(p)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	other := false
+	for {
+		names, err := d.Readdirnames(leftoverBatch)
+		for _, n := range names {
+			if n == incompleteMarker {
+				continue
+			}
+			f := filepath.Join(p, n)
+			if fi, lerr := os.Lstat(f); lerr != nil || fi.IsDir() || !leftoverFile(n) {
+				other = true
+				continue
+			}
+			if os.Remove(f) != nil {
+				other = true
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	if other {
+		return
+	}
+	if os.Remove(marker) == nil {
+		os.Remove(p)
+	}
+}
+
+// leftoverFile reports whether name is a file that createClientDir or
+// its atomic writers make in a temporary directory: key store, user.rec,
+// state.json and the temporary files of store.WritePrivateFileAtomic
+// (.tmp-<16 hex digits>) and keys.WriteKeystoreFile
+// (.keystore-<digits>.tmp). The marker is handled by removeLeftover.
+func leftoverFile(name string) bool {
+	switch name {
+	case "keystore", "user.rec", "state.json":
+		return true
+	}
+	if h, ok := strings.CutPrefix(name, ".tmp-"); ok {
+		if len(h) != 16 {
+			return false
+		}
+		for _, c := range h {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	if r, ok := strings.CutPrefix(name, ".keystore-"); ok {
+		if n, ok := strings.CutSuffix(r, ".tmp"); ok {
+			return mkdirTempDigits(n)
+		}
+	}
+	return false
+}
+
+// mkdirTempDigits reports whether s is a random part of os.MkdirTemp and
+// os.CreateTemp: one to ten decimal digits (a uint32).
+func mkdirTempDigits(s string) bool {
+	if len(s) < 1 || len(s) > 10 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // showAndConfirm shows the 24 words of seed through p and asks three
@@ -518,7 +657,7 @@ func Register(cfg Config, code store.ID) (store.ID, error) {
 	if _, err := os.Stat(cfg.statePath()); err != nil {
 		return store.ID{}, ErrNotRegistered
 	}
-	unlock, err := store.LockFile(filepath.Join(cfg.Dir, "lock"))
+	unlock, err := lockClientDir(filepath.Join(cfg.Dir, "lock"))
 	if err != nil {
 		return store.ID{}, err
 	}

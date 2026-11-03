@@ -110,6 +110,9 @@ var (
 	// ErrQuery rejects a search term that is not one of the terms of 5.4.
 	// It never contains the term.
 	ErrQuery = errors.New("client: invalid search term")
+	// ErrClosed is returned by every method of a Client after Close that
+	// returns an error (task 20h point 2).
+	ErrClosed = errors.New("client: the client is closed")
 )
 
 // Config configures a client.
@@ -387,8 +390,11 @@ type Client struct {
 	created []*store.Epoch
 	// next is the epoch.rec after the verified chain that the running
 	// change found not adoptable (loadChain with adopt), nil if none.
-	next      *nextEpoch
-	mu        sync.Mutex
+	next *nextEpoch
+	mu   sync.Mutex
+	// closed is set by Close (under mu); every method that returns an
+	// error returns ErrClosed afterwards (open).
+	closed    bool
 	ingest    map[uint32]ingestKey
 	epochKeys map[epochRef]*store.EpochKeys
 	// locked is the mailbox whose lock mutate holds (zero otherwise), so
@@ -476,7 +482,7 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	if err := mkdirClient(cfg.Dir); err != nil {
 		return nil, err
 	}
-	unlock, err := store.LockFile(filepath.Join(cfg.Dir, "lock"))
+	unlock, err := lockClientDir(filepath.Join(cfg.Dir, "lock"))
 	if err != nil {
 		return nil, err
 	}
@@ -574,10 +580,17 @@ func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 // UserID returns the user's ID.
 func (c *Client) UserID() store.ID { return c.me }
 
-// Close wipes the keys.
+// Close wipes the keys and releases the lock of the client directory.
+// Afterwards every method that returns an error returns ErrClosed and
+// nothing else (task 20h point 2); UserID and Mailboxes still return the
+// public IDs held in memory, and Close again does nothing.
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
 	for _, k := range c.epochKeys {
 		k.Zero()
 	}
@@ -607,6 +620,17 @@ func (c *Client) save() error {
 		}
 	}
 	return saveState(c.cfg.statePath(), c.state)
+}
+
+// open returns ErrClosed after Close. Every exported method that
+// returns an error calls it first.
+func (c *Client) open() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
+	return nil
 }
 
 // writable rejects changes by a client opened with RecoverRead.
@@ -659,6 +683,54 @@ func (c *Client) Mailboxes() []store.ID {
 		}
 	}
 	return out
+}
+
+// lockAttempts bounds the attempts of lockClientDir.
+const lockAttempts = 8
+
+// dirLockHook, if set, is called by lockClientDir after every lock taken,
+// before the path is compared, with the number of the attempt (from 1).
+// It is nil in production and set only by tests of this package.
+var dirLockHook func(attempt int)
+
+// lockClientDir takes the lock of the client directory (store.LockFile
+// on path, the lock file in it) and makes sure that the file locked is
+// the one path names once the lock is held (task 20h point 5, F2 of the
+// attack review of task 20e). A concurrent keygen or restore removes the
+// lock file of a directory that holds nothing else, under its lock, and
+// replaces the directory (lockOnlyDir); a run that opened that file
+// before and gets the lock after it was released would hold a lock on a
+// file no other run sees, and a third run would make a new lock file and
+// lock it as well. store.LockFile does not hand out its descriptor, so
+// the file is compared through the path: path must name the same file
+// right before store.LockFile and right after it. A lock file is removed
+// only under its lock, so the file locked stays at path while this run
+// holds it; a file removed between the open and the lock is still open
+// here, so its inode number is not used again, and whatever path names
+// afterwards differs from it and from what path named before the open.
+// If path is missing before or after, or names another file, the lock is
+// released and taken again, at most lockAttempts times (the first lock
+// of a new directory creates the file and takes two); then
+// store.ErrLocked. A symbolic link is followed, as by the open of the
+// lock file. Open, openForDeviceLost, Register and lockOnlyDir take the
+// lock of a client directory this way.
+func lockClientDir(path string) (func(), error) {
+	for attempt := 1; attempt <= lockAttempts; attempt++ {
+		before, berr := os.Stat(path)
+		unlock, err := store.LockFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if dirLockHook != nil {
+			dirLockHook(attempt)
+		}
+		after, aerr := os.Stat(path)
+		if berr == nil && aerr == nil && os.SameFile(before, after) {
+			return unlock, nil
+		}
+		unlock()
+	}
+	return nil, fmt.Errorf("%w: the lock file of the client directory changed in every attempt", store.ErrLocked)
 }
 
 func mkdirClient(dir string) error {

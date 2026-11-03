@@ -466,6 +466,9 @@ func (c *Client) replaceUnlogged(mbx store.ID, n uint32, old []byte, e *store.Ep
 // supply follows under the same lock like any epoch n > 1. A crash after
 // step 2 is completed by the next Open (resumeMailboxes).
 func (c *Client) CreateMailbox(name string) (store.ID, error) {
+	if err := c.open(); err != nil {
+		return store.ID{}, err
+	}
 	if err := c.writable(); err != nil {
 		return store.ID{}, err
 	}
@@ -1650,6 +1653,9 @@ func (c *Client) isUserMember(e *store.Epoch) bool {
 // the client log once first (2.7 "bei jedem Sync", task 14b point 12),
 // which also writes the checkpoints that are due.
 func (c *Client) Sync() error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}
@@ -1729,6 +1735,9 @@ func (c *Client) syncMailbox(id store.ID) error {
 // MailboxName decrypts the name of a mailbox from folders.gml of the
 // newest epoch this user has access to (section 4).
 func (c *Client) MailboxName(id store.ID) (string, error) {
+	if err := c.open(); err != nil {
+		return "", err
+	}
 	ch, err := c.verifyChain(id)
 	if err != nil {
 		return "", err
@@ -1743,6 +1752,9 @@ func (c *Client) MailboxName(id store.ID) (string, error) {
 // Folders decrypts folders.gml of the newest epoch this user has access
 // to (section 4).
 func (c *Client) Folders(id store.ID) ([]store.Folder, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
 	ch, err := c.verifyChain(id)
 	if err != nil {
 		return nil, err

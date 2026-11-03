@@ -522,7 +522,7 @@ func openForDeviceLost(cfg Config, passphrase []byte) (c *Client, local, remote 
 	if _, err := os.Stat(cfg.Dir); err != nil {
 		return nil, nil, nil, ErrNotRegistered
 	}
-	unlock, err := store.LockFile(filepath.Join(cfg.Dir, "lock"))
+	unlock, err := lockClientDir(filepath.Join(cfg.Dir, "lock"))
 	if err != nil {
 		return nil, nil, nil, err
 	}

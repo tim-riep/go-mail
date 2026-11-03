@@ -392,6 +392,9 @@ type ShareOptions struct {
 // is ErrPartial, naming the skipped epochs; the wraps written stay. If no
 // epoch of a past period could be wrapped at all, the error is ErrWrap.
 func (c *Client) Share(mbx, user store.ID, opts ShareOptions) ([]uint32, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
 	if err := c.writable(); err != nil {
 		return nil, err
 	}
@@ -481,6 +484,9 @@ func (c *Client) Share(mbx, user store.ID, opts ShareOptions) ([]uint32, error) 
 // from a remaining member (K2 rule 2), and the last user member stays.
 // Running Revoke again completes an interrupted revocation.
 func (c *Client) Revoke(mbx, user store.ID) error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}

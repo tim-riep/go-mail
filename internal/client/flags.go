@@ -82,6 +82,9 @@ var errStale = errors.New("client: metadata changed meanwhile")
 // the mail's epoch changes flags: readers accept user-signed metadata only
 // from them. Nothing is written if the flags do not change.
 func (c *Client) SetFlags(mbx, id store.ID, set, clear []string) (*Mail, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
 	if err := c.writable(); err != nil {
 		return nil, err
 	}

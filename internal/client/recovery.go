@@ -122,6 +122,9 @@ func recoveryMember(e *store.Epoch) (store.Member, bool) {
 // of it, or its keys are not available), the recipient is still entered
 // and the error is ErrPartial, naming the skipped epochs.
 func (c *Client) SetRecovery(mbx store.ID, pub *store.RecoveryPub, confirm func(fingerprint string) bool) error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}
@@ -220,6 +223,9 @@ func (c *Client) removeRecoveryWraps(ch *chain, keep store.ID) error {
 // recovery-changed with immediate effect without it begins, with the
 // supply after it. Running it again completes an interrupted run.
 func (c *Client) ClearRecovery(mbx store.ID) error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}
@@ -247,6 +253,9 @@ func (c *Client) ClearRecovery(mbx store.ID) error {
 // of recovery/<recovery-id>.pub of the newest epoch's recipient; only
 // after that does this device wrap new epochs for it.
 func (c *Client) ConfirmRecovery(mbx store.ID, confirm func(fingerprint string) bool) error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}

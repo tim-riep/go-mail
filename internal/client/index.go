@@ -298,6 +298,9 @@ func (c *Client) pendingMeta(ch *chain, e *store.Epoch, id store.ID, where map[s
 // run reads (maxReadSegments, maxReadBytes) is merged in parts, with a
 // warning each time (task 09c).
 func (c *Client) Index(mbx store.ID) (int, error) {
+	if err := c.open(); err != nil {
+		return 0, err
+	}
 	if err := c.writable(); err != nil {
 		return 0, err
 	}

@@ -143,10 +143,11 @@ func TestRestoreAtomic(t *testing.T) {
 	}
 }
 
-// TestClientDirLeftovers (task 20e point 3): a successful keygen removes
-// the directories .<name>.keygen-* next to its client directory that were
-// last changed before its run and belong to the user of the process, and
-// nothing else: not a newer one, not a symbolic link (nor what it
+// TestClientDirLeftovers (task 20e point 3; names and marker after task
+// 20h points 4 and 7): a successful keygen removes the directories
+// .<name>.keygen-<digits> with the marker .incomplete next to its client
+// directory that were last changed before its run and belong to the user
+// of the process, and nothing else: not a newer one, not a symbolic link (nor what it
 // names), not a regular file, not the temporary directory of a restore
 // or of another client directory, not one of another user. A successful
 // restore removes .<name>.restore-* in the same way and keeps
@@ -159,8 +160,10 @@ func TestClientDirLeftovers(t *testing.T) {
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(p, "keystore"), []byte("sealed"), 0o600); err != nil {
-			t.Fatal(err)
+		for _, f := range []string{"keystore", ".incomplete"} {
+			if err := os.WriteFile(filepath.Join(p, f), []byte("sealed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := os.Chtimes(p, at, at); err != nil {
 			t.Fatal(err)
@@ -174,26 +177,26 @@ func TestClientDirLeftovers(t *testing.T) {
 	}
 	at := func(name string) string { return filepath.Join(parent, name) }
 
-	mkdir(at(".alice.keygen-old"), past)
+	mkdir(at(".alice.keygen-1001"), past)
 	// A time after this run that a 32-bit time_t holds (GOARCH=386).
-	mkdir(at(".alice.keygen-newer"), time.Date(2037, 1, 1, 0, 0, 0, 0, time.UTC))
+	mkdir(at(".alice.keygen-1002"), time.Date(2037, 1, 1, 0, 0, 0, 0, time.UTC))
 	mkdir(at("victim"), past)
-	if err := os.Symlink(at("victim"), at(".alice.keygen-link")); err != nil {
+	if err := os.Symlink(at("victim"), at(".alice.keygen-1003")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(at(".alice.keygen-file"), []byte("x"), 0o600); err != nil {
+	if err := os.WriteFile(at(".alice.keygen-1004"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(at(".alice.keygen-file"), past, past); err != nil {
+	if err := os.Chtimes(at(".alice.keygen-1004"), past, past); err != nil {
 		t.Fatal(err)
 	}
-	mkdir(at(".alice.restore-old"), past)
-	mkdir(at(".bob.keygen-old"), past)
-	mkdir(at(".alicex.keygen-old"), past)
+	mkdir(at(".alice.restore-1005"), past)
+	mkdir(at(".bob.keygen-1006"), past)
+	mkdir(at(".alicex.keygen-1007"), past)
 	foreign := os.Geteuid() == 0
 	if foreign {
-		mkdir(at(".alice.keygen-foreign"), past)
-		if err := os.Chown(at(".alice.keygen-foreign"), 4242, 4242); err != nil {
+		mkdir(at(".alice.keygen-1008"), past)
+		if err := os.Chown(at(".alice.keygen-1008"), 4242, 4242); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -212,23 +215,23 @@ func TestClientDirLeftovers(t *testing.T) {
 		t.Fatalf("keygen with a fault: %v", err)
 	}
 	client.SetClientDirFault(t, nil)
-	exists(at(".alice.keygen-old"), true)
+	exists(at(".alice.keygen-1001"), true)
 
 	echo := &testenv.Echo{}
 	if _, err := client.Keygen(cfg, testenv.Passphrase, echo); err != nil {
 		t.Fatal(err)
 	}
 	checkClientDir(t, dir, true)
-	exists(at(".alice.keygen-old"), false)
-	exists(at(".alice.keygen-newer"), true)
-	exists(at(".alice.keygen-link"), true)
+	exists(at(".alice.keygen-1001"), false)
+	exists(at(".alice.keygen-1002"), true)
+	exists(at(".alice.keygen-1003"), true)
 	exists(filepath.Join(at("victim"), "keystore"), true)
-	exists(at(".alice.keygen-file"), true)
-	exists(at(".alice.restore-old"), true)
-	exists(at(".bob.keygen-old"), true)
-	exists(at(".alicex.keygen-old"), true)
+	exists(at(".alice.keygen-1004"), true)
+	exists(at(".alice.restore-1005"), true)
+	exists(at(".bob.keygen-1006"), true)
+	exists(at(".alicex.keygen-1007"), true)
 	if foreign {
-		exists(filepath.Join(at(".alice.keygen-foreign"), "keystore"), true)
+		exists(filepath.Join(at(".alice.keygen-1008"), "keystore"), true)
 	}
 	code, err := env.Store.CreateInvite(env.Clock.Now().UnixMilli())
 	if err != nil {
@@ -239,15 +242,15 @@ func TestClientDirLeftovers(t *testing.T) {
 	}
 
 	rdir := at("alice2")
-	mkdir(at(".alice2.restore-old"), past)
-	mkdir(at(".alice2.keygen-old"), past)
+	mkdir(at(".alice2.restore-2001"), past)
+	mkdir(at(".alice2.keygen-2002"), past)
 	if _, err := client.Restore(env.ClientConfig(rdir), client.RestoreOptions{Words: echo.Words()}, testenv.Passphrase); err != nil {
 		t.Fatal(err)
 	}
 	checkClientDir(t, rdir, true)
-	exists(at(".alice2.restore-old"), false)
-	exists(at(".alice2.keygen-old"), true)
-	exists(at(".alice.restore-old"), true)
+	exists(at(".alice2.restore-2001"), false)
+	exists(at(".alice2.keygen-2002"), true)
+	exists(at(".alice.restore-1005"), true)
 }
 
 // TestKeygenOpenRace (task 20e point 4, L1 of the review of task 20b):

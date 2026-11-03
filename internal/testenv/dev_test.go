@@ -199,8 +199,8 @@ func TestPublishHead(t *testing.T) {
 	if _, err := e.PublishHead(); !errors.Is(err, translog.ErrHead) {
 		t.Fatalf("clock back: %v", err)
 	}
-	if msg := fatalOn(t, e, func() { e.MustPublishHead() }); msg == "" {
-		t.Fatal("no message")
+	if msg := fatalOn(t, e, func() { e.MustPublishHead() }); !strings.Contains(msg, "the clock lies before the newest head") {
+		t.Fatalf("clock back: %q", msg)
 	}
 	e.beforeRefresh()
 	e.Clock.Advance(2 * time.Minute)
@@ -279,13 +279,13 @@ func TestOpenOperator(t *testing.T) {
 
 	pin := *e.Pin
 	pin.Origin = "bad+origin"
-	if msg := expectFatal(t, func(tb testing.TB) { openOperator(tb, e.Store, &pin) }); msg == "" {
-		t.Fatal("invalid origin")
+	if msg := expectFatal(t, func(tb testing.TB) { openOperator(tb, e.Store, &pin) }); !strings.Contains(msg, "origin must be printable ASCII") {
+		t.Fatalf("invalid origin: %q", msg)
 	}
 	pin = *e.Pin
 	pin.Identities = nil
-	if msg := expectFatal(t, func(tb testing.TB) { openOperator(tb, e.Store, &pin) }); msg == "" {
-		t.Fatal("pin without identities")
+	if msg := expectFatal(t, func(tb testing.TB) { openOperator(tb, e.Store, &pin) }); !strings.Contains(msg, "an operator log needs the identity list of a pin") {
+		t.Fatalf("pin without identities: %q", msg)
 	}
 	wfile := e.Store.Path("platform", "witnesses.rec")
 	ws, err := os.ReadFile(wfile)
@@ -295,14 +295,14 @@ func TestOpenOperator(t *testing.T) {
 	if err := os.WriteFile(wfile, ws[:len(ws)-1], 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.OpenOperator() }); msg == "" {
-		t.Fatal("broken witnesses.rec")
+	if msg := fatalOn(t, e, func() { e.OpenOperator() }); !strings.Contains(msg, "invalid witness list") {
+		t.Fatalf("broken witnesses.rec: %q", msg)
 	}
 	if err := os.Remove(wfile); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.OpenOperator() }); msg == "" {
-		t.Fatal("missing witnesses.rec")
+	if msg := fatalOn(t, e, func() { e.OpenOperator() }); !strings.Contains(msg, "not found: witnesses.rec") {
+		t.Fatalf("missing witnesses.rec: %q", msg)
 	}
 }
 
@@ -325,19 +325,19 @@ func TestAssignAddress(t *testing.T) {
 	if err := e.LogOperator().CheckAddress("other@example.org", mbx, now); err == nil {
 		t.Fatal("unassigned address")
 	}
-	if msg := fatalOn(t, e, func() { e.AssignAddress("no address", mbx) }); msg == "" {
-		t.Fatal("invalid address")
+	if msg := fatalOn(t, e, func() { e.AssignAddress("no address", mbx) }); !strings.Contains(msg, "malformed address") {
+		t.Fatalf("invalid address: %q", msg)
 	}
 	admin := e.AdminKey
 	e.AdminKey = admin[:10]
-	if msg := fatalOn(t, e, func() { e.AssignAddress("x@example.org", mbx) }); msg == "" {
-		t.Fatal("short admin key")
+	if msg := fatalOn(t, e, func() { e.AssignAddress("x@example.org", mbx) }); !strings.Contains(msg, "private key has wrong length") {
+		t.Fatalf("short admin key: %q", msg)
 	}
 	// Signed by the ingest key: well formed, but no admin certificate
 	// verifies it, so the log refuses the entry.
 	e.AdminKey = e.IngestKey
-	if msg := fatalOn(t, e, func() { e.AssignAddress("y@example.org", mbx) }); msg == "" {
-		t.Fatal("assignment by a wrong key")
+	if msg := fatalOn(t, e, func() { e.AssignAddress("y@example.org", mbx) }); !strings.Contains(msg, "validity rule: admin signature") {
+		t.Fatalf("assignment by a wrong key: %q", msg)
 	}
 	e.AdminKey = admin
 }
@@ -384,8 +384,8 @@ func TestUsers(t *testing.T) {
 		t.Fatal("Reopen")
 	}
 
-	if msg := fatalOn(t, e, func() { e.NewUser("alice") }); msg == "" {
-		t.Fatal("second alice")
+	if msg := fatalOn(t, e, func() { e.NewUser("alice") }); !strings.Contains(msg, client.ErrRegistered.Error()) {
+		t.Fatalf("second alice: %q", msg)
 	}
 	ksFile := filepath.Join(u.Dir, "keystore")
 	ksData, err := os.ReadFile(ksFile)
@@ -397,17 +397,17 @@ func TestUsers(t *testing.T) {
 	if err := os.WriteFile(ksFile, bad, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.Keystore(u) }); msg == "" {
-		t.Fatal("broken key store")
+	if msg := fatalOn(t, e, func() { e.Keystore(u) }); !strings.Contains(msg, "key store authentication failed") {
+		t.Fatalf("broken key store: %q", msg)
 	}
-	if msg := fatalOn(t, e, func() { e.Reopen(u) }); msg == "" {
-		t.Fatal("Reopen with a broken key store")
+	if msg := fatalOn(t, e, func() { e.Reopen(u) }); !strings.Contains(msg, "key store authentication failed") {
+		t.Fatalf("Reopen with a broken key store: %q", msg)
 	}
 	if err := os.Remove(ksFile); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.Keystore(u) }); msg == "" {
-		t.Fatal("missing key store")
+	if msg := fatalOn(t, e, func() { e.Keystore(u) }); !strings.Contains(msg, "keystore: no such file or directory") {
+		t.Fatalf("missing key store: %q", msg)
 	}
 	if err := os.WriteFile(ksFile, ksData, 0o600); err != nil {
 		t.Fatal(err)
@@ -423,15 +423,15 @@ func TestNewEnvFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "witness.key"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if msg := expectFatalIn(t, dir, func(tb testing.TB) { New(tb) }); msg == "" {
-		t.Fatal("witness key file exists")
+	if msg := expectFatalIn(t, dir, func(tb testing.TB) { New(tb) }); !strings.Contains(msg, "file exists: witness.key") {
+		t.Fatalf("witness key file exists: %q", msg)
 	}
 	dir = t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "data"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if msg := expectFatalIn(t, dir, func(tb testing.TB) { NewLogged(tb) }); msg == "" {
-		t.Fatal("data is a file")
+	if msg := expectFatalIn(t, dir, func(tb testing.TB) { NewLogged(tb) }); !strings.Contains(msg, "data is not a directory") {
+		t.Fatalf("data is a file: %q", msg)
 	}
 }
 
@@ -447,8 +447,8 @@ func TestNewUserFails(t *testing.T) {
 	if err := os.WriteFile(inv, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.NewUser("bob") }); msg == "" {
-		t.Fatal("invite")
+	if msg := fatalOn(t, e, func() { e.NewUser("bob") }); !strings.Contains(msg, "invites/.tmp-") || !strings.Contains(msg, "not a directory") {
+		t.Fatalf("invite: %q", msg)
 	}
 }
 
@@ -467,7 +467,7 @@ func TestNewUserRegisterOpenFails(t *testing.T) {
 	if err := os.WriteFile(users, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.NewUser("bob") }); !strings.Contains(msg, "users") {
+	if msg := fatalOn(t, e, func() { e.NewUser("bob") }); !strings.Contains(msg, "users is not a directory") {
 		t.Fatalf("register: %q", msg)
 	}
 	if err := os.Remove(users); err != nil {
@@ -478,7 +478,7 @@ func TestNewUserRegisterOpenFails(t *testing.T) {
 	}
 	e.AutoHeads = false
 	e.Clock.Advance(72 * time.Hour)
-	if msg := fatalOn(t, e, func() { e.NewUser("carol") }); !strings.Contains(msg, "fresh") {
+	if msg := fatalOn(t, e, func() { e.NewUser("carol") }); !strings.Contains(msg, "no fresh verified tree head") {
 		t.Fatalf("open: %q", msg)
 	}
 }
@@ -507,18 +507,18 @@ func TestMailbox(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if msg := fatalOn(t, e, func() { e.Mailbox(u, "B", "a@example.org") }); msg == "" {
-		t.Fatal("address of another mailbox")
+	if msg := fatalOn(t, e, func() { e.Mailbox(u, "B", "a@example.org") }); !strings.Contains(msg, "duplicate log entry") {
+		t.Fatalf("address of another mailbox: %q", msg)
 	}
-	if msg := fatalOn(t, e, func() { e.Mailbox(u, " ") }); msg == "" {
-		t.Fatal("empty name")
+	if msg := fatalOn(t, e, func() { e.Mailbox(u, " ") }); !strings.Contains(msg, "empty mailbox name") {
+		t.Fatalf("empty name: %q", msg)
 	}
 	// Logged, but addresses.json cannot be read.
 	if err := os.WriteFile(e.Store.AddressesFile(), []byte("{"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if msg := fatalOn(t, e, func() { e.Mailbox(u, "D", "d@example.org") }); msg == "" {
-		t.Fatal("broken addresses.json")
+	if msg := fatalOn(t, e, func() { e.Mailbox(u, "D", "d@example.org") }); !strings.Contains(msg, "invalid record: addresses.json") {
+		t.Fatalf("broken addresses.json: %q", msg)
 	}
 }
 
@@ -655,8 +655,8 @@ func TestForgeEpoch(t *testing.T) {
 	e.Log = e.Operator
 	var none store.ID
 	none[0] = 1
-	if msg := fatalOn(t, e, func() { e.ForgeEpoch(alice, none, e.Clock.Now(), store.ReasonMemberAdded, nil, "D") }); msg == "" {
-		t.Fatal("missing mailbox")
+	if msg := fatalOn(t, e, func() { e.ForgeEpoch(alice, none, e.Clock.Now(), store.ReasonMemberAdded, nil, "D") }); !strings.Contains(msg, "not found: mailbox.rec") {
+		t.Fatalf("missing mailbox: %q", msg)
 	}
 }
 
@@ -707,8 +707,8 @@ func TestRotate(t *testing.T) {
 		t.Fatalf("wrap issued again: %v", err)
 	}
 	bad := &User{Dir: u.Dir, ID: u.ID, Client: u.Client, Words: []string{"no", "seed"}}
-	if msg := fatalOn(t, e, func() { e.Rotate(bad) }); msg == "" {
-		t.Fatal("bad seed")
+	if msg := fatalOn(t, e, func() { e.Rotate(bad) }); !strings.Contains(msg, "a seed has exactly 24 words") {
+		t.Fatalf("bad seed: %q", msg)
 	}
 }
 
@@ -732,8 +732,8 @@ func TestDeviceLost(t *testing.T) {
 	ks.Zero()
 	other := e.NewUser("bob")
 	wrong := &User{Dir: u.Dir, ID: u.ID, Client: u.Client, Words: other.Words}
-	if msg := fatalOn(t, e, func() { e.DeviceLost(wrong) }); msg == "" {
-		t.Fatal("wrong seed")
+	if msg := fatalOn(t, e, func() { e.DeviceLost(wrong) }); !strings.Contains(msg, client.ErrSeed.Error()) {
+		t.Fatalf("wrong seed: %q", msg)
 	}
 }
 
@@ -763,7 +763,7 @@ func TestShare(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := e.Mailbox(alice, "B")
-	if msg := fatalOn(t, e, func() { e.Share(bob, other, alice, client.ShareOptions{}) }); msg == "" {
-		t.Fatal("share by a user who is no member")
+	if msg := fatalOn(t, e, func() { e.Share(bob, other, alice, client.ShareOptions{}) }); !strings.Contains(msg, client.ErrNotMember.Error()) {
+		t.Fatalf("share by a user who is no member: %q", msg)
 	}
 }

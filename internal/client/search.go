@@ -74,6 +74,9 @@ func (ch *chain) inPeriod(i int, since int64) bool {
 // Neither the term nor anything derived from it appears in a warning or
 // an error.
 func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
 	term, err := normalizeTerm(query)
 	if err != nil {
 		return nil, err

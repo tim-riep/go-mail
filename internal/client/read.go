@@ -363,6 +363,9 @@ func (c *Client) saveSeen() error {
 // if folder is zero), sorted by receipt. Mails that fail a check are not
 // listed; a warning names each.
 func (c *Client) List(mbx, folder store.ID) ([]*Mail, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
 	ch, err := c.verifyChain(mbx)
 	if err != nil {
 		return nil, err
@@ -445,6 +448,9 @@ func (c *Client) findFolder(mbx, id store.ID) (store.ID, error) {
 // and file ID of the mail header with the metadata. Only then is the mail
 // decrypted; content is returned only after its last block authenticated.
 func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
+	if err := c.open(); err != nil {
+		return nil, nil, err
+	}
 	ch, err := c.verifyChain(mbx)
 	if err != nil {
 		return nil, nil, err
@@ -516,6 +522,9 @@ func (c *Client) warnRejected(id store.ID, what string, err error) {
 // its creation time, which the server sets to the receipt of the mails
 // it covers. Index and Search process pending/ with the same checks.
 func (c *Client) OpenPending(mbx store.ID, epoch uint32, file store.ID) (*store.Pending, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
 	ch, err := c.verifyChain(mbx)
 	if err != nil {
 		return nil, err

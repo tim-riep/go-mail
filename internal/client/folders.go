@@ -15,6 +15,9 @@ import (
 // name. Only a user member of every epoch concerned writes folders.gml
 // (a delegate never does, QUESTIONS Q6); past epochs keep their list.
 func (c *Client) SetFolders(mbx store.ID, folders []store.Folder) error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}
@@ -34,6 +37,9 @@ func (c *Client) SetFolders(mbx store.ID, folders []store.Folder) error {
 // Rename changes the name of the mailbox in folders.gml of the current
 // and every future epoch (section 4, S20), like SetFolders.
 func (c *Client) Rename(mbx store.ID, name string) error {
+	if err := c.open(); err != nil {
+		return err
+	}
 	if err := c.writable(); err != nil {
 		return err
 	}

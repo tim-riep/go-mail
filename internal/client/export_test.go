@@ -71,3 +71,13 @@ func SetClientDirFault(t interface{ Cleanup(func()) }, f func(step string) error
 	clientDirFault = f
 	t.Cleanup(func() { clientDirFault = nil })
 }
+
+// SetDirLockHook sets the hook of lockClientDir (see dirLockHook) until
+// the test ends.
+func SetDirLockHook(t interface{ Cleanup(func()) }, f func(attempt int)) {
+	dirLockHook = f
+	t.Cleanup(func() { dirLockHook = nil })
+}
+
+// LockAttempts bounds the attempts of lockClientDir.
+const LockAttempts = lockAttempts

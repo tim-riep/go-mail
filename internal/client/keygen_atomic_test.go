@@ -22,7 +22,8 @@ var keygenSteps = []string{"dir", "user", "keystore", "state", "locked", "rename
 var clientFiles = []string{"keystore", "user.rec", "state.json"}
 
 // checkClientDir fails unless dir is absent (complete false) or a
-// complete client directory with mode 0700 (complete true).
+// complete client directory with mode 0700 and without the marker
+// .incomplete (complete true).
 func checkClientDir(t *testing.T, dir string, complete bool) {
 	t.Helper()
 	fi, err := os.Lstat(dir)
@@ -39,6 +40,10 @@ func checkClientDir(t *testing.T, dir string, complete bool) {
 		if fi, err := os.Lstat(filepath.Join(dir, f)); err != nil || !fi.Mode().IsRegular() {
 			t.Fatalf("%s: %v", f, err)
 		}
+	}
+	// The marker of the temporary directory is gone (task 20h point 4).
+	if _, err := os.Lstat(filepath.Join(dir, ".incomplete")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker in the client directory: %v", err)
 	}
 }
 
