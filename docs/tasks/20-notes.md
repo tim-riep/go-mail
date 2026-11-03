@@ -340,3 +340,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - F3 (niedrig, Q9): weit in der Zukunft liegendes `valid_from` friert eine Adresse ein; Abhilfe frühes `revoked_at_size`; Grenze für `valid_from` beim Anhängen erwägen.
 - F4 (niedrig, für 21c): Lücke ohne Ingest-Generation, wenn `valid_from` des Nachfolgers nach `revoked_at_time` liegt → keine frischen Köpfe; Zeremonie muss das verhindern.
 - F5 (niedrig): doc.go „Reading for the operator“ zu ErrPrerequisite irreführend (Neuausstellung unter gleichem Namen möglich).
+
+## Aus 20o und seiner Prüfung (für die Doku-Abstimmung nach Auftrag 21)
+- Doku: AUDIT R33 und DECISIONS (um Z. 560) nennen noch `writeClientDir`, jetzt `writeClientDirOutside`; RUNBOOK 8.6 braucht die Meldungen von `errIncompleteDir`, `errNotDurable` und die ErrLocked-Form von „not empty or in use by another client“; R33: ein Rest mit fremdem Eintrag bleibt jetzt ganz; Prüfung „nicht im Datenverzeichnis“ jetzt auch über Symlinks (D86-Nachtrag 20o).
+- Prüfung (niedrig): `resolveExisting` hält an einem hängenden Symlink an; Meldung dann `mkdir …: file exists` statt `ErrInsideDataDir` (sicher, nichts angelegt).

@@ -55,8 +55,8 @@ func entries(t *testing.T, dir string) []string {
 // killed keygen for the same client directory left behind (marker, key
 // store, user.rec, state.json and the temporary files of the atomic
 // writers), and nothing else: not a complete client directory renamed to
-// a name of that pattern (no marker), not an unknown file in a leftover
-// with the marker (which keeps its marker and the directory), not a
+// a name of that pattern (no marker), not a leftover with the marker and
+// an unknown entry (which stays whole since task 20o point 1), not a
 // directory whose marker is no regular file, not a name with anything but
 // the digits of os.MkdirTemp after the prefix.
 func TestLeftoverNeedsMarker(t *testing.T) {
@@ -148,7 +148,7 @@ func TestLeftoverNeedsMarker(t *testing.T) {
 			t.Fatalf("%s of the renamed client directory changed: %v", f, err)
 		}
 	}
-	if got := strings.Join(entries(t, unknown), " "); got != ".incomplete .keystore-x.tmp .tmp-short notes state.json" {
+	if got := strings.Join(entries(t, unknown), " "); got != ".incomplete .keystore-x.tmp .tmp-short keystore notes state.json" {
 		t.Fatalf("leftover with unknown entries: %s", got)
 	}
 	if got := strings.Join(entries(t, dirMarker), " "); got != ".incomplete keystore" {

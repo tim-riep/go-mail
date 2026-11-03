@@ -133,7 +133,7 @@ type Config struct {
 	Store *store.Store
 	// Dir is the client directory (default ~/.config/gomailctl): key
 	// store, own user.rec and local state. It must not be inside the data
-	// directory.
+	// directory, also not through a symbolic link (task 20o point 3).
 	Dir string
 	// Pin is the trusted platform identity (2.3) and the anchor of the
 	// transparency log (translog doc.go "Pin"): origin, witnesses, quorum
@@ -168,11 +168,50 @@ func (cfg *Config) check() error {
 	if err != nil {
 		return err
 	}
-	if rel, err := filepath.Rel(cfg.Store.Root, dir); err == nil && filepath.IsLocal(rel) || dir == cfg.Store.Root {
-		return fmt.Errorf("client: the client directory must not be inside the data directory")
+	if insideDataDir(dir, cfg.Store.Root) {
+		return errInsideDataDir
 	}
 	cfg.Dir = dir
 	return nil
+}
+
+// errInsideDataDir rejects a client directory inside the data directory
+// (Config.Dir).
+var errInsideDataDir = errors.New("client: the client directory must not be inside the data directory")
+
+// insideDataDir reports whether the absolute path dir is root or lies
+// below it, compared as given and with symbolic links resolved as far as
+// the paths exist (resolveExisting; L3 of the review of the client
+// directories, task 20o point 3): a client directory named through a
+// symbolic link into the data directory, at dir itself or at one of its
+// parents, is inside it.
+func insideDataDir(dir, root string) bool {
+	return below(dir, root) || below(resolveExisting(dir), resolveExisting(root))
+}
+
+// below reports whether the absolute path p is base or lies below it.
+func below(p, base string) bool {
+	rel, err := filepath.Rel(base, p)
+	return err == nil && filepath.IsLocal(rel) || p == base
+}
+
+// resolveExisting returns the absolute path p with the symbolic links of
+// its longest prefix that filepath.EvalSymlinks resolves replaced; the
+// rest of p, which does not exist (or cannot be resolved), is appended as
+// it is.
+func resolveExisting(p string) string {
+	rest := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // checkReader checks everything but the client directory, which a
@@ -514,9 +553,14 @@ type epochRef struct {
 // with another user member (TODO(Q20)); every start warns while it is
 // set. The checkpoints are written when none were written for the
 // reference head and the current generation yet. A CreateMailbox
-// interrupted after its log entry is completed (resumeMailboxes).
+// interrupted after its log entry is completed (resumeMailboxes). A
+// directory with the marker .incomplete of an unfinished keygen or restore
+// is refused before anything is written (errIncompleteDir, task 20o).
 func Open(cfg Config, passphrase []byte) (c *Client, err error) {
 	if err := cfg.check(); err != nil {
+		return nil, err
+	}
+	if err := refuseIncomplete(cfg.Dir); err != nil {
 		return nil, err
 	}
 	// One client process per client directory: the local state (highest
@@ -781,6 +825,19 @@ var dirLockHook func(attempt int)
 // is followed, as by the open of the lock file. Open, openForDeviceLost,
 // Register and lockOnlyDir take the lock of a client directory this
 // way.
+//
+// Unresolved paths (L7 of the review of the client directories, task 20o
+// point 5): the lock registry of the process in store (lockPath in
+// lock_unix.go) is keyed by path made absolute with filepath.Abs, not by
+// the file, and symbolic links are not resolved. One client directory
+// named by two paths (through a symbolic link) in one process gets two
+// entries. On Linux the two locks still conflict (open file description
+// locks); on the other Unix systems, which have only process locks, a
+// process never conflicts with itself, so two clients of one process on
+// the same client directory under different paths both get the lock, and
+// releasing one releases the other's. gomailctl opens one client
+// directory per process; a program that opens several in one process
+// names each by one path.
 func lockClientDir(path string) (func(), error) {
 	for attempt := 1; attempt <= lockAttempts; attempt++ {
 		before, berr := os.Stat(path)
@@ -798,6 +855,28 @@ func lockClientDir(path string) (func(), error) {
 		unlock()
 	}
 	return nil, fmt.Errorf("%w: the lock file of the client directory changed in every attempt", store.ErrLocked)
+}
+
+// errIncompleteDir is the error of Open, Register and DeviceLost on a
+// directory that holds the marker .incomplete (L2 of the review of the
+// client directories, task 20o point 1): it is the temporary directory of
+// a keygen or restore that has not finished, never a client directory,
+// which loses the marker before its rename (createClientDir). Nothing is
+// written into it, not even the lock file.
+var errIncompleteDir = errors.New("client: this is the temporary directory of an unfinished keygen or restore (it holds the marker .incomplete), not a client directory")
+
+// refuseIncomplete reports errIncompleteDir if dir holds an entry named
+// .incomplete, of any type. A missing dir or marker is nil; any other
+// error of os.Lstat is returned (fail closed).
+func refuseIncomplete(dir string) error {
+	_, err := os.Lstat(filepath.Join(dir, incompleteMarker))
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: %s", errIncompleteDir, dir)
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	}
+	return err
 }
 
 func mkdirClient(dir string) error {

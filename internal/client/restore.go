@@ -139,7 +139,7 @@ func Restore(cfg Config, opts RestoreOptions, passphrase []byte) (store.ID, erro
 	}
 	// Everything checked: now the client directory, in one step (task 20e
 	// point 2, as Keygen).
-	if err := writeClientDir(cfg.Dir, "restore", raw, ksData, st); err != nil {
+	if err := writeClientDirOutside(cfg.Store.Root, cfg.Dir, "restore", raw, ksData, st); err != nil {
 		return store.ID{}, err
 	}
 	cfg.Warn(warnUnconfirmedState)

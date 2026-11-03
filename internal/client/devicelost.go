@@ -517,10 +517,15 @@ func (c *Client) adoptMemberships() error {
 
 // openForDeviceLost opens the client directory like Open, but also in the
 // states of an interrupted DeviceLost: it returns the client with the old
-// key store, the local user.rec and the one of the data directory.
+// key store, the local user.rec and the one of the data directory. Like
+// Open it refuses a directory with the marker .incomplete
+// (errIncompleteDir, task 20o).
 func openForDeviceLost(cfg Config, passphrase []byte) (c *Client, local, remote *store.User, err error) {
 	if _, err := os.Stat(cfg.Dir); err != nil {
 		return nil, nil, nil, ErrNotRegistered
+	}
+	if err := refuseIncomplete(cfg.Dir); err != nil {
+		return nil, nil, nil, err
 	}
 	unlock, err := lockClientDir(filepath.Join(cfg.Dir, "lock"))
 	if err != nil {
