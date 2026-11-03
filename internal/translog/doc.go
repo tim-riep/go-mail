@@ -831,10 +831,15 @@
 // for SignHead and RepairTree, as before (the operator deletes it).
 // After a ceremony whose field 7 revokes an ingest generation, or the
 // identity generation that certified it, every head that generation
-// signed at or after revoked_at_time is such a head, honest or not;
-// with revoked_at_time equal to the time of the confirmed head (D93
-// (2)) that head is one of them (time revoked_at_time is not valid).
-// The operator repairs once after the ceremony; the server then signs
+// signed at or after revoked_at_time is such a head, honest or not.
+// The ceremony sets revoked_at_time to the time of the confirmed head
+// plus 1 ms (D93 addendum, ceremony checkBoundary): the confirmed head
+// itself stays valid and stays in heads/; only heads signed after it
+// (a head of the same size re-signed later included) are moved. A pin
+// whose revoked_at_time equals the time of a head makes that head one
+// of them (time revoked_at_time is not valid; TestRevokedCompromise
+// builds such a pin by hand). The operator repairs once after the
+// ceremony; the server then signs
 // with the reissued generation, from the newest head left in heads/ as
 // its base (TestRevokedThiefHeadRecovery, TestRevokedCompromise).
 //
@@ -842,7 +847,10 @@
 // 7 lists (role, gen, revoked_at_size, revoked_at_time) (Revoked; roles
 // store.KeyRoleIdentity, KeyRoleAdmin, KeyRoleIngest). Both boundaries
 // come from a witness-confirmed head the operator reads before the
-// ceremony: revoked_at_size is its size, revoked_at_time its time. What
+// ceremony: revoked_at_size is its size, revoked_at_time its time plus
+// 1 ms (D93 addendum: the confirmed head itself stays valid; the
+// ceremony adds the millisecond, gomail-ceremony --revoke-at-time takes
+// the head's own time). What
 // the generation issues or concerns at a log index at or above
 // revoked_at_size is invalid (ErrRevoked; "Validity rules":
 // certificates and successions issued by a revoked identity generation,

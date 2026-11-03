@@ -28,6 +28,11 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Zusammen seit Welle 4: 23 Punkte (S70 bis S92), davon 13 klarstellend und 10 offen.
 - Nachtrag 20d: Neu sind S95 bis S98 aus der Einordnung der Hinweise zu Auftrag 20 (`docs/tasks/20-triage.md`; D80, D81, D88). Zahl: 4 neue Punkte, alle klarstellend. Nachgetragen ist der Stand in S23, S52, S70 und S90.
 
+## Stand Auftrag 21 (D93)
+- Grundlage: D93 (Q8 und Q19 entschieden am 03.11.2026, Option A der Entscheidungsvorlage `docs/tasks/q19-q8-entscheidungsvorlage.md`). Die Spezifikation ist mit Auftrag 21d nachgeführt: 2.3 „Widerruf von Plattformgenerationen“, 9.2 und der Verweis in 10.1, jeweils mit dem Vermerk „Änderung nach D93“.
+- Erledigt durch D93: S24, S25 und S76; S28 im Q8-Anteil (Feld 7), der Q4-Anteil bleibt offen. Nachgeführt ist der Stand in S67 (Befehle der Zeremonie).
+- Der Code: 21a (`store`, `translog`) liegt im Arbeitsbranch (02ee7b5), 21c (Zeremonie; 12d48cc) und 21b (Client, Annahme, Server; 7cde738) ebenso, mit den Nacharbeiten nach ihren Prüfungen (Stand 9ad24a5). Spezifikation und RUNBOOK sind mit Auftrag 21e an diesen Code angeglichen; die Vermerke „vorläufig, Abgleich nach 21c“ sind entfallen. Die Nachträge zu D93 (Kaskade über die Identitätsgeneration, `revoked_at_time` = Kopfzeit + 1 ms, lückenlose Ingest-Nachfolge) stehen in 2.3, Regeln 2, 3 und 9. Offen nach M1 (ohne eigenen S-Punkt, D93 Nachtrag 21e): Eine Metadaten-Version ab 2 hält Schlüssel oder Zertifikats-Hash des Signierers von Version 1 nicht fest; der Client prüft nur, dass die Empfangszeit im Zeitraum einer gültigen, nicht widerrufenen Ingest-Generation liegt (`checkReceivedCovered`). Schließen lässt sich der Rest nur mit einer Formatänderung (3.6, Abschnitt 7: Version ab 2 nennt den Signierer von Version 1).
+
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
 - Stelle: 3.1 Aufbau, 3.3 Regel 7.
@@ -198,7 +203,9 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Stand M1: Offen bleibt die Thread-Wurzel für Mails mit Marker `unprocessed`. Die Metadaten halten weder `References` noch `In-Reply-To`; der Client bildet `thread:` aus der eigenen `Message-ID` (`terms.ThreadRoot` in `internal/terms`, aufgerufen von `client.metaTerms`; D91 (1)), eine Antwort ist unter der Wurzel dann nicht auffindbar. Ob die Metadaten ein Feld `thread` erhalten, entscheidet Q12.
 
 ## S24 Widerruf kompromittierter Ingest- und Admin-Generationen
-- Art: offen (Q8).
+- Erledigt durch D93 (Q8 entschieden am 03.11.2026, Auftrag 21): Pin-Feld 7 mit Rolle, Generation, `revoked_at_size` und `revoked_at_time`, Regeln in 2.3 „Widerruf von Plattformgenerationen“, Befehl `gomail-ceremony revoke` in 9.2 (Auftrag 21d).
+- Stand im Code (Auftrag 21): Feld 7 in `store.PlatformPinSchema` und `store.PlatformRevokedSchema` (Identität 0, Admin 1, Ingest 2), Regeln in `translog` (`RevokedAtIndex`, `RevokedCertAtTime`, Kaskade, `ErrRevoked`, `ErrRevokedHead`; 21a, 02ee7b5); `gomail-ceremony revoke` (`ceremony.Revoke`; 21c, 12d48cc); Server, `address add`, `log repair` und Client mit Feld 7 (`ingest.ErrRevoked`, `client.ErrPlatformRevoked`, Ursache „Generation widerrufen“; 21b, 7cde738). Ablauf: RUNBOOK 7.3.3 und 7.3.4. `TODO(ask)` zu Feld 7 gibt es nicht mehr.
+- Art: erledigt durch D93; bis dahin offen (Q8).
 - Stelle: 2.3 „Wechsel der Identität“ und „Widerrufe und Aktualität“; 10.1 „Signatur einer kompromittierten Ingest- oder Identitätsgeneration“.
 - Problem: 2.3 kennt nur den Wechsel der Identität per Client-Update. Für eine kompromittierte Ingest- oder Admin-Generation gibt es keinen Datensatz, der sie widerruft.
 - Stand M1: Der Pin hat kein Feld 7 (`store.PlatformPinSchema`), `translog.Verifier.Revoked` bleibt leer, die Stellen tragen `TODO(ask)`.
@@ -207,7 +214,9 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Siehe S76 (Q19) für die Kompromittierung der Plattformidentität selbst.
 
 ## S25 Gültigkeitsende einer Plattformgeneration nach dem Wechsel
-- Art: offen (Q8).
+- Erledigt durch D93 (3) (Auftrag 21): 2.3 „Widerruf von Plattformgenerationen“ Regel 5 legt fest, dass Ingest- und Admin-Generation g nur bis `valid_from` von `<rolle>-<g+1>.cert` gelten; 9.2 nennt `gomail-ceremony admin-rotate` (Auftrag 21d).
+- Stand im Code (Auftrag 21): Ende einer Admin-Generation bei `valid_from` von `admin-<g+1>.cert` in `translog` (`adminSuperseded`, rückwirkend und fail closed, `TestAdminSupersessionBackdatedCert`; 21a); `gomail-ceremony admin-rotate` (`ceremony.AdminRotate`, Optionen wie `ingest-rotate`; 21c); Ursache „Zuordnung einer abgelösten Admin-Generation“ im Client (`client.ErrAddressSuperseded`; 21b). Eine Rotation allein beendet einen entwendeten Schlüssel nicht (rückdatierte Zuordnungen, `TestAdminRotateDoesNotRevoke`); dafür `revoke` (RUNBOOK 7.3.1).
+- Art: erledigt durch D93; bis dahin offen (Q8).
 - Stelle: 2.3 „Für einen neuen Ingest-Schlüssel …“, 9.2 (`ingest-rotate`, keine Admin-Rotation).
 - Problem: Nach `ingest-rotate` bleibt der alte Ingest-Schlüssel nach 2.3 unbegrenzt gültig; ein gestohlener alter Schlüssel könnte Metadaten mit späterer Empfangszeit signieren. Für Admin-Generationen gilt dasselbe für Adresszuordnungen.
 - Stand M1: Strengste Lesart für Ingest: Generation g signiert gültig nur bis `valid_from` von `ingest-<g+1>.cert` (`translog.LogKey.Covers` für Köpfe, D72 (9)). Für Admin-Generationen gibt es kein Ende (Q8, Nachtrag).
@@ -228,7 +237,8 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Vorschlag: Wie Q9.
 
 ## S28 Format des Pins `identity-<gen>.pin`
-- Art: offen (Q4, Q8).
+- Q8-Anteil erledigt durch D93 (1) (Auftrag 21): Feld 7 ist eine optionale Liste `gomail/v1/rec/platform-revoked` mit 1 Rolle, 2 Generation, 3 `revoked_at_size`, 4 `revoked_at_time`, höchstens `MaxRevoked` Elemente; 2.3 nennt das Element in der Tabelle „Formate“ (Auftrag 21d). Im Code: `store.PlatformPinSchema` Feld 7 `revoked` (optional, nie leer kodiert; ein Pin ohne Feld 7 behält seine Kodierung byte-gleich), Rollenwerte 0 Identität, 1 Admin, 2 Ingest, höchstens `MaxPinRevoked` = 512 (`store.CheckPinRevoked`, `translog.CheckRevoked`; 21a); `gomailctl inspect` zeigt es als `revoked`. Offen bleibt der Q4-Anteil: die übrigen Felder des Pins (Origin, Zeugen, Quorum, Identitätsliste) stehen noch nicht in 2.3.
+- Art: offen (Q4; Q8-Anteil erledigt).
 - Stelle: 2.3 „öffentlicher Teil im Client hinterlegt“, „Wechsel der Identität“; 2.7 „Die öffentlichen Schlüssel der Zeugen sind im Client hinterlegt wie die Plattformidentität“.
 - Problem: 2.3 nennt den Pin, legt aber seine Felder nicht fest.
 - Stand M1: `store.PlatformPinSchema` mit Generation, Schlüssel, Entwicklungskennzeichen, Feld 4 `origin`, Feld 5 `witnesses`, Feld 6 `min_witnesses` und Feld 8 `identities` (alle Identitätsgenerationen), höchstens 64 KiB (D72 (7)); Feld 7 fehlt bis Q8 (S24). Der Server bekommt denselben Pin.
@@ -512,6 +522,8 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Stand M1: Zusätzlich `succeed` (Nachfolge, `--compromised` für den Kompromissfall) und `publish` (bringt den Export ins Datenverzeichnis und ins Log); Optionen `--out`, `--keys`, `--origin`, `--witness`, `--min-witnesses`, `--pin`, `--gen`, `--valid-from`, bei `publish` `--from`, `--data`, `--pin` (`cmd/gomail-ceremony`, D72 (11), Auftrag 10). Gedeckt durch M1-Kriterium C.
 - Stand nach Auftrag 18: `--compromised` ist wegen Q19 gesperrt, nicht wegen `TODO(task-07)`. Die Kommandozeile verweigert den Schalter als Nutzungsfehler, `ceremony.Succeed` mit `ErrCompromised`, jeweils vor jeder Ausgabe (`TODO(Q19)`, D85 (6), Commit 52ec07a). `publish` hat zusätzlich `--replace-witnesses` (S77).
 - Vorschlag: Die Befehle und Optionen in 9.2 aufnehmen.
+- Stand nach D93 (Auftrag 21d): 9.2 nennt jetzt `admin-rotate`, `succeed --compromised --revoke-at-size <n> --revoke-at-time <t>` und `revoke --role admin|ingest --generation <g> --revoke-at-size <n> --revoke-at-time <t>`. Die Sperre von `--compromised` entfällt mit Auftrag 21c. Die übrigen Befehle (`succeed` ohne `--compromised`, `publish`) und die Optionen aus dem Stand oben stehen weiter nicht in 9.2; die Optionen der neuen Befehle stehen seit Auftrag 21e im Absatz nach dem Block in 9.2.
+- Stand im Code (21c, 12d48cc): `revoke --pin --out --role admin|ingest --generation --revoke-at-size --revoke-at-time`, `admin-rotate --pin --gen --out --keys --valid-from`, `succeed … --compromised --revoke-at-size --revoke-at-time`; `<t>` in Millisekunden wie die Zeile `time <t>` des Kopfes, die Zeremonie setzt `revoked_at_time` = `<t>` + 1 ms (Paketkommentar und Usage-Text `cmd/gomail-ceremony/main.go`). Die Sperre von `--compromised` ist entfallen; ohne Grenze ist es ein Nutzungsfehler (Exit 2).
 - Siehe S86 (Form von `--witness`) und S77 (Zeugenwechsel über `succeed`).
 
 ## S68 Optionen des Zeugen
@@ -571,7 +583,9 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Vorschlag: Entscheiden, ob der Client neu gefundene Postfächer, deren Epochen von einer inzwischen widerrufenen eigenen Generation signiert sind, nur mit Warnung und nach Bestätigung übernimmt; andernfalls die Grenze in 2.7 festhalten.
 
 ## S76 Nachfolge nach Kompromittierung der Plattformidentität
-- Art: offen (Q19).
+- Erledigt durch D93 (Q19 entschieden am 03.11.2026, Auftrag 21): Statt des Logeintrags `revocation-<g>.rec` aus dem Vorschlag unten trägt der neue Pin aus `succeed --compromised` die kompromittierte Generation in Feld 7 (Option A der Entscheidungsvorlage `docs/tasks/q19-q8-entscheidungsvorlage.md`). 2.3 legt die Pflicht zur Neuausstellung von Admin und Ingest unter der neuen Identität fest, ebenso einen neuen `init` mit neuem Origin bei kompromittiertem Root („Widerruf von Plattformgenerationen“, Regeln 6 und 7). Der Ablauf steht in RUNBOOK 7.3 (Auftrag 21d, an den Code angeglichen mit 21e).
+- Stand im Code (21c, 12d48cc): Die Sperre von `succeed --compromised` ist aufgehoben. `ceremony.Succeed` mit `Compromised` schreibt keine Nachfolge, sondern den Pin der nächsten Generation mit der kompromittierten in Feld 7; `publish` nimmt die neue Generation ohne `identity-<g+1>.succ` an, wenn der Pin ihre Vorgängerin widerruft, und verweigert, was die kompromittierte Generation ab der Grenze ausstellt (`translog.ErrRevoked`); die Datei eines solchen ungültigen Zertifikats in `platform/` ersetzt es durch die Neuausstellung gleichen Namens (`freeName`). Server und `address add` verweigern auch Generationen, die die widerrufene Identität ausgestellt hat (Kaskade, 21b). Der Pflichttest aus 10.1 läuft ohne `t.Skip` (`TestVerifyCompromisedIdentityStillIssues`). Die Kaskade (D93 Nachtrag) beendet ab der Grenze auch die Admin- und Ingest-Generationen, die die kompromittierte Identität ausgestellt hat; die Neuausstellung ist Pflicht (RUNBOOK 7.3.5). Der Stand nach Auftrag 18 unten ist Geschichte.
+- Art: erledigt durch D93; bis dahin offen (Q19).
 - Stelle: 2.3 „Wechsel der Identität“ (im Kompromissfall gilt der Vorgänger ab dem Logeintrag der Nachfolge als ungültig); 2.7; K8; Q8.
 - Problem: Kein Datensatz und kein Feld macht eine Generation der Plattformidentität ab einem Logeintrag ungültig: `platform-succ` hat kein Kennzeichen „kompromittiert“, der Pin hat kein Feld 7 (S24), `translog` kennt keine solche Regel. Wirksam ist nur die Zeitgrenze; ein Dieb mit dem alten Schlüssel kann bis dahin rückdatierte Zertifikate loggen lassen. Außerdem sagt 2.3 nicht, dass Admin- und Ingest-Zertifikate der kompromittierten Generation unter der neuen neu ausgestellt werden müssen, was neue Admin- und Ingest-Generationen verlangt (eine Admin-Rotation gibt es nicht, Q8 (d)).
 - Stand nach Auftrag 18: `gomail-ceremony succeed --compromised` ist gesperrt (D85 (6), Commit 52ec07a). Die Kommandozeile verweigert den Schalter als Nutzungsfehler, `ceremony.Succeed` mit `ErrCompromised`, jeweils bevor etwas gezeigt, gelesen oder geschrieben wird (`TODO(Q19)`). Der Bibliothekscode aus Auftrag 15b bleibt unerreichbar erhalten; er schreibt keine Nachfolge-Signatur des Vorgängers. Der Pflichttest aus 10.1 liegt als übersprungener Test vor (`TestVerifyCompromisedIdentityStillIssues`).

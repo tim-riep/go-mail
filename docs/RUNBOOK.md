@@ -1,12 +1,12 @@
 # Runbook: go-mail mit Transparenzlog betreiben
 
-Dieses Dokument beschreibt den Betrieb des PoC mit den tatsächlichen Befehlen der Programme `gomail-ceremony`, `gomail-server`, `gomail-witness` und `gomailctl`: Erstinstallation mit Zeremonie, Zeuge und Server, Benutzer und Postfächer, Geräteverlust, Ingest-Rotation, Nachfolge der Plattformidentität, Störungen, den Test auf zwei Maschinen und die Zeitquellen. Maßgeblich sind die Usage-Texte der Programme (Aufruf ohne Argumente); dieses Dokument folgt ihnen.
+Dieses Dokument beschreibt den Betrieb des PoC mit den tatsächlichen Befehlen der Programme `gomail-ceremony`, `gomail-server`, `gomail-witness` und `gomailctl`: Erstinstallation mit Zeremonie, Zeuge und Server, Benutzer und Postfächer, Geräteverlust, Ingest-Rotation, Nachfolge der Plattformidentität, Widerruf kompromittierter Plattformschlüssel, Störungen, den Test auf zwei Maschinen und die Zeitquellen. Maßgeblich sind die Usage-Texte der Programme (Aufruf ohne Argumente); dieses Dokument folgt ihnen.
 
 Der Test `TestRunbook` in `internal/e2e` geht die Hauptschritte der Abschnitte 1 bis 8 mit Programmen eines Produktionsbuilds durch und nennt in seiner Ausgabe (`go test -v`) zu jedem Schritt den Abschnitt (`RUNBOOK 4.7: ...`). Nicht jeder Schritt und nicht jede Verweigerung ist darin enthalten; die Zuordnung und die Liste dessen, was er nicht abdeckt, stehen am Ende („Abgleich mit TestRunbook“). Ohne jeden Test sind unter anderem der SSH-Tunnel zum Zeugen (1.7), Sicherung und Wiederherstellung (8.8) und das Vorgehen bei einem Fork des Zeugen (8.9).
 
 **Schreibweise.** Platzhalter stehen in spitzen Klammern (`<datenverzeichnis>`, `<pin>`). Es gibt keine Beispielwerte für Seeds, Anteile, Passphrasen oder Einladungscodes; nie Werte aus einem Test oder einer Anleitung übernehmen.
 
-**Grenzen des PoC.** Nicht mit echten Mails verwenden. Vor einem solchen Betrieb verlangt der Plan TLS, Ratenbegrenzung und Missbrauchsschutz beim Empfang, unabhängige Prüfungen (10.2), mindestens zwei von drei Zeugen und die Kopplung neuer Geräte (2.7). Der PoC hat einen Zeugen; offen ist unter anderem Q18 (Abschnitt 8.4). Q19 und Q8 (Widerruf kompromittierter Plattformgenerationen) sind mit D93 entschieden; gebaut wird das mit Auftrag 21, bis dahin ist `succeed --compromised` gesperrt (Abschnitt 7.3).
+**Grenzen des PoC.** Nicht mit echten Mails verwenden. Vor einem solchen Betrieb verlangt der Plan TLS, Ratenbegrenzung und Missbrauchsschutz beim Empfang, unabhängige Prüfungen (10.2), mindestens zwei von drei Zeugen und die Kopplung neuer Geräte (2.7). Der PoC hat einen Zeugen; offen ist unter anderem Q18 (Abschnitt 8.4). Q8 und Q19 sind entschieden (D93); den Ablauf bei kompromittierten oder verlorenen Plattformschlüsseln beschreibt 7.3.
 
 ## 0. Überblick
 
@@ -14,7 +14,7 @@ Der Test `TestRunbook` in `internal/e2e` geht die Hauptschritte der Abschnitte 1
 
 | Rechner | Programme | was dort liegt |
 |---|---|---|
-| Zeremonierechner (offline, Live-System, ohne Netzwerk) | `gomail-ceremony` (`init`, `ingest-rotate`, `reshare`, `succeed`) | nur während der Zeremonie: Plattform-Root im Speicher; danach ausschalten |
+| Zeremonierechner (offline, Live-System, ohne Netzwerk) | `gomail-ceremony` (`init`, `ingest-rotate`, `admin-rotate`, `reshare`, `succeed`, `revoke`) | nur während der Zeremonie: Plattform-Root im Speicher; danach ausschalten |
 | Server-Host | `gomail-server`, `gomail-ceremony publish` | Datenverzeichnis (Gruppe `gomail`, 2770/0660), Pin, Ingest-Schlüssel (0600, außerhalb des Datenverzeichnisses) |
 | Zeugenhost (andere Maschine, anderer Betreiber oder zu Hause; erreicht das Log nur über einen Tunnel, 1.7) | `gomail-witness` | Zeugenschlüssel (0600), Zustandsverzeichnis (0700) |
 | Administrator | `gomail-server address add` | Admin-Schlüssel (0600), getrennt vom Server |
@@ -196,9 +196,9 @@ Erst mit dem Quorum der Zeugen veröffentlicht der Server einen Kopf (`log/heads
 
 ## 2. Terminalregeln der Zeremonie
 
-`init`, `ingest-rotate`, `reshare` und `succeed` zeigen oder lesen Anteile. Für sie gilt:
+`init`, `ingest-rotate`, `reshare` und `succeed` zeigen oder lesen Anteile, ebenso `admin-rotate` und `revoke` (7.3). Für alle sechs gilt (Paketkommentar `cmd/gomail-ceremony/main.go`, `shareCommands`):
 
-- **Terminal:** Standardeingabe und Standardausgabe müssen ein Terminal sein, dessen Echo sich abschalten lässt; keine Umleitung, keine Pipe, keine Datei. Sonst verweigert das Programm, bevor es etwas anzeigt, liest oder schreibt. Einen Schalter darum gibt es nicht. Auf Systemen ohne Terminalsteuerung (nicht Linux, macOS oder BSD) verweigern alle vier Befehle.
+- **Terminal:** Standardeingabe und Standardausgabe müssen ein Terminal sein, dessen Echo sich abschalten lässt; keine Umleitung, keine Pipe, keine Datei. Sonst verweigert das Programm, bevor es etwas anzeigt, liest oder schreibt. Einen Schalter darum gibt es nicht. Auf Systemen ohne Terminalsteuerung (nicht Linux, macOS oder BSD) verweigern alle sechs Befehle.
 - **stderr:** Die Aufforderungen stehen auf der Standardfehlerausgabe. Sie muss ein Terminal, eine Pipe oder eine reguläre Datei sein und zum Schreiben geöffnet, nicht `/dev/null`, kein Socket und kein anderes Gerät; sonst endet die Zeremonie mit Exit 2, bevor ein Anteil erscheint. Liegt sie auf einem anderen Terminal, wird auch dort gelöscht.
 - **Anzeige:** Jeder Inhaber wird einzeln aufgerufen („Inhaber von Anteil i von n an den Bildschirm, dann Eingabetaste“); vorausgetippte Eingabe wird vorher verworfen. Nach „Anteil notiert?“ löscht die Eingabetaste den Bildschirm samt Verlauf. Die Software-Flusssteuerung (Strg-S/Strg-Q) ist während der ganzen Zeremonie aus.
 - **Eingabe:** Anteile werden ohne Anzeige eingegeben, 30 Wörter, auch über mehrere Zeilen; die Eingabe wird normalisiert (Kleinschreibung, beliebiger Leerraum), Abkürzungen gelten nicht. Meldungen nennen Wortpositionen, nie Wörter. Ein Anteil wird bis zu dreimal abgefragt.
@@ -440,7 +440,7 @@ Ein neuer Ingest-Schlüssel (und damit ein neuer Log-Schlüssel, Q4) braucht `<k
 4. **Umschalten ab `<valid-from>`:** Ab diesem Zeitpunkt signiert die alte Generation nichts mehr gültig. Ein laufender Server mit dem alten Schlüssel lehnt Einlieferungen mit `451` ab; ein Neustart mit dem alten Schlüssel verweigert (`ingest: the ingest generation is superseded in the log`). Den Server **nach** `<valid-from>` mit `--ingest-key <ingest-<n>.key>` neu starten; vorher verweigert der Server den Start mit dem neuen Schlüssel (Exit 2, `der Ingest-Schlüssel ist noch nicht gültig`), denn eine Mail mit Empfangszeit vor `valid_from` des neuen Zertifikats lehnen die Clients ab. Maßgeblich ist die Uhr des Servers (Abschnitt 10). Absender wiederholen nach `451`.
 5. **Alten Schlüssel vernichten**, sobald der Server mit dem neuen läuft. Den alten `--log-key` kann der Zeuge danach weglassen, frühestens wenn er einen mit dem neuen Schlüssel signierten Kopf gegengezeichnet hat; sein gespeicherter Kopf bleibt auch ohne den alten Schlüssel lesbar (`internal/witness/witness.go`, Abschnitt „State“; kein Test).
 
-Clients beenden die alte Generation bei `valid_from` des neuen Zertifikats, sobald es im Log steht: Metadaten, die der alte Schlüssel für eine Empfangszeit ab `valid_from` signiert hat, lehnen sie ab (`WARNUNG: Mail <id> wird nicht verarbeitet: Plattformzertifikat oder Annahmeschlüssel nicht gültig.`); ältere Mails bleiben lesbar. Einen Widerruf einer kompromittierten Ingest- oder Admin-Generation und eine Admin-Rotation gibt es im gebauten Stand nicht (Q8, R18); entschieden ist beides mit D93, gebaut wird es mit Auftrag 21.
+Clients beenden die alte Generation bei `valid_from` des neuen Zertifikats, sobald es im Log steht: Metadaten, die der alte Schlüssel für eine Empfangszeit ab `valid_from` signiert hat, lehnen sie ab (`WARNUNG: Mail <id> wird nicht verarbeitet: Plattformzertifikat oder Annahmeschlüssel nicht gültig.`); ältere Mails bleiben lesbar. Bei Verdacht auf Kompromittierung des Ingest-Schlüssels genügt diese Rotation nicht: Sie beendet die alte Generation erst ab `valid_from` und verhindert keine rückdatierten Signaturen. Dann gilt 7.3.3 (Widerruf, D93). Die Admin-Rotation steht in 7.3.4.
 
 ## 7. Nachfolge der Plattformidentität
 
@@ -471,11 +471,192 @@ Ohne `--replace-witnesses` verweigert `publish`, wenn `platform/witnesses.rec` v
 
 **Clients mit altem Pin (kein Test):** Ein Client nimmt Zeugen und Quorum nur aus seinem Pin (`internal/client/log.go`); eine Nachfolge ändert sie nicht, und der Server nimmt nach `--replace-witnesses` nur noch Gegensignaturen der Zeugen aus `witnesses.rec` an. Ein Client mit dem **neuen** Pin prüft Köpfe nur gegen die neuen Zeugen (`internal/translog/verifier.go`, Prüfung des Quorums) und arbeitet erst, wenn sie nach `publish --replace-witnesses` gegengezeichnet haben; ein Client mit dem alten Pin stoppt spätestens 24 Stunden nach dem letzten von den alten Zeugen gegengezeichneten Kopf (`translog: no fresh verified tree head`, Abschnitt 10). Deshalb entweder die neue Zeugenmenge so wählen, dass sie die Quoren beider Pins erfüllt (die alten Zeugen bleiben enthalten), bis alle Clients den neuen Pin haben, oder den neuen Pin unmittelbar nach dem ersten von den neuen Zeugen gegengezeichneten Kopf verteilen, innerhalb dieser 24 Stunden (kein Test).
 
-### 7.3 Kompromittierte Identität
+### 7.3 Kompromittierte oder verlorene Plattformschlüssel
 
-`gomail-ceremony succeed --compromised` ist **gesperrt** (Aufruffehler, Exit 2: „noch nicht verfügbar: Widerruf einer Plattformgeneration ist nicht festgelegt (Q19)“). **Bekannte Grenze:** Weder Pin noch Nachfolge noch Log können eine Identitätsgeneration als kompromittiert kennzeichnen; wer den Schlüssel einer kompromittierten Generation hat, könnte weiter Ingest- und Admin-Zertifikate ausstellen, die `publish`, Log und Clients annehmen. Ein Befehl dafür ist ohne neuen signierten Datensatz und neue Prüfregeln in Client und Log nicht zu bauen (Q19, R17).
+Ein Widerruf steht in Feld 7 eines **neuen Pins** (D93, Abschnitt 2.3 des Plans, „Widerruf von Plattformgenerationen“). Er nennt Rolle und Generation und eine Grenze aus Größe `<N>` und Zeit `<T>` eines Kopfes, den die Zeugen bestätigt haben. Im Pin steht `revoked_at_size` = `<N>` und `revoked_at_time` = `<T>` + 1 ms: Der bestätigte Kopf selbst bleibt gültig (D93 Nachtrag). Was die widerrufene Generation ab Logindex `<N>` ausstellt oder betrifft, gilt nicht mehr; was sie vorher ins Log gebracht hat, bleibt gültig. Köpfe und Metadaten einer widerrufenen Ingest-Generation gelten nur mit einer Zeit bis einschließlich `<T>`. Widerruft der Pin eine Identitätsgeneration, gilt dasselbe für jede Admin- und Ingest-Generation, deren Zertifikat sie ausgestellt hat, auch für die eigenen des Betreibers (Kaskade, D93 Nachtrag; `internal/translog/doc.go`, „Platform generations“). Der Pin ist der einzige Träger des Widerrufs. Wirksam ist er deshalb nur bei Server, Administrator und Clients, die den neuen Pin haben; ein Client mit dem alten Pin nimmt weiter an, was die widerrufene Generation signiert.
 
-**Betriebsregel bis zur Entscheidung von Q19:** Bei Verdacht auf Kompromittierung der Plattformidentität oder des Roots keine Nachfolge, sondern eine neue Plattform: neue Zeremonie (`init`) mit **neuem Origin**, neues Datenverzeichnis, neue Pins für alle Clients, Benutzer registrieren sich neu. Den alten Server anhalten und den alten Pin bei allen Clients entfernen.
+**Befehle** (Usage-Text von `gomail-ceremony`, Auftrag 21c, Commit 12d48cc):
+
+```
+gomail-ceremony revoke --pin <pin> --out <export> --role admin|ingest --generation <g> \
+    --revoke-at-size <N> --revoke-at-time <T>
+gomail-ceremony admin-rotate --pin <pin> --gen <n> --out <export> --keys <schlüssel> --valid-from <RFC3339>
+gomail-ceremony succeed --pin <pin> --out <export> --compromised --revoke-at-size <N> --revoke-at-time <T>
+```
+
+- **Schreibweise der Grenze:** `<N>` und `<T>` so, wie der Kopf sie zeigt (7.3.2): dezimal, ohne Vorzeichen und ohne führende Nullen, `<T>` in Millisekunden seit 1970 UTC. Bei `revoke` und `succeed --compromised` sind beide Pflicht; ohne `--compromised` sind sie verboten. Sonst endet der Aufruf mit Exit 2, bevor etwas gezeigt, gelesen oder geschrieben wird, etwa `succeed --compromised: --revoke-at-size und --revoke-at-time sind nötig (Größe und Zeit eines von den Zeugen bestätigten Kopfes)` oder `--revoke-at-size und --revoke-at-time nur mit --compromised`. `--role` nimmt nur `admin` oder `ingest`; eine Identitätsgeneration widerruft `succeed --compromised`.
+- **Anzeige vor dem ersten Anteil:** `Widerruf: <was> ab Logindex <N> und Zeit <T+1> (<RFC 3339>). Kopf: Größe <N>, "time <T>" (<RFC 3339>); der Kopf selbst bleibt gültig. Mit dem abgelesenen Kopf vergleichen; weicht etwas ab, jetzt mit Strg-C abbrechen.`, danach die Uhr des Zeremonierechners. Die Inhaber vergleichen das mit dem Papier aus 7.3.2.
+- **Verweigerungen vor dem ersten Anteil** (Exit 1, nichts geschrieben): eine Kopfzeit nach der Uhr des Zeremonierechners plus fünf Minuten (`ceremony: invalid revocation: head time … lies after the clock of the ceremony …`), eine Kopfzeit vor dem 01.01.2025, meist eine Zeit in Sekunden statt Millisekunden (`… lies before 1735689600000 (2025-01-01T00:00:00Z), the earliest head time: the time of the head is in milliseconds since 1970, not in seconds`), eine Generation, die der Pin schon widerruft (`… the pin already revokes …`; eine Grenze lässt sich nie verschieben), und eine Rotation auf eine widerrufene Generation (`… the pin revokes … generation … its key is the stolen one …`): Ihr Schlüssel ist der gestohlene und wird nie neu zertifiziert.
+- **`revoke`** schreibt nur den neuen Pin `<export>/identity-<g>.pin`: dieselbe Identitätsgeneration, derselbe Name wie der alte Pin, mit dem zusätzlichen Element in Feld 7. Er ersetzt den alten Pin überall; beide nie nebeneinander liegen lassen. Die Ausgabe nennt den nächsten Schritt: `Nachfolgerin (Pflicht, ohne Lücke): ingest-rotate --pin <neuer Pin> --gen <i+1> ... --valid-from <T+1 ms>` bzw. `Neue Admin-Generation: admin-rotate --pin <neuer Pin> --gen <a+1> ...`. Widerruft der Pin die Vorgängerin `<i>` und zusätzlich die Identitätsgeneration vor der aktuellen mit einer früheren Zeit, kennt die Zeremonie offline nicht, welche Grenze gilt: `ingest-rotate` verlangt dann `--valid-from` ausdrücklich mit einem der beiden Werte und nennt beide in der Verweigerung (den früheren, wenn jene Identität `ingest-<i>.cert` ausgestellt hat; `TestRotateBothRevoked`).
+- **`admin-rotate`** nimmt dieselben Optionen wie `ingest-rotate` (Abschnitt 6) und schreibt `<export>/platform/admin-<n>.pub`, `admin-<n>.cert` und `<schlüssel>/admin-<n>.key` (0600). `--valid-from` darf nicht in der Vergangenheit liegen (Abschnitt 10). **`admin-rotate` allein beendet einen entwendeten Admin-Schlüssel nicht:** Die alte Generation ordnet mit einem `valid_from` vor dem der neuen weiter gültig zu, auch wenn die Zuordnung erst danach ins Log kommt (`TestAdminRotateDoesNotRevoke`). Dafür gibt es `revoke`.
+- **`publish` mit Feld 7** prüft den Pin gegen das Log, bevor es etwas schreibt: Der neueste veröffentlichte Kopf muss sich öffnen lassen und das Zeugenquorum des Pins tragen, `<N>` darf nicht größer sein als seine Größe und `<T>` nicht später als seine Zeit und nicht vor dem 01.01.2025, und das Zertifikat jeder widerrufenen Admin- oder Ingest-Generation muss unterhalb von `<N>` gültig im Log stehen (sonst ist die Generation vertippt, und das Element sperrte die Rolle für immer); liegt `revoked_at_time` nicht nach seinem `valid_from`, obwohl die Generation am neuesten Kopf schon galt, wäre sie nie gültig gewesen (`… it would never have been valid …`; `TestRevocationTimes`). Bei Erfolg meldet es `Widerrufe des Pins (<k>) geprüft gegen den neuesten bestätigten Kopf (Größe …, Zeit …).`, sonst `ceremony: invalid revocation: …` mit Exit 1. Es warnt auf der Standardfehlerausgabe und veröffentlicht trotzdem, wenn eine widerrufene Ingest-Generation noch keine lückenlose Nachfolgerin hat (`WARNUNG: Ingest-Generation <i> ist ab … widerrufen, ingest-<i+1>.cert gibt es noch nicht: …`) und wenn der neueste Kopf die Logsignatur einer Generation trägt, die der Pin für seine Zeit widerruft (`WARNUNG: der neueste Kopf (Größe …, Zeit …) trägt die Logsignatur von Ingest-Generation <i>, die der Pin ab … widerruft: Clients verwerfen ihn, gomail-server log repair verschiebt ihn nach log/heads-revoked/. …`; `TestPublishRevokedHead`). Was der Pin ab der Grenze ungültig macht (etwa ein Zertifikat der widerrufenen Identität), verweigert es mit `translog: log entry violates a validity rule: platform generation revoked by the pin: … which the pin revokes (field 7); nothing written`. Ein Zertifikat ohne Vorgängerin im Export oder als gültigen Logeintrag verweigert es, bevor es eine Datei schreibt (`translog: … needs <rolle>-<g-1>.cert, which is neither in the export nor a valid entry of the log …`).
+- **Zertifikate des Diebs in `platform/`:** Hat der Dieb mit einer widerrufenen Identität ab `<N>` ein Zertifikat geloggt und in `platform/` gelegt, ist es ungültig, und sein Name ist frei. `publish` ersetzt die Datei samt `.pub` atomar durch die Neuausstellung gleichen Namens (`TestPublishReissueAfterThief`). Eine Datei, deren Name einen gültigen Logeintrag hat, ersetzt es nie (`store: file exists: translog: duplicate log entry: … a valid entry is never replaced`). **Alte Plattformzertifikate nie von Hand aus `platform/` entfernen**, auch die widerrufener Generationen nicht: Die Clients brauchen sie weiter, etwa um Mails und geänderte Flags späterer Generationen zu prüfen (`checkReceivedCovered`, 7.3.2 „Folge für Mails“).
+- Jeder Folge-Pin übernimmt Feld 7, auch der eines späteren `succeed` (7.1); ein Widerruf geht nie verloren.
+
+#### 7.3.1 Welcher Fall?
+
+| Lage | Vorgehen |
+|---|---|
+| Der Ingest-Schlüssel (zugleich Log-Schlüssel, Q4) kann in fremden Händen sein: Server-Host übernommen, Kopie aufgetaucht, Sicherung abhandengekommen | Widerruf und neue Ingest-Generation (7.3.3) |
+| Der Ingest-Schlüssel ist verloren und sicher nirgends sonst (Datenträger defekt oder vernichtet) | neue Ingest-Generation nach Abschnitt 6, ohne Widerruf |
+| Der Admin-Schlüssel kann in fremden Händen sein | Widerruf und neue Admin-Generation (7.3.4) |
+| Der Admin-Schlüssel ist verloren und sicher nirgends sonst | neue Admin-Generation (7.3.4 ohne Widerruf) |
+| Eine Identitätsgeneration ist kompromittiert, Root und Anteile nicht | `succeed --compromised` mit Neuausstellung von Admin und Ingest (7.3.5) |
+| Der Root ist kompromittiert, oder so viele Anteile sind in fremden Händen, wie die aktuelle Aufteilung zur Rekonstruktion braucht (bei 3-of-5 drei) | neue Plattform (7.3.6) |
+| Ein Zeuge meldet einen Fork (Exit 3, 1.7) | Ein Widerruf hilft nicht: Der Zeuge signiert für diesen Origin nie wieder, ohne sein Quorum bekommt das Log keine Köpfe mehr. Neue Plattform (7.3.6, Abschnitt 8) |
+
+Im Zweifel gilt ein Schlüssel als kompromittiert, nicht als verloren: Eine Rotation allein (`ingest-rotate`, `admin-rotate`) beendet die alte Generation erst ab `valid_from` der neuen und verhindert keine rückdatierten Signaturen. Der Identitätsschlüssel existiert nur während einer Zeremonie im Speicher. Wer ihn hat, hatte meist auch den Root; dann gilt 7.3.6.
+
+Ohne Admin-Schlüssel gibt es bis zum `valid_from` der neuen Admin-Generation keine neue Adresszuordnung; die vorhandenen bleiben gültig. Ohne Ingest-Schlüssel nimmt der Server keine Mail an und signiert keine Köpfe; nach 24 Stunden ohne Kopf stoppen alle Clients, bis der neue Schlüssel läuft (Abschnitt 10).
+
+#### 7.3.2 Grenze ablesen
+
+Vor jeder Zeremonie mit Widerruf (7.3.3 bis 7.3.5). Ist der Ingest-Schlüssel oder die Identität betroffen, zuerst den Server anhalten (SIGTERM, 8.5) und **erst danach** die Grenze ablesen, sodass der Server am abgelesenen Kopf steht: Ein laufender Server signiert Köpfe gleicher Größe mit späterer Zeit neu und ersetzt damit `log/heads/<n>.sig`; `log repair` verschiebt einen solchen Kopf nach der Zeremonie, und dann bleibt kein bestätigter Kopf, aus dem die Grenze stammt (`publish` verweigert dann, weil `<N>` größer ist als der neueste Kopf). Außerdem: Was die Ingest-Generation nach `<T>` signiert, lehnen Clients mit dem neuen Pin ab, nach einer kompromittierten Identität auch bei der eigenen Ingest-Generation (Kaskade). Bei einem Admin-Schlüssel läuft der Server weiter.
+
+Auf dem Zeugenhost den letzten Kopf lesen, den der Zeuge mitsigniert hat (1.7). Der Zeuge speichert nur Köpfe, die er bestätigt hat:
+
+```
+h=$(printf '%s' '<origin>' | sha256sum | cut -c1-64)
+sed -n '2p;4p' <zustandsverzeichnis>/$h.head
+```
+
+Die erste Zeile der Ausgabe ist die Größe `<N>`, die zweite lautet `time <T>` (Millisekunden seit 1970 UTC). Genau diese beiden Zahlen gehören in `--revoke-at-size` und `--revoke-at-time`; die Millisekunde addiert die Zeremonie selbst. Beide Werte auf Papier notieren und zum Zeremonierechner bringen; er ist offline. Bei mehreren Zeugen von jedem den Kopf lesen und den mit der kleinsten Größe nehmen: Die Zeugen setzen ein und dasselbe Log fort, der kleinste Kopf ist also die früheste bestätigte Grenze.
+
+Ohne Zugang zum Zeugenhost gibt der Server-Host denselben Wert: Der Server schreibt `log/heads/<n>.sig` erst mit dem Quorum der Zeugen, und die Datei mit dem größten `<n>` ist der neueste Kopf:
+
+```
+ls <datenverzeichnis>/log/heads | sort -n | tail -n 1
+sed -n '2p;4p' <datenverzeichnis>/log/heads/<n>.sig
+```
+
+Ist der Server-Host selbst verdächtig, nur den Wert vom Zeugenhost nehmen.
+
+**Welcher Kopf.** Alles, was die widerrufene Generation vor `<N>` ins Log gebracht hat, und Metadaten mit einer Empfangszeit bis `<T>` bleiben gültig, auch was ein Dieb bis dahin signiert hat (Restrisiko, 2.3 des Plans, Regel 4). Ist bekannt, seit wann der Schlüssel in fremden Händen sein kann, einen Kopf von vorher nehmen: eine ältere Datei aus `log/heads/` mit einer Zeit vor diesem Zeitpunkt. Ihre Zeugensignaturen prüft im PoC kein Befehl (wie 8.7 Schritt 2); deshalb nur aus einem Datenverzeichnis, das nicht verdächtig ist. `publish` nimmt eine solche ältere Grenze an (`<N>` und `<T>` höchstens Größe und Zeit des neuesten Kopfes). Sonst den neuesten bestätigten Kopf nehmen. Zwei Fälle verlangen eine Grenze vor dem ersten Eintrag des Diebs (`internal/translog/doc.go`, „Reading for the operator“; einen Befehl, der die Einträge einer Generation auflistet, gibt es nicht):
+
+- Ein Dieb mit dem Admin-Schlüssel kann vor der Grenze eine Zuordnung mit weit in der Zukunft liegendem `valid_from` loggen. Sie bleibt gültig; der Nachfolger kann die Adresse nicht neu zuordnen, weil `valid_from` steigen muss, und ab jener Zeit gehört die Adresse dem Dieb (`TestRevokedFarFutureFreeze`). Abhilfe: `<N>` höchstens beim Index des ersten solchen Eintrags; ehrliche Zuordnungen ab dort ordnet der Administrator neu zu (7.3.4 Schritt 7).
+- Ein Dieb mit der Identität kann vor der Grenze eigene Admin- und Ingest-Zertifikate loggen. Sie handeln ab der Grenze nicht mehr (Kaskade), belegen aber ihren Namen: Die Neuausstellung braucht dann die nächste Generation. Liegt die Grenze vor ihnen, sind sie ungültig, und die Neuausstellung nimmt ihren Namen; `publish` ersetzt die Datei des Diebs (7.3, „Zertifikate des Diebs“).
+
+**Folge für Mails (Ingest, Identität):** Mails, die der Server nach `<T>` und vor dem Anhalten mit der widerrufenen Generation angenommen hat, lehnen Clients mit dem neuen Pin ab (`WARNUNG: Mail <id> wird nicht verarbeitet: Generation widerrufen.`, 4.4). Der Server signiert spätestens nach `--head-interval` (Standard 1 h) einen Kopf, der Zeitraum ist also meist kürzer. Diese Mails sind für die Benutzer verloren. Dasselbe gilt für spätere Versionen ihrer Metadaten (geänderte Flags, Übernahme nach einem Geräteverlust), die ein Gerät mit dem alten Pin signiert hat: Für eine Version ab 2 prüft der Client, dass die Empfangszeit im Zeitraum einer gültigen Ingest-Generation liegt, die der Pin dafür nicht widerruft (`checkReceivedCovered`; `TestLogFlagLaundering`, `TestLogFlagsAcrossGenerations`). Mails, die während des Stillstands eingeliefert werden sollen, wiederholen die Absender später.
+
+#### 7.3.3 Ingest-Schlüssel kompromittiert
+
+`<i>` ist die kompromittierte Ingest-Generation, `<i+1>` die nächste (die höchste Ingest-Generation in `platform/ingest-*.cert` + 1, wie in Abschnitt 6). `<pin>` ist der aktuelle Pin `identity-<g>.pin`.
+
+1. **Server anhalten, Grenze ablesen** (7.3.2). Der Server bleibt bis Schritt 7 angehalten. Ist der Server-Host verdächtig, auch die Zeugen anhalten; sie starten erst in Schritt 6 mit nur dem neuen Log-Schlüssel. Ab `<T>` laufen die 24 Stunden aus Abschnitt 10: Dauern die Schritte länger, stoppen die Clients, bis der Server mit dem neuen Schlüssel läuft; Daten gehen dabei nicht verloren.
+2. **Zeremonie offline** (`<k>` Anteilsinhaber der aktuellen Aufteilung, bei 3-of-5 drei; Uhr gestellt; Abschnitte 2 und 10), **zuerst `revoke`, dann `ingest-rotate` mit dem neuen Pin**:
+
+   ```
+   gomail-ceremony revoke --pin <pin> --out <export-widerruf> --role ingest --generation <i> \
+       --revoke-at-size <N> --revoke-at-time <T>
+   gomail-ceremony ingest-rotate --pin <export-widerruf>/identity-<g>.pin --gen <i+1> --out <export-i+1> \
+       --keys <schlüssel> --valid-from <T+1 ms>
+   ```
+
+   `<T+1 ms>` ist genau die Zeit, die `revoke` in seiner letzten Zeile nennt (RFC 3339, Bruchteile ohne Nullen am Ende, etwa `2026-11-03T10:15:30.124Z`). `ingest-rotate` verlangt mit einem Pin, der die Vorgängerin widerruft, genau diesen Wert und verweigert jeden anderen vor dem ersten Anteil (`ceremony: invalid revocation: valid_from … must be revoked_at_time … of the revoked predecessor (D93)`): Ein späteres `valid_from` ließe eine Zeit ohne gültige Ingest-Generation, in der kein Kopf signiert werden kann; ein früheres machte Signaturen von `<i>` vor der Grenze ungültig. Das `valid_from` liegt damit in der Vergangenheit; das ist nur nach einem Widerruf erlaubt (hier und in 7.3.5). Ergebnis: in `<export-widerruf>` der neue Pin `identity-<g>.pin` (im Folgenden `<neuer-pin>`), in `<export-i+1>` `ingest-<i+1>.pub` und `.cert`, dazu `<schlüssel>/ingest-<i+1>.key` (0600).
+3. **`log repair` mit dem neuen Pin** (8.2), bei weiter angehaltenem Server:
+
+   ```
+   gomail-server log repair --data <datenverzeichnis> --pin <neuer-pin>
+   ```
+
+   Köpfe, die `<i>` nach `<T>` signiert hat, gehören unter dem neuen Pin nicht zum Log. `log repair` verschiebt sie nach `log/heads-revoked/` und nennt jede Datei (`log/heads/<n>.sig von einer widerrufenen Generation signiert (Pin-Feld 7), verschoben nach log/heads-revoked/<n>-<hex>.sig`); die Schlussmeldung zählt sie (`…; <k> Köpfe einer widerrufenen Generation nach log/heads-revoked verschoben`). Die verschobenen Dateien sind Belege; nie löschen. Ohne diesen Schritt warnt `publish`, wenn der neueste Kopf ein solcher ist (7.3, „`publish` mit Feld 7“), und der Server stoppt später beim Signieren (`… head signed only by an ingest generation the pin revokes …`, 8.2).
+4. **Veröffentlichen** mit dem neuen Pin, weiter bei angehaltenem Server, **bevor** der Pin verteilt wird; erst `publish` prüft Grenze und Generation gegen das Log (7.3, „`publish` mit Feld 7“):
+
+   ```
+   gomail-ceremony publish --from <export-i+1> --data <datenverzeichnis> --pin <neuer-pin>
+   ```
+
+5. **Pin verteilen** an Administrator und alle Clients (getrennter Weg, wie 1.3; auf dem Server-Host liegt er seit Schritt 3), dort den alten Pin ersetzen. Solange ein Client den alten Pin hat, nimmt er an, was der Dieb mit Generation `<i>` signiert.
+6. **Zeugen:** Den Prüfschlüssel von `<i+1>` nach 1.7 bilden, aus `<export-i+1>/platform/ingest-<i+1>.pub`, und jeden Zeugen **nur** mit dem neuen Log-Schlüssel neu starten (`--log-key <neu>`, gleiches Zustandsverzeichnis). Anders als in Abschnitt 6 entfällt der alte Log-Schlüssel sofort; der Zeuge bestätigt dann keinen Kopf mehr, den der kompromittierte Schlüssel signiert. Sein gespeicherter Kopf bleibt ohne den alten Schlüssel verwendbar.
+7. **Server starten** mit dem neuen Pin und dem neuen Schlüssel. `valid_from` von `ingest-<i+1>.cert` ist vorbei, er startet sofort:
+
+   ```
+   gomail-server serve --data <datenverzeichnis> --listen 127.0.0.1:2525 --ingest-key <ingest-<i+1>.key> \
+       --pin <neuer-pin> --log-listen <log-adresse> [...]
+   ```
+
+   Mit dem alten Schlüssel und dem neuen Pin verweigert er mit Exit 2: `der Ingest-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); den Server nur mit dem Schlüssel einer neu ausgestellten Ingest-Generation starten` (`TestServeRevoked`).
+8. **Alten Schlüssel vernichten**, alle Kopien, auch in Sicherungen.
+9. **Prüfen:**
+   - `gomailctl inspect <neuer-pin>` zeigt in `revoked` ein Element mit `role` 2 (Ingest), `gen` `<i>`, `revoked_at_size` `<N>` und `revoked_at_time` `<T>` + 1.
+   - Nach dem Start erscheint ein neuer Kopf `log/heads/<n>.sig` mit Zeugensignatur (1.7).
+   - Eine Testmail an eine eigene Adresse (4.3) ergibt `status=250`. Ein Client mit dem neuen Pin zeigt sie nach `sync` mit `list` (4.4).
+   - Mails aus dem Zeitraum nach `<T>` erscheinen als Warnung mit der Ursache `Generation widerrufen` (7.3.2, „Folge für Mails“); das ist erwartet (`TestRevokedIngestEndToEnd`).
+
+#### 7.3.4 Admin-Schlüssel kompromittiert oder verloren
+
+`<a>` ist die aktuelle Admin-Generation, `<a+1>` die neue. Generation `<a>` ordnet nur bis `valid_from` von `admin-<a+1>.cert` gültig zu, sobald dieses Zertifikat im Log steht (D93 (3)). Ist der Schlüssel nur verloren und sicher nirgends sonst, entfallen `revoke` und Schritt 1; `admin-rotate` läuft dann mit dem bisherigen Pin, und `publish` nimmt ihn. Ohne Widerruf entfallen auch Schritt 4 und der Pinwechsel in Schritt 5.
+
+1. **Grenze ablesen** (7.3.2). Der Server läuft weiter.
+2. **Zeremonie offline** (`<k>` Anteilsinhaber, Uhr gestellt), zuerst `revoke`, dann `admin-rotate` mit dem neuen Pin:
+
+   ```
+   gomail-ceremony revoke --pin <pin> --out <export-widerruf> --role admin --generation <a> \
+       --revoke-at-size <N> --revoke-at-time <T>
+   gomail-ceremony admin-rotate --pin <export-widerruf>/identity-<g>.pin --gen <a+1> --out <export-a+1> \
+       --keys <schlüssel> --valid-from <RFC3339>
+   ```
+
+   `--valid-from` darf nicht in der Vergangenheit liegen; bis dahin gibt es keine neue Zuordnung. Ergebnis: `<neuer-pin>` wie in 7.3.3 Schritt 2, `<export-a+1>` mit `admin-<a+1>.pub` und `.cert`, `<schlüssel>/admin-<a+1>.key` (0600). Die Ausgabe von `admin-rotate` erinnert: `Die bisherige Admin-Generation ordnet nur bis <valid-from> gültig zu; ist ihr Schlüssel entwendet, sie mit revoke widerrufen.`
+3. **Veröffentlichen** bei angehaltenem Server (SIGTERM), vor dem Verteilen: `gomail-ceremony publish --from <export-a+1> --data <datenverzeichnis> --pin <neuer-pin>` (ohne Widerruf mit dem bisherigen Pin). Ein Admin-Widerruf macht keinen Kopf ungültig; `log repair` ist nicht nötig.
+4. **Pin verteilen** an Server-Host, Administrator und alle Clients, wie 7.3.3 Schritt 5.
+5. **Server neu starten** mit dem neuen Pin und dem bisherigen Ingest-Schlüssel (1.6).
+6. **Neuer Admin-Schlüssel:** `admin-<a+1>.key` zum Administrator (0600, nicht auf den Server-Host, 1.3), den alten vernichten. Ab `<valid-from>` ordnet er mit `address add … --admin-key <admin-<a+1>.key> --pin <neuer-pin>` zu (4.2). Vorher scheitert `address add` mit dem neuen Schlüssel (`… assignment before the admin certificate`, Exit 1, 4.2). Mit dem alten Schlüssel und dem neuen Pin verweigert es mit Exit 2, bevor etwas ins Log kommt: `der Admin-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); Zuordnungen nur mit dem Schlüssel einer neu ausgestellten Admin-Generation` (`TestAddressAddRevoked`). Ohne Widerruf scheitert der alte Schlüssel ab `<valid-from>` am Log (`… dated after its successor's valid_from`, Exit 1).
+7. **Zuordnungen nach der Grenze:** Zuordnungen, die Generation `<a>` ab Logindex `<N>` ins Log gebracht hat, gelten nicht mehr. Eine solche Zuordnung ist für Clients mit dem neuen Pin kein gültiger Logeintrag: Mails an die Adresse lehnen sie mit der Ursache `Adresse nicht zugeordnet` ab, oder es gilt die ältere gültige Zuordnung (4.4; `TestLogAdminRevoked`). Legitime Zuordnungen aus diesem Bereich ordnet der Administrator mit dem neuen Schlüssel neu zu. Das Log kennt nur gültige Einträge (`Lookup`), deshalb nimmt `address add` die erneute Zuordnung derselben Adresse zum selben Postfach an, sofern ihr `valid_from` nach dem der letzten gültigen Zuordnung liegt (4.2). Nennt `addresses.json` für die Adresse ein anderes Postfach, verweigert es mit Exit 2 (`Adresse bereits zugeordnet`, 4.2; kein Test für diesen Fall). Einen Befehl, der die Zuordnungen ab `<N>` auflistet, gibt es im PoC nicht (wie 8.7 Schritt 2).
+8. **Prüfen:**
+   - `gomailctl inspect <neuer-pin>` zeigt in `revoked` `role` 1 (Admin), `gen` `<a>`, `revoked_at_size` `<N>` und `revoked_at_time` `<T>` + 1.
+   - Nach `<valid-from>` gelingt `address add` einer Testadresse mit dem neuen Schlüssel. Eine Testmail an sie erscheint bei einem Client mit dem neuen Pin.
+
+#### 7.3.5 Identität kompromittiert
+
+Nur wenn Root und Anteile sicher sind (7.3.1). `<g>` ist die kompromittierte Identitätsgeneration; `<a>` und `<i>` sind die aktuellen Admin- und Ingest-Generationen. Durch die Kaskade handeln beide ab der Grenze nicht mehr: `<a>` ordnet ab `<N>` nichts gültig zu, `<i>` signiert nach `<T>` keinen Kopf und keine Metadaten gültig. Ein eigener `revoke` für `<a>` oder `<i>` ist deshalb nicht nötig. Der Server wechselt auf eine neue Ingest-Generation.
+
+1. **Server anhalten, Grenze ablesen** (7.3.2).
+2. **Zertifikate des Diebs** in `platform/` (aus keiner eigenen Zeremonie, `gomailctl inspect` zeigt `identity_gen` `<g>`) nicht von Hand entfernen: Liegt die Grenze vor ihrem Logeintrag, ersetzt `publish` sie durch die Neuausstellung gleichen Namens (7.3, „Zertifikate des Diebs“). Stehen sie vor der Grenze gültig im Log, bleiben sie, und `<a+1>` bzw. `<i+1>` ist die Generation über ihnen.
+3. **Zeremonie offline** (`<k>` Anteilsinhaber, Uhr gestellt), alle drei Befehle nacheinander:
+
+   ```
+   gomail-ceremony succeed --compromised --pin <identity-g.pin> --out <export-g+1> \
+       --revoke-at-size <N> --revoke-at-time <T>
+   gomail-ceremony admin-rotate --pin <export-g+1>/identity-<g+1>.pin --gen <a+1> --out <export-a+1> \
+       --keys <schlüssel> --valid-from <RFC3339>
+   gomail-ceremony ingest-rotate --pin <export-g+1>/identity-<g+1>.pin --gen <i+1> --out <export-i+1> \
+       --keys <schlüssel> --valid-from <T+1 ms>
+   ```
+
+   `succeed --compromised` schreibt keine Nachfolge `identity-<g+1>.succ`, sondern `platform/identity-<g+1>.pub` und den neuen Pin `<export-g+1>/identity-<g+1>.pin`. Er nennt `<g+1>` in der Identitätsliste und `<g>` in Feld 7. Origin, Zeugen und Quorum kommen wie in 7.1 aus dem alten Pin. Die Ausgabe lautet `Identitätsgeneration <g+1> erzeugt, ohne Nachfolge; Generation <g> ist widerrufen.` und endet mit `Pflicht: Admin und Ingest unter Generation <g+1> neu ausstellen: admin-rotate und ingest-rotate mit --pin …; die neue Ingest-Generation mit --valid-from <T+1 ms> (nicht später).` **Die Neuausstellung ist Pflicht** (2.3 des Plans, Regel 6). Für `ingest-rotate` genau den Wert nehmen, den `succeed` nennt: Ein früheres `valid_from` verweigert `ingest-rotate` (`… is before revoked_at_time … of the compromised identity generation`), ein späteres nimmt es an und warnt vor dem ersten Anteil (`WARNUNG: --valid-from … liegt nach der Widerrufszeit … der kompromittierten Identitätsgeneration <g>. … dann --valid-from <T+1 ms>. Weicht das ab, jetzt mit Strg-C abbrechen.`), aber `publish` verweigert es dann (`ceremony: invalid revocation: ingest-<i+1>.cert is valid from …, after ingest generation <i> is revoked …; make it valid from <T+1 ms> (ingest-rotate --valid-from)`), und die Rotation muss wiederholt werden (`TestSucceedCompromised` in `cmd/gomail-ceremony`). Für `admin-rotate` gilt „nicht in der Vergangenheit“.
+4. **`log repair` mit dem neuen Pin** wie 7.3.3 Schritt 3: Köpfe, die `<i>` nach `<T>` signiert hat, gehören wegen der Kaskade nicht mehr zum Log.
+5. **Veröffentlichen** bei angehaltenem Server, mit dem neuen Pin, vor dem Verteilen, in dieser Reihenfolge:
+
+   ```
+   gomail-ceremony publish --from <export-g+1> --data <datenverzeichnis> --pin <identity-g+1.pin>
+   gomail-ceremony publish --from <export-a+1> --data <datenverzeichnis> --pin <identity-g+1.pin>
+   gomail-ceremony publish --from <export-i+1> --data <datenverzeichnis> --pin <identity-g+1.pin>
+   ```
+
+   `publish` nimmt `<g+1>` ohne `identity-<g+1>.succ` an, weil der Pin `<g>` widerruft; mit dem alten Pin verweigert es (`… install the new pin …`). Die ersten beiden Aufrufe warnen, dass Ingest-Generation `<i>` widerrufen ist und `ingest-<i+1>.cert` noch fehlt; das ist bis zum dritten Aufruf erwartet. Ein Zertifikat, das `<g>` ab der Grenze ausgestellt hat, verweigert `publish` (`… which the pin revokes (field 7); nothing written`).
+6. **Pin verteilen** an Server-Host, Administrator und alle Clients, wie 7.3.3 Schritt 5. Clients mit dem alten Pin kennen `<g+1>` nicht, denn im Log steht keine Nachfolge. Sie nehmen weiter an, was der Dieb mit `<g>` ausstellt; `ingest-<i+1>.cert` können sie nicht prüfen und lehnen deshalb jede Mail und jeden Kopf der neuen Ingest-Generation ab (der Client nimmt Identitätsschlüssel nur aus seinem Pin oder aus geloggten Nachfolgen, `ingestKeyFor` in `internal/client/read.go`; kein Test). Spätestens 24 Stunden nach dem letzten Kopf von `<i>` stoppen sie (Abschnitt 10).
+7. **Zeugen** nur mit dem neuen Log-Schlüssel, wie 7.3.3 Schritt 6.
+8. **Server starten** mit dem neuen Pin und `ingest-<i+1>.key`, wie 7.3.3 Schritt 7; `valid_from` ist vorbei. Mit dem alten Schlüssel verweigert er mit Exit 2 wie in 7.3.3 Schritt 7 (`der Ingest-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); …`): Die Identität, die `ingest-<i>.cert` ausgestellt hat, ist widerrufen (Kaskade; `TestServeRevoked`). Mit dem alten Pin verweigert er ebenso (`kennt nur 1 bis <g>`, 8.6).
+9. **Admin:** `admin-<a+1>.key` zum Administrator, wie 7.3.4 Schritt 6. Zuordnungen, die `<a>` ab `<N>` geloggt hat, also zwischen dem Ablesen der Grenze und dem Wechsel auf den neuen Pin, gelten nicht mehr; der Administrator nimmt sie nach `<valid-from>` von `admin-<a+1>.cert` mit dem neuen Schlüssel neu vor, wie 7.3.4 Schritt 7. Mit dem Schlüssel von `<a>` und dem neuen Pin verweigert `address add` mit Exit 2, bevor etwas geloggt wird, mit derselben Meldung wie in 7.3.4 Schritt 6 (Kaskade; `TestAddressAddRevoked`).
+10. **Alte Schlüssel vernichten:** `ingest-<i>.key` und `admin-<a>.key`, alle Kopien.
+11. **Prüfen:**
+    - `gomailctl inspect <identity-g+1.pin>` zeigt `<g+1>` in `identities` (Feld 8) und in `revoked` `role` 0 (Identität), `gen` `<g>`, `revoked_at_size` `<N>` und `revoked_at_time` `<T>` + 1.
+    - Der Server startet mit dem neuen Pin, und ein neuer Kopf mit Zeugensignatur erscheint.
+    - Eine Testmail erscheint bei einem Client mit dem neuen Pin.
+    - Nach `<valid-from>` von `admin-<a+1>.cert` gelingt `address add` mit dem neuen Admin-Schlüssel.
+
+Ein späteres `succeed` (7.1) und jeder weitere Widerruf übernehmen Feld 7 in den neuen Pin; ein Widerruf geht dabei nie verloren.
+
+#### 7.3.6 Neue Plattform (kompromittierter Root)
+
+Ist der Root kompromittiert, kann der Angreifer jede Generation selbst ableiten; dann hilft weder ein Widerruf noch eine Nachfolge (2.3 des Plans, Regel 7). Dasselbe gilt nach einem Fork (7.3.1). Die Plattform wird neu aufgesetzt:
+
+1. Neue Zeremonie `init` mit **neuem Origin** (1.2), neue Anteile, neues Datenverzeichnis, `publish` und `serve` (1.3 bis 1.6).
+2. Zeugen für den neuen Origin, je mit eigenem, neuem Zustandsverzeichnis (1.7). Das Zustandsverzeichnis des alten Zeugen nie löschen.
+3. Neue Pins an alle Clients und den Administrator. Die Adressen neu zuordnen (4.2).
+4. **Benutzer:** Jeder legt ein **neues** Client-Verzeichnis an (`--dir <neues-verzeichnis>`; dessen Elternverzeichnis prüfen, 0.3) und registriert sich mit einem neuen Einladungscode (3). `keygen` erzeugt dabei einen neuen Seed: die neuen 24 Wörter sichern, den alten Seed für die alte Plattform behalten. Das alte Client-Verzeichnis **nie löschen**. `keygen` verweigert ein `--dir`, das schon einen Benutzer hat (`client: this client directory already has a user`, 3.2). Wer deshalb das alte Verzeichnis löscht, etwa den Standard `~/.config/gomailctl`, vernichtet den einzigen Schlüsselspeicher für die alten Postfächer.
+5. **Alte Mails:** Sie lassen sich nur lesen, solange der alte Server läuft (Testsperre, 3); einen Umzug von Postfächern gibt es nicht. Vor dem Anhalten des alten Servers festlegen, ob und wie lange er ohne Zustellung neuer Mails für das Lesen weiterläuft. Mails, die nach dem möglichen Zeitpunkt der Kompromittierung eingegangen sind, können gefälscht sein. Erst danach den alten Server anhalten und den alten Pin bei den Clients entfernen.
 
 ### 7.4 Anteile neu verteilen
 
@@ -504,7 +685,9 @@ gomail-server log repair --data <datenverzeichnis> --pin <pin>
 
 *Wann:* wenn der Server wegen eines inkonsistenten Logs nicht startet oder mit 451 ablehnt, und nur bei beendetem Server (der Befehl hält die Serversperre `locks/server` und scheitert neben einem laufenden Server mit „Server-Sperre“).
 
-*Was es tut:* Es baut `log/tree.rec`, die Kacheln und `log/keys/` aus den Einträgen und den signierten Köpfen neu. Die neue Größe m ist die Zahl der Einträge, die ab `entries/0.rec` lückenlos vorhanden und lesbar sind; jeder Kopf in `log/heads/` muss eine gültige Log-Signatur tragen, höchstens m groß sein und zum neu berechneten Baum passen. Es löscht nichts. Liegen Einträge jenseits von m (verwaiste Einträge `log/entries/<i>.rec` mit i ≥ m), meldet es deren Zahl und Bereich, schreibt nichts und endet mit Exit 1 (`<n> verwaiste Einträge jenseits von <m> gemeldet, 0 verworfen; nichts geschrieben …`); der Betreiber prüft sie und nimmt sie bewusst aus `log/entries/` heraus und führt `log repair` erneut aus. Bei Erfolg meldet es `0 verwaiste Einträge gemeldet, 0 verworfen`. Danach den Server neu starten.
+*Was es tut:* Es baut `log/tree.rec`, die Kacheln und `log/keys/` aus den Einträgen und den signierten Köpfen neu. Die neue Größe m ist die Zahl der Einträge, die ab `entries/0.rec` lückenlos vorhanden und lesbar sind; jeder Kopf in `log/heads/` muss eine gültige Log-Signatur tragen, höchstens m groß sein und zum neu berechneten Baum passen. Es löscht nichts. Liegen Einträge jenseits von m (verwaiste Einträge `log/entries/<i>.rec` mit i ≥ m), meldet es deren Zahl und Bereich, schreibt nichts und endet mit Exit 1 (`<n> verwaiste Einträge jenseits von <m> gemeldet, 0 verworfen; nichts geschrieben …`); der Betreiber prüft sie und nimmt sie bewusst aus `log/entries/` heraus und führt `log repair` erneut aus. Bei Erfolg meldet es `0 verwaiste Einträge gemeldet, 0 verworfen; <k> Köpfe einer widerrufenen Generation nach log/heads-revoked verschoben`. Danach den Server neu starten.
+
+*Köpfe einer widerrufenen Generation (D93):* Ein Kopf in `log/heads/`, dessen Logsignatur nur mit einer Ingest-Generation prüft, die der Pin für die Zeit des Kopfes widerruft (direkt oder über die Identitätsgeneration, die ihr Zertifikat ausgestellt hat), gehört unter diesem Pin nicht zum Log. Signieren und Veröffentlichen stoppen an ihm (`translog: log is inconsistent: head signed only by an ingest generation the pin revokes: heads/<n>.sig (log repair moves it to log/heads-revoked)`). `log repair` mit dem neuen Pin verschiebt jeden solchen Kopf nach `log/heads-revoked/<n>-<hex SHA-256>.sig`, statt abzubrechen, und nennt ihn auf der Standardausgabe (`log/heads/<n>.sig von einer widerrufenen Generation signiert (Pin-Feld 7), verschoben nach …`; `TestLogRepairRevokedHeads`). Die Dateien dort sind Belege und werden nie gelesen; nicht löschen. Das gehört zu jeder Zeremonie, die eine Ingest-Generation oder eine Identität widerruft (7.3.3 Schritt 3, 7.3.5 Schritt 4).
 
 *Verwaiste Einträge prüfen (kein Test):* Meist sind es gültige Einträge von Clients hinter einem einzigen fehlenden oder unlesbaren `log/entries/<m>.rec`, denn m ist die Länge der lückenlosen Folge ab `entries/0.rec`.
 1. `ls -l <datenverzeichnis>/log/entries/<m>.rec` ansehen: fehlt die Datei oder ist sie nicht lesbar?
@@ -535,6 +718,14 @@ Server, Zeuge und Clients enden mit SIGINT oder SIGTERM. Für Skripte, die Progr
 | `--pin und --log-listen sind erforderlich` | Server ohne Transparenzlog gestartet |
 | `--listen und --log-listen müssen Loopback-Adressen sein` | öffentliche Adresse ohne `--isolated-test-network` |
 | `kennt nur 1 bis <g>` beim Serverstart | Pin älter als `platform/` (nach einer Nachfolge den neuen Pin nehmen) |
+| `der Ingest-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); …` | Server mit dem Schlüssel einer widerrufenen Ingest-Generation, auch über die Identität, die ihr Zertifikat ausgestellt hat (Exit 2): mit dem Schlüssel der neu ausgestellten Generation starten (7.3.3 Schritt 7, 7.3.5 Schritt 8) |
+| `der Admin-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); …` | `address add` mit dem Schlüssel einer widerrufenen Admin-Generation, auch über die Identität, die ihr Zertifikat ausgestellt hat (Exit 2, nichts geloggt): neuer Schlüssel nach 7.3.4 Schritt 6 bzw. 7.3.5 Schritt 9 |
+| `… head signed only by an ingest generation the pin revokes: heads/<n>.sig (log repair moves it to log/heads-revoked)` | Kopf einer widerrufenen Ingest-Generation in `log/heads/`: Server beenden, `log repair` mit dem neuen Pin (8.2) |
+| `ceremony: invalid revocation: …` bei `revoke`, `succeed --compromised`, `ingest-rotate`, `admin-rotate` oder `publish` | Grenze oder Generation passt nicht (Kopfzeit nach der Uhr der Zeremonie, Generation schon widerrufen, falsches `valid_from` der Nachfolgerin, Grenze nicht aus diesem Log, widerrufenes Zertifikat nicht im Log); 7.3 |
+| `WARNUNG: der neueste Kopf … trägt die Logsignatur von Ingest-Generation <i>, die der Pin ab … widerruft …` bei `publish` | Kopf einer widerrufenen Generation in `log/heads/`: Server angehalten lassen, `log repair` mit dem neuen Pin (8.2; 7.3.3 Schritt 3) |
+| `ceremony: incomplete options: valid_from … is before revoked_at_time … of the compromised identity generation` bei `ingest-rotate` | nach `succeed --compromised` ein `valid_from` vor der Widerrufszeit (Exit 1, vor dem ersten Anteil): genau den Wert nehmen, den `succeed` nennt (7.3.5 Schritt 3) |
+| `WARNUNG: --valid-from … liegt nach der Widerrufszeit …` bei `ingest-rotate` | nach `succeed --compromised`: genau den Wert nehmen, den `succeed` nennt, sonst verweigert `publish` (7.3.5 Schritt 3) |
+| `WARNUNG: Ingest-Generation <i> ist ab … widerrufen, ingest-<i+1>.cert …` bei `publish` | widerrufene Ingest-Generation ohne Nachfolgerin oder mit späterem `valid_from` (7.3, „`publish` mit Feld 7“; 7.3.5 Schritt 5) |
 | `ingest: the ingest generation is superseded in the log` | alter Ingest-Schlüssel nach `valid_from` der neuen Generation (Abschnitt 6) |
 | `der Ingest-Schlüssel ist noch nicht gültig` | neuer Ingest-Schlüssel vor `valid_from` seines Zertifikats gestartet: bis dahin mit dem bisherigen Schlüssel weiterlaufen lassen (Abschnitt 6); sonst die Uhr des Servers prüfen (Abschnitt 10) |
 | `translog: log is inconsistent` | Abschnitt 8.1 und 8.2 |
@@ -545,10 +736,14 @@ Server, Zeuge und Clients enden mit SIGINT oder SIGTERM. Für Skripte, die Progr
 | `store: unknown or used invitation code` | Code falsch oder schon verwendet |
 | `keys: key store authentication failed (wrong passphrase or damaged file)` | falsche Passphrase |
 | `WARNUNG: Mail <id> wird nicht verarbeitet: …` | eine Prüfung aus 4.4 ist fehlgeschlagen; die Mail wird nicht angezeigt |
+| `WARNUNG: Mail <id> wird nicht verarbeitet: Generation widerrufen.` | Ingest-Signatur einer Generation, die der Pin für die Empfangszeit widerruft, auch über die Identität; bei einer späteren Version der Metadaten (Flags, Übernahme) eine Empfangszeit im Zeitraum einer solchen Generation (7.3.2, „Folge für Mails“). Eine Zuordnung einer widerrufenen Admin-Generation zeigt sich dagegen als `Adresse nicht zugeordnet` (7.3.4 Schritt 7) |
+| `WARNUNG: Mail <id> wird nicht verarbeitet: Zuordnung einer abgelösten Admin-Generation.` | das Log lehnt die geltende Zuordnung nach seinen Regeln ab (`translog.ErrOrder`, `addressErr` in `internal/client/read.go`), meist weil ihre Admin-Generation bei ihrem `valid_from` schon abgelöst war (D93 (3), `TestLogAdminSuperseded`): mit der aktuellen Admin-Generation neu zuordnen (4.2) |
 | `452 4.3.1` beim Einliefern | weniger als 10 % freier Platz im Datenverzeichnis |
 | `451` beim Einliefern | inkonsistentes Log (8.1), abgelöste Ingest-Generation (6), Logfehler einer Epoche oder unbekannter freier Platz |
 | `WARNUNG: Epoche <n> von <postfach-id> widerspricht dem Transparenzlog: …` | Abschnitt 8.7 |
-| `store: file exists: the client directory … is not empty or in use by another client` | `keygen`/`restore` auf ein belegtes `--dir` (3.2, Client-Verzeichnis) |
+| `store: file exists: the client directory … is not empty or in use by another client` | `keygen`/`restore` auf ein belegtes `--dir` (3.2, Client-Verzeichnis); endet sie auf `store: in use by another process`, hält gerade ein anderer Befehl die Sperre des Verzeichnisses: einmal wiederholen |
+| `client: this is the temporary directory of an unfinished keygen or restore (it holds the marker .incomplete), not a client directory` | Befehl auf ein Temp-Verzeichnis von `keygen` oder `restore` statt auf das Client-Verzeichnis (Exit 1, nichts geschrieben, auch keine Sperrdatei); `--dir` prüfen (3.2, Aufräumen) |
+| `client: the client directory is complete, but its durability is not confirmed: <client>: …` | `keygen`/`restore`: Umbenennen gelungen, aber das fsync des Elternverzeichnisses oder die Prüfung danach scheiterte (Exit 1). `<client>` ist vollständig; nicht wiederholen, sondern mit ihm weiterarbeiten (nach `keygen` 3.4, nach `restore` `sync`); nur ein Systemabsturz kurz danach könnte das Umbenennen verlieren |
 | `client: the temporary directory of the client directory was replaced by another directory; its parent must not be writable by other users` | Bei `keygen`/`restore` hat jemand das Temp-Verzeichnis oder `--dir` ausgetauscht. Vor dem Umbenennen hat der Befehl dann nichts umbenannt und nichts entfernt; nach dem Umbenennen steht an `--dir` möglicherweise ein fremdes Verzeichnis (ansehen, nicht ungesehen löschen). Elternverzeichnis prüfen (0.3, D92; 3.2, Client-Verzeichnis) |
 | `translog: log entry violates a validity rule: valid_from does not increase` bei `address add` | Uhr zurückgegangen oder nachgehend (4.2, bekannte Grenze) |
 | `Server-Sperre: store: in use by another process` | `log repair` neben einem laufenden Server (8.2); den Server vorher beenden |
@@ -586,7 +781,7 @@ Vorgehen des Betreibers:
 Kein Programm sichert etwas, und kein Test fährt diese Regeln nach. Sie folgen aus den Regeln des Zeugen und der Clients (AUDIT R13).
 
 - **Was sichern:**
-  - `admin-<g>.key` und `ingest-<g>.key`: verschlüsselt, auf getrennten Medien, getrennt von den Anteilen. Einen verlorenen Ingest-Schlüssel ersetzt eine Ingest-Rotation (6). Einen verlorenen Admin-Schlüssel ersetzt nichts: Bis zur Admin-Rotation aus D93 (3), die Auftrag 21 baut, gibt es dann keine neue Adresszuordnung mehr.
+  - `admin-<g>.key` und `ingest-<g>.key`: verschlüsselt, auf getrennten Medien, getrennt von den Anteilen. Einen verlorenen Ingest-Schlüssel ersetzt eine Ingest-Rotation (6). Einen verlorenen Admin-Schlüssel ersetzt eine Admin-Rotation (`admin-rotate`, 7.3.4); bis zum `valid_from` der neuen Generation gibt es keine neue Adresszuordnung. Ist ein Schlüssel womöglich in fremden Händen, genügt die Rotation nicht (7.3.1).
   - Pins und Exporte der Zeremonien (öffentlich; der Pin ist aber der Vertrauensanker, 1.3).
   - Zeugenschlüssel. Ohne ihn hilft nur ein Zeugenwechsel (7.2).
   - Das Datenverzeichnis, nur bei angehaltenem Server (`log/` und die übrigen Dateien müssen zusammenpassen), mit Rechten und Gruppe. Eine Sicherung von `log/` dient vor allem dazu, einzelne fehlende Einträge zurückzuholen (8.2).
@@ -600,9 +795,9 @@ Kein Programm sichert etwas, und kein Test fährt diese Regeln nach. Sie folgen 
 `gomail-witness` endet mit Exit 3 und „Das Log hat zwei verschiedene Köpfe gleicher Größe gezeigt“. Der Zeuge signiert für diesen Origin nie wieder, auch nicht nach einem Neustart (`<hex>.fork` im Zustandsverzeichnis). Mit einem Zeugen (1 von 1) veröffentlicht der Server keinen Kopf mehr, und nach spätestens 24 Stunden stoppen alle Clients (Abschnitt 10). Die Erkennung prüfen Tests in `internal/witness` und `cmd/gomail-witness`; das folgende Vorgehen ist nicht getestet.
 
 1. Das Zustandsverzeichnis mit `<hex>.fork` und `<hex>.head` unverändert sichern (Beweis). Meldet der Zeuge, dass der Beweis **nicht** gespeichert werden konnte, seine Ausgabe und `log/heads/` sichern und den Zeugen erst nach Klärung der Ursache wieder starten.
-2. Ursache klären: (a) Wurde `log/` zurückgesetzt oder aus einer Sicherung zurückgespielt (8.8), oder wurden Einträge entfernt und danach `log repair` ausgeführt? Dann ist es ein Betreiberfehler. (b) Sonst hat jemand mit dem Ingest-Schlüssel, der zugleich Log-Schlüssel ist (Q4, AUDIT R16), zwei Sichten signiert; der Ingest-Schlüssel gilt dann als kompromittiert. Im gebauten Stand bleibt nur die Ingest-Rotation (Abschnitt 6); einen Widerruf einer Ingest-Generation gibt es noch nicht (Abschnitt 6, D93; 7.3 (Ingest, nach Auftrag 21)).
+2. Ursache klären: (a) Wurde `log/` zurückgesetzt oder aus einer Sicherung zurückgespielt (8.8), oder wurden Einträge entfernt und danach `log repair` ausgeführt? Dann ist es ein Betreiberfehler. (b) Sonst hat jemand mit dem Ingest-Schlüssel, der zugleich Log-Schlüssel ist (Q4, AUDIT R16), zwei Sichten signiert; der Ingest-Schlüssel gilt dann als kompromittiert. Ein Widerruf der Ingest-Generation (7.3.3) hilft dann nicht: Der Zeuge signiert für diesen Origin nie wieder (7.3.1, letzte Zeile); es bleibt eine neue Plattform (7.3.6).
 3. Zustandsverzeichnis und Beweis nie löschen, um den Zeugen wieder in Gang zu bringen: Ein Zeuge ohne Zustand vertraut dem nächsten Kopf beim ersten Kontakt, und die Erkennung ist wertlos.
-4. Ein geprüftes Verfahren, das Log danach mit einem anderen Zeugen fortzusetzen, gibt es nicht; ein Zeugenwechsel nach 7.2 hilft Clients mit altem Pin nicht. Solange es kein solches Verfahren gibt, bleibt eine neue Plattform mit neuem Origin (7.3, Betriebsregel).
+4. Ein geprüftes Verfahren, das Log danach mit einem anderen Zeugen fortzusetzen, gibt es nicht; ein Zeugenwechsel nach 7.2 hilft Clients mit altem Pin nicht. Solange es kein solches Verfahren gibt, bleibt eine neue Plattform mit neuem Origin (7.3.6).
 
 ### 8.10 Weitere Grenzen für den Betrieb
 
@@ -649,8 +844,8 @@ Ohne `--bin` baut das Skript im lokalen Modus die Programme selbst mit den Testb
 
 | Uhr | wofür | Regel |
 |---|---|---|
-| Zeremonierechner (offline, ohne NTP) | `valid_from` der Zertifikate (`init`), der Nachfolge (`succeed`); Prüfung „nicht in der Vergangenheit“ von `ingest-rotate --valid-from` | vor jeder Zeremonie von Hand nach einer verlässlichen Quelle auf UTC stellen; `init` und `succeed` zeigen sie vor dem ersten Schritt, bei falscher Uhr mit Strg-C abbrechen |
-| Server-Host | Empfangszeit jeder Mail, Zeit der Log-Köpfe, Umschalten der Ingest-Generation; Freigabe des Starts mit einem neuen Ingest-Schlüssel (vor dessen `valid_from` verweigert `serve`, ohne Toleranz) | NTP Pflicht |
+| Zeremonierechner (offline, ohne NTP) | `valid_from` der Zertifikate (`init`), der Nachfolge (`succeed`); Prüfung „nicht in der Vergangenheit“ von `ingest-rotate --valid-from` und `admin-rotate --valid-from`; Ausnahmen nur für `ingest-rotate` mit einem Pin, der die Vorgängerin widerruft (genau `revoked_at_time`, 7.3.3) oder nach `succeed --compromised` die Identität (nicht vor `revoked_at_time`, 7.3.5); Prüfung „Kopfzeit nicht nach dieser Uhr plus fünf Minuten“ bei `revoke` und `succeed --compromised` (7.3) | vor jeder Zeremonie von Hand nach einer verlässlichen Quelle auf UTC stellen; `init` und `succeed` zeigen sie vor dem ersten Schritt, bei falscher Uhr mit Strg-C abbrechen |
+| Server-Host | Empfangszeit jeder Mail, Zeit der Log-Köpfe (und damit `revoked_at_time` eines Widerrufs, 7.3.2), Umschalten der Ingest-Generation; Freigabe des Starts mit einem neuen Ingest-Schlüssel (vor dessen `valid_from` verweigert `serve`, ohne Toleranz) | NTP Pflicht |
 | Client-Rechner | Prüfung der Kopfzeiten, Zeit offener Logeinträge, Beginn neuer Epochen | NTP Pflicht |
 | Zeugenhost | Prüfung der Kopfzeiten | NTP Pflicht |
 
@@ -679,7 +874,7 @@ Ohne `--bin` baut das Skript im lokalen Modus die Programme selbst mit den Testb
 | 5.1 | `device lost` (bob), `sync` von alice, bob liest wieder |
 | 5.2, 5.3 | `restore` aus Wörtern (bob) und aus 2 von 3 Anteilen (alice; die Anteile bildet der Test aus dem Seed wie `keygen --shares`, das nur am Terminal läuft) |
 | 6 | `ingest-rotate`, Mails eines Servers mit altem Schlüssel vor und nach `valid_from`, `publish`, alter Schlüssel verweigert, Server und Zeuge mit beiden Log-Schlüsseln; `gomailctl` zeigt die Mail vor und lehnt die nach `valid_from` ab |
-| 7.3 | `succeed --compromised` Exit 2 |
+| 7.3 | `succeed --compromised` ohne `--revoke-at-size` und `--revoke-at-time` verweigert (Exit 2, Meldung „sind nötig“), kein Export geschrieben (seit Auftrag 21b; den ganzen Ablauf prüfen die Tests unten) |
 | 7.1 | `succeed`, `publish` neben dem Server verweigert, mit neuem Pin; Server mit altem Pin verweigert, mit neuem startet; Clients mit neuem und mit altem Pin |
 | 8.2 | `log repair` neben dem Server verweigert, danach erfolgreich; Client ohne Server verweigert |
 
@@ -691,7 +886,7 @@ Nicht in `TestRunbook` (in Klammern, wo es sonst geprüft ist; „kein Test“, 
 - 1.6: Loopback-Prüfung und `--isolated-test-network` (`TestCheckListen`), Pin im Datenverzeichnis und Entwicklungs-Pin (Tests in `cmd/gomail-server`, etwa `TestDevPinRefusedInProduction`), Ingest-Schlüssel noch nicht gültig (`TestServeNotYetValid`), Rechte des Datenverzeichnisses (`TestStartDataDirRights`), zurückgesetzter Baum (`TestStartRolledBackTree`), `--head-interval` (`cmd/gomail-server/log_test.go`), `--hostname` (kein Test; geprüft ist nur `smtpd.Config.Hostname`), 452 und 451 (`TestDiskFull452`).
 - 1.7: Fork und Exit 3 des Zeugen, `--interval` unter 1 s (`internal/witness`, `cmd/gomail-witness`); der SSH-Tunnel zu einem Zeugen auf einer anderen Maschine (kein Test, AUDIT R47); die Regeln für `--state` und `--key` (`internal/witness`).
 - 2: alle Terminalregeln, Exit 130 (Pseudoterminal-, Signal-, stderr- und Stillstandstests in `cmd/gomail-ceremony`).
-- 3.2: `keygen` am echten Terminal (Pseudoterminal-Tests in `cmd/gomailctl`); die Regeln für das Client-Verzeichnis (`TestKeygenAtomic`, `TestKeygenExistingDir`, `TestRestoreAtomic`, `TestClientDirLeftovers`, `TestLeftoverNeedsMarker`, `TestRunLosesTempDir`, `TestTempDirMovedAway`, `TestTempDirSwappedForClientDir`, `TestTempDirSwappedNotRemoved`, `TestTempDirSwappedBeforeRename`, `TestOpenTempDirRefuses` in `internal/client`); das Vorgehen bei einem Rest ohne Markierung (kein Test).
+- 3.2: `keygen` am echten Terminal (Pseudoterminal-Tests in `cmd/gomailctl`); die Regeln für das Client-Verzeichnis (`TestKeygenAtomic`, `TestKeygenExistingDir`, `TestRestoreAtomic`, `TestClientDirLeftovers`, `TestLeftoverNeedsMarker`, `TestRunLosesTempDir`, `TestTempDirMovedAway`, `TestTempDirSwappedForClientDir`, `TestTempDirSwappedNotRemoved`, `TestTempDirSwappedBeforeRename`, `TestOpenTempDirRefuses`, seit 20o `TestIncompleteDirRefused`, `TestLeftoverAllOrNothing`, `TestClientDirLinkIntoDataDir`, `TestNotDurableAfterRename`, `TestHeldLockInUse` in `internal/client`); das Vorgehen bei einem Rest ohne Markierung (kein Test).
 - 3.3: `keygen --shares` (Pseudoterminal-Tests in `cmd/gomailctl`).
 - 4.2: Umordnen einer Adresse mit Exit 2; die bekannte Grenze der Uhr (kein Test).
 - 4.3: die Kommandozeile mit `curl` (kein Test); 451.
@@ -702,7 +897,8 @@ Nicht in `TestRunbook` (in Klammern, wo es sonst geprüft ist; „kein Test“, 
 - 6: `ingest-rotate` über die Kommandozeile (die Zeremonie läuft über die Testseams); Schritt 2 (Neustart mit dem alten Schlüssel zwischen `publish` und `valid_from`); die Reihenfolge in Schritt 3; in Schritt 4 der laufende alte Server mit 451 nach `valid_from` (der Test nimmt einen Ingest im Prozess) und der neue Schlüssel vor `valid_from` (`TestServeNotYetValid`); Schritt 5.
 - 7.1: `succeed` über die Kommandozeile mit Anzeige der Uhr; `publish` mit altem Pin (`TestSuccessionEndToEnd`); Schritt 5 (der Test startet den Zeugen neu).
 - 7.2: `--replace-witnesses` (`TestSuccessionEndToEnd`); Clients mit altem oder neuem Pin nach einem Zeugenwechsel und die Reihenfolge der Verteilung (kein Test).
+- 7.3: der Ablauf mit Widerruf. Die Teile prüfen: Zeremonie über die Kommandozeile und am Pseudoterminal (`TestSucceedCompromised`, `TestRevokeCommand`, `TestPTYRevocation` in `cmd/gomail-ceremony`), Grenze, Feld 7, Rotation nach einem Widerruf und `publish` mit Feld 7 (`TestSucceedCompromised`, `TestRevoke`, `TestAdminRotate`, `TestPublishRevocations`, `TestCompromiseChain`, `TestAddRevoked`, `TestRotateAfterRevocation`, `TestPublishReissueAfterThief`, `TestPublishRevokedHead`, `TestRevocationTimes`, `TestRotateBothRevoked`, `TestVerifyCompromisedIdentityStillIssues` in `internal/ceremony`), Server und `address add` mit widerrufener Generation und `log repair` (`TestServeRevoked`, `TestAddressAddRevoked`, `TestLogRepairRevokedHeads` in `cmd/gomail-server`), Client (`TestLogIngestRevoked`, `TestLogAdminRevoked`, `TestLogAdminSuperseded`, `TestLogIngestCascadeRefused`, `TestLogFlagLaundering`, `TestLogFlagsAcrossGenerations`, `TestLogAddressRefreshAfterOrder`, `TestIngestRevocation` in `internal/client`), Annahme (`TestRevokedGeneration` in `internal/ingest`), SMTP-Server, Annahme und Client mit einem von Hand gebauten Pin (`TestRevokedIngestEndToEnd` in `internal/e2e`) und die Regeln des Logs (`internal/translog`, `revoke21a_test.go`, `rework21a_test.go`). Ohne Test: die Abläufe 7.3.3 bis 7.3.5 als Ganzes mit den Programmen (Reihenfolge `log repair`, `publish`, Verteilen, Start), das Ablesen der Grenze (7.3.2), Zeugen mit nur dem neuen Log-Schlüssel, das Ersetzen von Zertifikaten des Diebs über die Kommandozeile (nur `TestPublishReissueAfterThief` in `internal/ceremony`), Clients mit altem Pin nach `succeed --compromised` und die erneute Zuordnung nach 7.3.4 Schritt 7; 7.3.6 (kein Test).
 - 7.4: `reshare` (`cmd/gomail-ceremony`, `internal/ceremony/api_test.go`).
-- 8.1 und 8.3 (`internal/translog`, `internal/client`); 8.2 mit verwaisten Einträgen (`TestLogRepairOrphans`) und das Vorgehen dazu (kein Test); 8.4 (Q18, `internal/client`); 8.5 (kein Test); von 8.6 die meisten Zeilen (geprüft sind nur die Meldungen, die die Schritte oben auslösen); die Warnungen aus 8.7 (`TestLogDuplicateNeverReplaced`, `TestLogContradictsAtHead`); 8.8, 8.9 und 8.10 (kein Test für das Vorgehen).
+- 8.1 und 8.3 (`internal/translog`, `internal/client`); 8.2 mit verwaisten Einträgen (`TestLogRepairOrphans`) und das Vorgehen dazu (kein Test), mit Köpfen einer widerrufenen Generation (`TestLogRepairRevokedHeads`); 8.4 (Q18, `internal/client`); 8.5 (kein Test); von 8.6 die meisten Zeilen (geprüft sind nur die Meldungen, die die Schritte oben auslösen); die Warnungen aus 8.7 (`TestLogDuplicateNeverReplaced`, `TestLogContradictsAtHead`); 8.8, 8.9 und 8.10 (kein Test für das Vorgehen).
 - 9: der Zwei-Maschinen-Test (`TestTwoHostScript`).
 - 10: 24-Stunden-Regel, 23-Stunden-Regel für offene Einträge, fünf Minuten Abweichung (Tests in `internal/translog`, `internal/witness` und `internal/client`, etwa `TestLogStaleStops`).

@@ -888,6 +888,12 @@ func (v *Verifier) CheckCheckpoint(origin string, size int64, root tlog.Hash, he
 // compromised at all (pin field 7), whatever its AtSize and AtTime. The
 // validity rules use RevokedAtIndex and RevokedAtTime instead: what lies
 // before the boundary stays valid.
+//
+// Warning: IsRevoked looks at the generation's own element only. It
+// does not know the cascade of the D93 addendum (an admin or ingest
+// generation whose certificate a revoked identity generation issued) and
+// answers false for such a generation. A client that judges a signature
+// asks RevokedCertAtTime with identity_gen of the certificate.
 func (v *Verifier) IsRevoked(role uint8, gen uint32) bool {
 	_, ok := FindRevoked(v.Revoked, role, gen)
 	return ok
@@ -904,6 +910,16 @@ func (v *Verifier) IsRevoked(role uint8, gen uint32) bool {
 // identity_gen instead, which does not depend on LogKeys. A client asks
 // before it accepts metadata signed by ingest generation g with receipt
 // time t (D93 (2)).
+//
+// Warning: the cascade is known here only through v.LogKeys, and only
+// for an ingest generation; for an admin generation it is not applied at
+// all and RevokedAtTime answers from the generation's own element alone.
+// Before the first Refresh, or for an ingest generation whose
+// certificate is not among the Logged keys of the last Refresh,
+// RevokedAtTime likewise answers from the generation's own element alone
+// and misses a revocation through its issuing identity generation.
+// Clients use RevokedCertAtTime with identity_gen of the certificate they
+// checked (internal/client, ingestKey.revokedFor).
 func (v *Verifier) RevokedAtTime(role uint8, gen uint32, t int64) bool {
 	if RevokedAtTime(v.Revoked, role, gen, t) {
 		return true
@@ -922,6 +938,8 @@ func (v *Verifier) RevokedAtTime(role uint8, gen uint32, t int64) bool {
 // RevokedCertAtTime is RevokedCertAtTime(v.Revoked, role, gen, issuer,
 // t): the client's question "is ingest generation gen, whose certificate
 // identity generation issuer issued, revoked at receipt time t?" (D93).
+// It covers the cascade without LogKeys and is the query clients use;
+// IsRevoked and RevokedAtTime do not replace it.
 func (v *Verifier) RevokedCertAtTime(role uint8, gen, issuer uint32, t int64) bool {
 	return RevokedCertAtTime(v.Revoked, role, gen, issuer, t)
 }

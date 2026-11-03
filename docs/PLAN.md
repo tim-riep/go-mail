@@ -160,14 +160,33 @@ Kodierung der Labels mit Generation wie in 2.2. Admin- und Ingest-Schlüssel wer
 |---|---|
 | `gomail/v1/rec/platform-cert` | Rolle (uint8: 1 admin, 2 ingest), Generation, öffentlicher Schlüssel, Generation der ausstellenden Identität, gültig ab, Signatur der Identität |
 | `gomail/v1/rec/platform-succ` | neue Generation, neuer öffentlicher Identitätsschlüssel, gültig ab, Signatur der vorherigen Generation |
+| `gomail/v1/rec/platform-revoked` | Rolle (uint8: Identität, Admin, Ingest), Generation, `revoked_at_size` (Logindex), `revoked_at_time` (Millisekunden seit 1970 UTC); Element von Feld 7 des Pins, ohne Signatur (Änderung nach D93) |
 
-Signiert wird jeweils der Datensatz ohne das Signaturfeld, mit der Signaturdomäne nach 3.7.
+Signiert wird jeweils der Datensatz ohne das Signaturfeld, mit der Signaturdomäne nach 3.7. `platform-revoked` ist kein signierter Datensatz und hat keine Signaturdomäne. Admin und Ingest tragen darin dieselben Rollenwerte wie im Zertifikat (1 und 2), die Identität den Wert 0.
 
 **Adresszuordnungen.** Jede Zuordnung einer Adresse zu einem Postfach wird vom Admin-Schlüssel signiert und ins Transparenzlog eingetragen. `addresses.json` ist nur eine Arbeitskopie für den Server. Der Client prüft für jede Mail, dass die Empfängeradresse laut Log zum Zeitpunkt des Empfangs seinem Postfach zugeordnet war. Leitet ein Server eine Adresse still auf ein anderes Postfach um, fällt das spätestens beim Abgleich des Logs auf.
 
 **Widerrufe und Aktualität.** Widerrufe von Generationen, egal ob Plattform oder Benutzer, werden über das Transparenzlog verteilt. Ein Client, der einen Widerruf noch nicht kennt, kann ihn durch lokale Signaturprüfung nicht erkennen. Deshalb gilt eine Aktualitätsgrenze: Ist der zuletzt geprüfte Baumkopf älter als 24 Stunden, verarbeitet der Client keine neuen Signaturen, bis er einen aktuellen Kopf mit Zeugenbestätigung (siehe 2.7) geprüft hat.
 
+Änderung nach D93: Widerrufe von **Plattformgenerationen** stehen nicht im Log, sondern in Feld 7 des Pins und kommen per Client-Update (unten, „Widerruf von Plattformgenerationen“). Die Grenze, ab der sie wirken, ist aber eine Position im Log. Die Aktualitätsgrenze von 24 Stunden gilt unverändert.
+
 **Wechsel der Identität.** Die Identität hat ebenfalls Generationen. Für einen regulären Wechsel signiert die alte Generation die neue (`platform/identity-<gen>.succ`). Ein Client, der Generation 1 kennt, akzeptiert so Generation 2 und merkt sie sich. Ist eine Identität kompromittiert, taugt diese Kette nicht, weil der Angreifer selbst eine Nachfolgerin signieren könnte. Dann wird aus dem Root eine neue Generation abgeleitet und über ein Update des Clients verteilt, also außerhalb der Plattform. Clients lehnen ab diesem Update jede Signatur der kompromittierten Generation ab.
+
+Änderung nach D93: Das Update ist ein neuer Pin aus `gomail-ceremony succeed --compromised`. Er nennt die neue Generation in seiner Identitätsliste, ohne Nachfolge-Signatur der kompromittierten. In Feld 7 nennt er die kompromittierte Generation mit der Grenze aus einem zeugenbestätigten Kopf. „Jede Signatur“ heißt jede ab dieser Grenze; was die kompromittierte Generation vorher ins Log gebracht hat, bleibt gültig, wie bei Benutzern (2.2 Regel 4). Danach werden Admin und Ingest unter der neuen Identität neu ausgestellt; das ist Pflicht (unten, Regel 6).
+
+**Widerruf von Plattformgenerationen** (Änderung nach D93). Er gilt für alle drei Rollen, Identität, Admin und Ingest, nach denselben Regeln:
+
+1. **Träger.** Feld 7 des Pins `identity-<gen>.pin` ist eine Liste von `platform-revoked`: Rolle, Generation, `revoked_at_size`, `revoked_at_time`. Sie hat höchstens `MaxRevoked` Elemente (512), je Rolle und Generation höchstens eines. Feld 7 ist optional; ein Pin ohne Feld 7 bleibt gültig. Es gibt keinen neuen signierten Datensatz und keine neue Signaturdomäne: Der Pin ist nicht signiert und wird wie die Identität außerhalb der Plattform verteilt. Jeder Folge-Pin übernimmt Feld 7, auch der einer regulären Nachfolge.
+2. **Grenze.** Der Betreiber liest Größe und Zeit eines Baumkopfs mit Zeugenbestätigung (2.7) ab, bevor die Zeremonie beginnt. `revoked_at_size` ist dessen Größe, `revoked_at_time` dessen Zeit plus 1 ms; der bestätigte Kopf selbst bleibt damit gültig (D93 Nachtrag). Die Grenze liegt vor der Zeremonie, und alle Clients mit demselben Pin urteilen gleich.
+3. **Was ungültig wird.** Was eine widerrufene Generation ab Logindex `revoked_at_size` ausstellt oder betrifft, ist ungültig: Zertifikate und Nachfolgen, die eine widerrufene Identitätsgeneration ausstellt; Zertifikate einer widerrufenen Admin- oder Ingest-Generation; Adresszuordnungen einer widerrufenen Admin-Generation. Bei einer widerrufenen Ingest-Generation sind Metadaten mit einer Empfangszeit ab `revoked_at_time` ungültig, ebenso Köpfe des Logs, die sie mit einer Zeit ab `revoked_at_time` signiert. Der Widerruf einer Identitätsgeneration wirkt ebenso auf jede Admin- und Ingest-Generation, deren Zertifikat sie ausgestellt hat (Kaskade, D93 Nachtrag): Deren Zertifikate und was sie vor der Grenze geloggt haben, bleiben gültig, ihre Handlungen ab der Grenze nicht.
+4. **Was gültig bleibt.** Einträge unterhalb von `revoked_at_size` und Metadaten mit einer Empfangszeit vor `revoked_at_time`. So bleibt die Historie prüfbar, alte Adresszuordnungen und Ingest-Signaturen alter Mails eingeschlossen. Restrisiko: Was ein Dieb vor der Grenze ins Log gebracht hat, bleibt gültig, ebenso Metadaten, die er auf eine Zeit vor `revoked_at_time` zurückdatiert. Das ist nicht vermeidbar, weil Metadaten nicht ins Log kommen.
+5. **Ablösung.** Ingest-Generation g und Admin-Generation g gelten nur bis `valid_from` von `ingest-<g+1>.cert` bzw. `admin-<g+1>.cert`, sobald dieses Zertifikat im Log steht. Für Admin gibt es dafür `gomail-ceremony admin-rotate`, wie `ingest-rotate` für Ingest. Durch die Ablösung enden auch Zertifikate, die ein Dieb vor der Grenze geloggt hat, sobald eine höhere Generation gilt. Eine Generation eines Diebs, die so nicht endet, wird gezielt in Feld 7 widerrufen.
+6. **Neuausstellung nach Kompromittierung der Identität.** Nach `succeed --compromised` handeln die Admin- und Ingest-Generationen, deren Zertifikat die kompromittierte Identität ausgestellt hat, ab der Grenze nicht mehr (Kaskade, Regel 3). Ohne Neuausstellung gibt es danach keine gültige Admin- und Ingest-Generation (keine Köpfe, keine Zuordnungen). Admin und Ingest werden deshalb unter der neuen Identität neu ausgestellt (`admin-rotate`, `ingest-rotate`; Ingest nach Regel 9 ab `revoked_at_time`); das ist Pflicht.
+7. **Kompromittierter Root.** Ist der Root selbst oder sind so viele Anteile in fremden Händen, dass sie ihn rekonstruieren (bei 3-of-5 drei), ist eine Nachfolge wertlos. Dann gibt es eine neue Plattform: neuer `init` mit neuem Origin, neue Pins, die Benutzer registrieren sich neu.
+8. **Server und Client.** Der Server startet nicht mit einer Ingest-Generation, die sein Pin widerruft, und ordnet keine Adresse mit einer widerrufenen Admin-Generation zu, jeweils auch über die Kaskade. Für spätere Versionen von Metadaten (Flags) prüft der Client, dass die Empfangszeit im Zeitraum einer nicht widerrufenen Ingest-Generation liegt. Köpfe einer widerrufenen Ingest-Generation ab `revoked_at_time` verschiebt `gomail-server log repair` aus dem Log (`log/heads-revoked/`). Der Client nennt bei einer abgelehnten Signatur einer widerrufenen Generation die feste Ursache „Generation widerrufen“.
+9. **Lückenlose Ingest-Generationen.** Nach dem Widerruf einer Ingest-Generation, auch über die Kaskade, gilt die Nachfolgerin ab genau `revoked_at_time`; so signiert zu jeder Zeit eine gültige Generation Köpfe. Eine widerrufene Generation wird nie neu zertifiziert.
+
+Für Admin und Ingest wird der Widerruf mit `gomail-ceremony revoke` erstellt: ein neuer Pin derselben Identitätsgeneration mit dem zusätzlichen Element in Feld 7.
 
 **Zeremonie** (Werkzeug `gomail-ceremony`, Rechner ohne Netzwerk, Live-System):
 
@@ -178,6 +197,8 @@ Signiert wird jeweils der Datensatz ohne das Signaturfeld, mit der Signaturdomä
 5. Rechner ausschalten
 
 Für einen neuen Ingest-Schlüssel oder eine Neuverteilung der Anteile kommen drei Anteilsinhaber in einer neuen Zeremonie zusammen.
+
+Änderung nach D93: ebenso für einen neuen Admin-Schlüssel (`admin-rotate`), einen Widerruf (`revoke`) und eine Nachfolge der Identität (`succeed`, auch nach Kompromittierung).
 
 ### 2.4 Postfach-Epochen
 
@@ -790,7 +811,12 @@ gomail-witness serve --log <url> --key <schlüsseldatei>
 gomail-ceremony init --shares 3-of-5
 gomail-ceremony ingest-rotate
 gomail-ceremony reshare
+gomail-ceremony admin-rotate           neue Admin-Generation
+gomail-ceremony succeed --compromised --revoke-at-size <n> --revoke-at-time <t>
+gomail-ceremony revoke --role admin|ingest --generation <g> --revoke-at-size <n> --revoke-at-time <t>
 ```
+
+Änderung nach D93: `admin-rotate`, `succeed --compromised` und `revoke` sind neu (2.3, „Widerruf von Plattformgenerationen“). `succeed --compromised` erzeugt die neue Identitätsgeneration mit Feld 7 für die kompromittierte. `revoke` erzeugt einen neuen Pin derselben Identitätsgeneration mit Feld 7 für eine Admin- oder Ingest-Generation. `<n>` und `<t>` sind Größe und Zeit des vorher abgelesenen Kopfes, so geschrieben, wie der Kopf sie zeigt (`<t>` in Millisekunden seit 1970 UTC); die Zeremonie setzt `revoked_at_time` = `<t>` + 1 ms. Die übrigen Optionen stehen im Usage-Text von `gomail-ceremony` und in RUNBOOK 7.3: `--pin` und `--out` bei allen dreien, bei `admin-rotate` wie bei `ingest-rotate` auch `--gen`, `--keys` und `--valid-from`.
 
 ### 9.3 Pakete
 
@@ -842,7 +868,7 @@ gomail-ceremony reshare
 - Baumkopf, der keine Fortsetzung des zuletzt gesehenen ist
 - Löschung einer Epoche: Clients entfernen zwischengespeicherte Schlüssel, Mails und Indexteile
 - zurückgespielte Metadaten mit älterer Version
-- Signatur einer kompromittierten Ingest- oder Identitätsgeneration
+- Signatur einer kompromittierten Ingest- oder Identitätsgeneration (Änderung nach D93: „kompromittiert“ heißt widerrufen über Pin-Feld 7, mit den Grenzen aus 2.3, „Widerruf von Plattformgenerationen“)
 
 **Fuzzing** mit `go test -fuzz` für den `.gml`-Parser, den SMTP-Parser und das Einlesen von Shamir-Anteilen.
 
