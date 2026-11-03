@@ -276,3 +276,14 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 
 ## Flake aus dem Volllauf 20e
 - `cmd/gomail-ceremony` `TestPTYPromptBlocked` (race, ohne Tags): „no exit within 4.5s of share 1, prompt not shown“ (Fall vermutlich `ABA`/`ABC` mit voll/angehaltenem stderr). Code der Zeremonie seit 20b unverändert, dort grün; Wiederholung einmal grün (401,8 s). Protokoll: Scratchpad `orch/fr-20e/flake1/`. → 20: `stuckLimit` unter race prüfen (Zeitgrenze des Tests oder echte Verzögerung des Abbruchpfads unter Last); bei erneutem Auftreten als Fund behandeln.
+
+### Fuzzing, dritter Teil (auf d85da00, nach 20e; `translog/files.go` geändert)
+- 5 Ziele in `translog`, je 10 Minuten, zwei Bahnen: alle ohne Fund. `store` ist seit 20b nur im Kommentar geändert; der zweite Teil gilt dort weiter. Protokolle: Scratchpad `orch/fz3/`.
+
+| Paket | Ziel | Ausführungen in 10 min |
+|---|---|---|
+| `internal/translog` | `FuzzAuditIndex` | 1.656.812 |
+| `internal/translog` | `FuzzDecodeEntry` | 6.272.210 |
+| `internal/translog` | `FuzzOpenHead` | 6.272.278 |
+| `internal/translog` | `FuzzParseHeadText` | 6.436.659 |
+| `internal/translog` | `FuzzProofs` | 4.849.422 |

@@ -218,3 +218,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - 20e: Spezifikations- und Angreiferprüfung ohne Funde über niedrig (Niedrige an 20h). Merge nach dem Volllauf auf 20e (enthält 20b).
 - **20b zusammengeführt** (Volllauf auf cb2344c: 67 Schritte grün; die zwei `client`-Schritte nach Abbruch an der 40-Minuten-Grenze unter Last einmal mit 60 Minuten wiederholt und grün). D86 Nachtrag 20b, AUDIT R33 und R41 nachgeführt.
 - **20e zusammengeführt** (Volllauf auf b2032d5: 67 Schritte grün; `TestPTYPromptBlocked` scheiterte einmal unter race an seiner 4,5-s-Grenze, Code unverändert seit 20b, Wiederholung grün; notiert für 20). D86 und D91 Nachtrag 20e, AUDIT R33/R41.
+- Fuzzing `translog` auf d85da00 (nach 20e) wiederholt: 5 Ziele je 10 Minuten ohne Fund. 20h läuft.
