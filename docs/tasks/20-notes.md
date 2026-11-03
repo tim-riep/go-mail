@@ -329,3 +329,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus der Prüfung von 20m (nach Nacharbeit keine Funde über niedrig)
 - Erste Prüfung: hoch (CPU-verbrauchender Fehler im Abbruchpfad wurde als Stillstand übersprungen) und mittel (Selbst-Anhalten als Stillstand); Nacharbeit: Run-Queue-Wartezeit zählt nur bei höchstens 500 ms eigener CPU-Zeit, Zustand T nur mit Stopp des Tests; Mutanten spin/selfstop/sleep scheitern wieder.
 - Restgrenzen (niedrig): ein Fehler, der auf einem Thread kreist und bei starker Überlast unter 11 % (4,5-s-Fenster) bzw. 25 % (2-s-Fenster) eines Kerns bekommt, gilt als Stillstand; ein Programm, das ein Terminal über 500 ms ununterbrochen flutet, vergrößert die Leselücke (vt-Poller in der inneren Leseschleife); CPU-Zeit beendeter Threads fehlt; unter Last 3–5 sammelt ein hängendes Programm 50–300 ms Run-Queue-Wartezeit. Jeder Skip dieser Tests ist im Abnahmelauf zu prüfen (`-v`, Thread-Dump).
+
+## Aus 20p (für einen späteren Code-Auftrag)
+- Kommentar „checks, in this order“ in `cmd/gomail-server/main.go:28` nennt die Serversperre vor den Zertifikatsprüfungen; `ingest.New` nimmt sie danach (RUNBOOK 1.6 stimmt). Triage Nr. 148 ist insoweit falsch.
+- `--log-listen` nur loopback (außer `--isolated-test-network`, das auch SMTP öffnet): Zeuge auf anderer Maschine nur per SSH-Tunnel (RUNBOOK 0.1/1.7, nicht getestet; AUDIT R47). Nach M1: eigener Schalter nur für das Log oder TLS.
