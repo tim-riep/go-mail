@@ -235,7 +235,8 @@ type tenv struct {
 	t      testing.TB
 	st     *store.Store
 	p      *tplat
-	idGen  uint32 // identity generations of the pin
+	idGen  uint32    // identity generations of the pin
+	rev    []Revoked // pin field 7 (D93)
 	ws     []twit
 	min    int
 	op     Operator
@@ -279,7 +280,7 @@ const hour = int64(time.Hour / time.Millisecond)
 
 func (e *tenv) openOp() Operator {
 	e.t.Helper()
-	l, err := Open(Options{Store: e.st, Identities: e.p.ids(e.t, e.idGen), Known: e.known()})
+	l, err := Open(Options{Store: e.st, Identities: e.p.ids(e.t, e.idGen), Revoked: e.rev, Known: e.known()})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -381,7 +382,7 @@ func (e *tenv) verifier() *Verifier {
 	}
 	ids := e.p.ids(e.t, e.idGen)
 	return &Verifier{Origin: testOrigin, Witnesses: wv, MinWitnesses: e.min, Identity: ids[len(ids)-1], Identities: ids,
-		Now: func() time.Time { return e.now }}
+		Revoked: e.rev, Now: func() time.Time { return e.now }}
 }
 
 // client opens a client log with a fresh Verifier and audit index.

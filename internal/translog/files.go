@@ -1,6 +1,7 @@
 package translog
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -214,6 +215,29 @@ func (f *files) newestHeadSize() (int64, error) {
 			return 0, logErr("heads", err)
 		}
 	}
+}
+
+// moveHeadAside moves heads/<size>.sig, whose content has the SHA-256
+// sum sum, to RevokedHeadPath(size, sum) and returns that path (RepairTree
+// step 5, ErrRevokedHead). The copy is created exclusively and synced
+// before the original is removed, so a crash leaves the head in one place
+// at least; a copy that exists already holds the same bytes (its name
+// is their sum) and is checked. A file whose content changed since the
+// repair judged it is ErrConsistency, and nothing is moved.
+func (f *files) moveHeadAside(size int64, sum [32]byte) (string, error) {
+	src := f.path(HeadPath(size))
+	data, err := store.ReadFileLimited(src, MaxHeadNote)
+	if err != nil {
+		return "", logErr("revoked head", err)
+	}
+	if sha256.Sum256(data) != sum {
+		return "", fmt.Errorf("%w: heads/%d.sig changed during the repair", ErrConsistency, size)
+	}
+	rel := RevokedHeadPath(size, sum)
+	if err := f.createOrSame(rel, data, MaxHeadNote); err != nil {
+		return "", err
+	}
+	return rel, logErr("revoked head", store.RemoveDurable(src))
 }
 
 // readKeyFile returns the index stored in the key file of k, or -1.

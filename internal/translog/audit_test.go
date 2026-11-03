@@ -135,7 +135,7 @@ func TestAuditIndex(t *testing.T) {
 		"invalid":    mutate(func(m map[string]any) { m["invalid"] = []any{map[string]any{"i": 99, "err": "x"}} }),
 	}
 	for name, b := range cases {
-		if _, err := unmarshalState(b, nil, nil); !errors.Is(err, ErrConsistency) {
+		if _, err := unmarshalState(b, nil, nil, nil); !errors.Is(err, ErrConsistency) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if err := os.WriteFile(idx, b, 0o600); err != nil {
@@ -145,7 +145,7 @@ func TestAuditIndex(t *testing.T) {
 			t.Fatalf("%s: not rebuilt: %v", name, err)
 		}
 	}
-	if _, err := unmarshalState(make([]byte, MaxIndexFile+1), nil, nil); !errors.Is(err, ErrConsistency) {
+	if _, err := unmarshalState(make([]byte, MaxIndexFile+1), nil, nil, nil); !errors.Is(err, ErrConsistency) {
 		t.Fatal("index too large")
 	}
 	t.Run("keys", testIndexKeys)
@@ -184,7 +184,7 @@ func testIndexKeys(t *testing.T) {
 		if err := os.WriteFile(idx, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := unmarshalState(b, nil, nil); !errors.Is(err, ErrConsistency) {
+		if _, err := unmarshalState(b, nil, nil, nil); !errors.Is(err, ErrConsistency) {
 			t.Fatalf("index with contradicting keys accepted: %v", err)
 		}
 	}
@@ -228,7 +228,7 @@ func testIndexKeys(t *testing.T) {
 	}
 	write2 := func(f func(s *state)) *fileLog {
 		t.Helper()
-		st, err := unmarshalState(data, nil, nil)
+		st, err := unmarshalState(data, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

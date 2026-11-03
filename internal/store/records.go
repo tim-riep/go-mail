@@ -499,7 +499,9 @@ func safeRel(p string) bool {
 
 // ------------------------------------------------- platform keys and pins
 
-// Role of a platform key file.
+// Role of a platform key file and of a revoked generation in pin field 7
+// (PlatformRevoked, D93 (1)). The values are fixed: identity 0, admin 1,
+// ingest 2 (keys.RoleAdmin, keys.RoleIngest).
 const (
 	KeyRoleIdentity uint8 = 0
 	KeyRoleAdmin          = uint8(keys.RoleAdmin)
@@ -545,8 +547,8 @@ func DecodePlatformKey(data []byte) (role uint8, gen uint32, priv ed25519.Privat
 const (
 	// MaxPinFile is the read limit for identity-<gen>.pin
 	// (ReadPlatformPin): the largest pin of fields 1 to 6 and 8 takes about
-	// 23 KiB, and the limit leaves room for field 7 should Q8 be decided as
-	// proposed (translog.MaxRevoked).
+	// 23 KiB, and with MaxPinRevoked elements in field 7 (D93) about 61
+	// KiB (translog TestPinSize).
 	MaxPinFile = 64 << 10
 	// MaxPinWitnesses is the most witnesses of a pin
 	// (translog.MaxWitnesses).
@@ -556,6 +558,9 @@ const (
 	// MaxPinIdentities is the longest identity list of a pin
 	// (translog.MaxIdentities).
 	MaxPinIdentities = 256
+	// MaxPinRevoked is the most elements of field 7 of a pin
+	// (translog.MaxRevoked, D93 (1)).
+	MaxPinRevoked = 2 * MaxPinIdentities
 )
 
 // logSignerName is the note name of the log key (translog.LogSignerName);
@@ -579,6 +584,20 @@ var PlatformIdentitySchema = rec.MustSchema("gomail/v1/rec/platform-identity",
 	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
 )
 
+// PlatformRevokedSchema is one revoked platform key generation in field 7
+// of a pin (D93 (1), translog doc.go "Pin"): its role (KeyRoleIdentity,
+// KeyRoleAdmin or KeyRoleIngest), its generation, the log size from which
+// on what the generation issues or concerns is invalid (revoked_at_size)
+// and the time in milliseconds from which on its signatures over
+// metadata and heads are invalid (revoked_at_time). Both come from a
+// witness-confirmed head the operator reads before the ceremony.
+var PlatformRevokedSchema = rec.MustSchema("gomail/v1/rec/platform-revoked",
+	rec.Field{Num: 1, Name: "role", Kind: rec.U8, Required: true},
+	rec.Field{Num: 2, Name: "gen", Kind: rec.U32, Required: true},
+	rec.Field{Num: 3, Name: "revoked_at_size", Kind: rec.I64, Required: true},
+	rec.Field{Num: 4, Name: "revoked_at_time", Kind: rec.I64, Required: true},
+)
+
 // PlatformPinSchema is the platform identity a client trusts (2.3, "im
 // Client hinterlegt") and the anchor of the transparency log (Q4,
 // translog doc.go "Pin"):
@@ -589,14 +608,12 @@ var PlatformIdentitySchema = rec.MustSchema("gomail/v1/rec/platform-identity",
 //	4 origin         the log origin (CheckPinOrigin)
 //	5 witnesses      the pinned witnesses (WitnessSchema), unique names and keys
 //	6 min_witnesses  quorum: 1 <= min <= len(witnesses), 2*min > len(witnesses)
+//	7 revoked        optional: revoked generations (PlatformRevokedSchema, CheckPinRevoked)
 //	8 identities     every identity generation from 1 to gen (PlatformIdentitySchema)
 //
-// Field 7 (revoked) is not part of the schema: TODO(ask), Q8 is open. If
-// Q8 is decided as proposed, field 7 is an optional list of
-// gomail/v1/rec/platform-revoked (1 role u8, 2 gen u32, 3 revoked_at_size
-// i64, proposed 4 revoked_at_time i64) with at most translog.MaxRevoked
-// elements, so that the largest pin stays below MaxPinFile. Until then a
-// pin with field 7 is rejected like any unknown field.
+// Field 7 (D93 (1)) is optional and never encoded empty: a pin without
+// revoked generations has no field 7 and keeps the encoding it had before
+// D93 byte for byte; a pin with a present but empty field 7 is refused.
 var PlatformPinSchema = rec.MustSchema("gomail/v1/rec/platform-pin",
 	rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
 	rec.Field{Num: 2, Name: "pub", Kind: rec.Bytes, Size: ed25519.PublicKeySize, Required: true},
@@ -604,6 +621,7 @@ var PlatformPinSchema = rec.MustSchema("gomail/v1/rec/platform-pin",
 	rec.Field{Num: 4, Name: "origin", Kind: rec.String, MaxLen: MaxOrigin, Required: true},
 	rec.Field{Num: 5, Name: "witnesses", Kind: rec.List, Elem: WitnessSchema, MaxCount: MaxPinWitnesses, Required: true},
 	rec.Field{Num: 6, Name: "min_witnesses", Kind: rec.U32, Required: true},
+	rec.Field{Num: 7, Name: "revoked", Kind: rec.List, Elem: PlatformRevokedSchema, MaxCount: MaxPinRevoked},
 	rec.Field{Num: 8, Name: "identities", Kind: rec.List, Elem: PlatformIdentitySchema, MaxCount: MaxPinIdentities, Required: true},
 )
 
@@ -619,6 +637,21 @@ type PlatformIdentity struct {
 	Pub ed25519.PublicKey
 }
 
+// PlatformRevoked is a revoked platform key generation (pin field 7,
+// D93): Role is KeyRoleIdentity, KeyRoleAdmin or KeyRoleIngest, AtSize
+// the log size revoked_at_size and AtTime the time revoked_at_time in
+// milliseconds since 1970 UTC. What the generation issues or concerns
+// from log index AtSize on, and what it signs with a time from AtTime
+// on, is invalid; for an identity generation also what the admin and
+// ingest generations it certified do from then on (translog doc.go
+// "Platform generations").
+type PlatformRevoked struct {
+	Role   uint8
+	Gen    uint32
+	AtSize int64
+	AtTime int64
+}
+
 // PlatformPin is a trusted platform identity together with the anchor of
 // the transparency log.
 type PlatformPin struct {
@@ -628,9 +661,61 @@ type PlatformPin struct {
 	Origin       string
 	Witnesses    []Witness
 	MinWitnesses int
+	// Revoked lists the revoked platform generations (field 7) in the
+	// canonical order of CheckPinRevoked; empty for a pin without field
+	// 7.
+	Revoked []PlatformRevoked
 	// Identities lists every identity generation from 1 to Gen in
 	// ascending order; the last element is (Gen, Pub).
 	Identities []PlatformIdentity
+}
+
+// FindRevoked returns the element of field 7 for (role, gen) and whether
+// there is one.
+func (p *PlatformPin) FindRevoked(role uint8, gen uint32) (PlatformRevoked, bool) {
+	for _, r := range p.Revoked {
+		if r.Role == role && r.Gen == gen {
+			return r, true
+		}
+	}
+	return PlatformRevoked{}, false
+}
+
+// CheckPinRevoked checks field 7 of a pin of identity generation gen
+// (D93 (1), translog.CheckRevoked): at most MaxPinRevoked elements; every
+// role KeyRoleIdentity, KeyRoleAdmin or KeyRoleIngest; every generation
+// at least 1, and an identity generation below gen (a pin cannot revoke
+// its own current identity, and a revoked identity generation is always
+// in its identity list); revoked_at_size from 1 to MaxCheckpointSize
+// (the size of a signed head) and revoked_at_time not negative; the
+// elements in strictly ascending order of (role, gen), which also
+// excludes two elements for one generation. An empty list is valid (a
+// pin without field 7).
+func CheckPinRevoked(list []PlatformRevoked, gen uint32) error {
+	if len(list) > MaxPinRevoked {
+		return fmt.Errorf("%w: %d revoked generations", ErrRecord, len(list))
+	}
+	for i, r := range list {
+		switch {
+		case r.Role > KeyRoleIngest:
+			return fmt.Errorf("%w: revoked generation of an unknown role", ErrRecord)
+		case r.Gen == 0:
+			return fmt.Errorf("%w: revoked generation 0", ErrRecord)
+		case r.Role == KeyRoleIdentity && r.Gen >= gen:
+			return fmt.Errorf("%w: the pin revokes its own or a later identity generation", ErrRecord)
+		case r.AtSize < 1 || r.AtSize > MaxCheckpointSize:
+			return fmt.Errorf("%w: revoked_at_size out of range", ErrRecord)
+		case r.AtTime < 0:
+			return fmt.Errorf("%w: revoked_at_time out of range", ErrRecord)
+		}
+		if i > 0 {
+			p := list[i-1]
+			if p.Role > r.Role || p.Role == r.Role && p.Gen >= r.Gen {
+				return fmt.Errorf("%w: revoked generations not in canonical order or repeated", ErrRecord)
+			}
+		}
+	}
+	return nil
 }
 
 // CheckPinOrigin reports whether o is a valid log origin: 1 to
@@ -747,6 +832,9 @@ func (p *PlatformPin) check() error {
 	if err := CheckWitnesses(p.Witnesses, p.MinWitnesses); err != nil {
 		return err
 	}
+	if err := CheckPinRevoked(p.Revoked, p.Gen); err != nil {
+		return err
+	}
 	return CheckPinIdentities(p.Identities, p.Gen, p.Pub)
 }
 
@@ -768,13 +856,24 @@ func (p *PlatformPin) Encode() ([]byte, error) {
 	for _, id := range p.Identities {
 		ids = append(ids, rec.New(PlatformIdentitySchema).SetU32(1, id.Gen).SetBytes(2, id.Pub))
 	}
-	return rec.New(PlatformPinSchema).SetU32(1, p.Gen).SetBytes(2, p.Pub).SetU8(3, dev).
-		SetString(4, p.Origin).SetList(5, ws).SetU32(6, uint32(p.MinWitnesses)).SetList(8, ids).Encode()
+	r := rec.New(PlatformPinSchema).SetU32(1, p.Gen).SetBytes(2, p.Pub).SetU8(3, dev).
+		SetString(4, p.Origin).SetList(5, ws).SetU32(6, uint32(p.MinWitnesses)).SetList(8, ids)
+	if len(p.Revoked) > 0 {
+		// An empty field 7 is never encoded (canonical form): a pin
+		// without revoked generations keeps its encoding byte for byte.
+		rv := make([]*rec.Record, 0, len(p.Revoked))
+		for _, x := range p.Revoked {
+			rv = append(rv, rec.New(PlatformRevokedSchema).SetU8(1, x.Role).SetU32(2, x.Gen).SetI64(3, x.AtSize).SetI64(4, x.AtTime))
+		}
+		r.SetList(7, rv)
+	}
+	return r.Encode()
 }
 
 // DecodePlatformPin decodes a pin strictly: the dev flag 0 or 1, a valid
 // origin, a witness list with unique names and keys and an admissible
-// quorum (CheckWitnesses, translog doc.go "Witness quorum"), and an
+// quorum (CheckWitnesses, translog doc.go "Witness quorum"), field 7
+// absent or a non-empty list that passes CheckPinRevoked, and an
 // identity list that passes CheckPinIdentities.
 func DecodePlatformPin(data []byte) (*PlatformPin, error) {
 	r, err := rec.Decode(PlatformPinSchema, data)
@@ -787,6 +886,17 @@ func DecodePlatformPin(data []byte) (*PlatformPin, error) {
 	p := &PlatformPin{Gen: r.U32(1), Pub: ed25519.PublicKey(r.Bytes(2)), Dev: r.U8(3) == 1, Origin: r.String(4), MinWitnesses: int(r.U32(6))}
 	for _, e := range r.List(5) {
 		p.Witnesses = append(p.Witnesses, Witness{Name: e.String(1), Pub: ed25519.PublicKey(e.Bytes(2))})
+	}
+	if r.Has(7) {
+		// An empty list is never encoded (canonical form).
+		list := r.List(7)
+		if len(list) == 0 {
+			return nil, fmt.Errorf("%w: empty list of revoked generations", ErrRecord)
+		}
+		p.Revoked = make([]PlatformRevoked, 0, len(list))
+		for _, e := range list {
+			p.Revoked = append(p.Revoked, PlatformRevoked{Role: e.U8(1), Gen: e.U32(2), AtSize: e.I64(3), AtTime: e.I64(4)})
+		}
 	}
 	for _, e := range r.List(8) {
 		p.Identities = append(p.Identities, PlatformIdentity{Gen: e.U32(1), Pub: ed25519.PublicKey(e.Bytes(2))})

@@ -61,8 +61,12 @@ type Operator interface {
 	//     never signed); no entries/<n+1>.rec and no head in heads/ above
 	//     n (ErrConsistency: tree.rec rolled back, task 03d finding 3);
 	//  2. the base is the newest published head (heads/, its text taken
-	//     from the lines that verify with a logged ingest key; a file
-	//     without such a line is ErrConsistency) or, when larger, the
+	//     from the lines that verify with a logged ingest key that the
+	//     pin does not revoke at the head's time; a file without such a
+	//     line is ErrConsistency, and ErrRevokedHead, naming the file,
+	//     when its log signature verifies only with an ingest generation
+	//     the pin revokes for it, D93: "gomail-server log repair" moves
+	//     it aside, doc.go "Platform generations") or, when larger, the
 	//     last head this process signed; the committed tree must extend
 	//     both (root hash of their size, ErrConsistency) and now must not
 	//     lie before their times (ErrHead: the server's clock went back);
@@ -118,7 +122,8 @@ type Operator interface {
 	// same rule as Verifier.CheckHead), the cosignatures with
 	// Options.Witnesses; the quorum counts distinct witnesses
 	// (Options.MinWitnesses). A stored head of the same size whose lines
-	// do not give a log signature over a head text is ErrConsistency.
+	// do not give a log signature over a head text is ErrConsistency
+	// (ErrRevokedHead as for SignHead step 2).
 	PublishHead(h *Head) error
 
 	// LogKeys returns a LogKey for every valid ingest certificate of the
@@ -186,6 +191,18 @@ type Options struct {
 	//   - ceremony (Publish): the whole identity list of
 	//     PublishOptions.Pin.
 	Identities []Identity
+	// Revoked is the revocation list of the operator's pin (field 7,
+	// D93, CheckRevoked against the last generation of Identities; ErrPin
+	// at Open): with Identities the anchor of the validity rules of an
+	// operator log, so that server, ceremony and clients with the same
+	// pin judge every entry alike, and the bound of the ingest
+	// generations SignHead and PublishHead accept (LogKey.Covers, also
+	// through the identity generation that issued the certificate) and
+	// of the heads they and RepairTree accept in heads/ (ErrRevokedHead).
+	// Empty
+	// for a pin without field 7. Ignored for a client log, whose list is
+	// Verifier.Revoked from its pin.
+	Revoked []Revoked
 	// IndexFile is the audit index of a client log (doc.go "Audit"): a
 	// file in the client directory, never in the data directory. Open
 	// resolves the symbolic links of its directory, which must exist,

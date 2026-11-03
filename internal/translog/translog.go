@@ -132,7 +132,12 @@ type Log interface {
 	// admin_gen, which is included as a platform entry logged before it,
 	// verifies against the pinned identity list and has valid_from <=
 	// the assignment's valid_from (validity rules, the entry is skipped
-	// otherwise).
+	// otherwise; so is an assignment of an admin generation the pin
+	// revokes at its index, D93 (2)). Admin supersession (D93 (3)): when
+	// admin-<admin_gen+1>.cert is valid in the reference tree, the
+	// assignment in force must have a valid_from before that
+	// certificate's valid_from (ErrOrder otherwise; there is no fallback
+	// to an older assignment).
 	//
 	// Reading (task 03b finding S7, task 03c finding 4): 2.3 says "zum
 	// Zeitpunkt des Empfangs zugeordnet"; the assignment in force at a
@@ -159,20 +164,30 @@ type Log interface {
 	// name exactly the list's key (ErrMismatch otherwise: the log
 	// contradicts the pin, task 03c finding 3, Reading).
 	//
-	// Only if Q8 is decided as proposed: the pin's field 7 does not list
-	// the generation of the certified key or of the issuing identity as
-	// compromised (ErrMismatch). TODO(ask), Q8: the specification has no
-	// record by which a compromised ingest or admin generation is
-	// revoked; until Q8 is decided the pin has no field 7 and this part
-	// checks nothing (doc.go "Pin", Revoked).
+	// Revocation (pin field 7, D93 (2)): a certificate or succession
+	// that the pin's revocation list makes invalid at its index (issued
+	// by a revoked identity generation, a succession to one, or a
+	// certificate of a revoked admin or ingest generation, at or above
+	// revoked_at_size) is not a valid entry: CheckPlatform reports it as
+	// for any invalid entry (ErrNotInLog, or ErrPending beyond the
+	// reference head); Verifier.IsRevoked tells the caller whether the
+	// pin names the generation at all. One logged before revoked_at_size
+	// stays valid.
 	//
-	// Rule for the caller, strictest reading without Q8 (doc.go
-	// "Platform generations"): CheckPlatform does not know the receipt
-	// time. A caller that verifies an ingest signature of generation g
-	// on metadata additionally requires, once ingest-<g+1>.cert is a
-	// valid included entry (Lookup(KindPlatform, "ingest-<g+1>.cert")),
-	// that the receipt time lies before that certificate's valid_from
-	// (ErrMismatch otherwise; task 14, client/read.go ingestKeyFor).
+	// Rule for the caller (doc.go "Platform generations"): CheckPlatform
+	// does not know the receipt time. A caller that verifies an ingest
+	// signature of generation g on metadata additionally requires, once
+	// ingest-<g+1>.cert is a valid included entry (Lookup(KindPlatform,
+	// "ingest-<g+1>.cert")), that the receipt time lies before that
+	// certificate's valid_from (ErrMismatch otherwise; task 14,
+	// client/read.go ingestKeyFor), and, when the pin revokes g, that it
+	// lies before revoked_at_time, and so when the pin revokes the
+	// identity generation k that issued ingest-<g>.cert
+	// (Verifier.RevokedCertAtTime(store.KeyRoleIngest, g, k, receipt
+	// time) false; D93 (2) and its addendum, task 21b). A certificate
+	// that a revoked identity generation issued before its
+	// revoked_at_size stays valid here; the generation it certifies acts
+	// no more from the boundaries on (doc.go "Platform generations").
 	CheckPlatform(name string, data []byte) error
 	// CheckFresh verifies that the last verified tree head with witness
 	// signature is at most 24 hours old (2.3, 2.7).

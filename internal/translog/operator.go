@@ -3,6 +3,7 @@ package translog
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -92,6 +93,8 @@ func (e *InvalidEntriesError) Unwrap() error {
 		return ErrPrerequisite
 	case "duplicate":
 		return ErrDuplicate
+	case "revoked":
+		return ErrRevoked
 	case "order":
 		return ErrOrder
 	case "mismatch":
@@ -102,7 +105,9 @@ func (e *InvalidEntriesError) Unwrap() error {
 
 // logKeysOf returns a LogKey for every valid ingest certificate of s
 // with an index below size, judged against the tree of that size
-// (Logged, Until; doc.go "Platform generations"). For the operator s is
+// (Logged, Until) and the pin's revocation list (Revoked, RevokedAt: of
+// the generation or of the identity generation that issued its
+// certificate; doc.go "Platform generations"). For the operator s is
 // the committed tree, which may be larger than the head being judged:
 // a certificate at or above size is not in the tree of that head.
 func logKeysOf(s *state, size int64) []LogKey {
@@ -115,7 +120,7 @@ func logKeysOf(s *state, size int64) []LogKey {
 		if err != nil {
 			continue
 		}
-		k := LogKey{Gen: c.Gen, Verifier: v, ValidFrom: c.ValidFrom, Logged: true}
+		k := LogKey{Gen: c.Gen, Verifier: v, IdentityGen: c.IdentityGen, ValidFrom: c.ValidFrom, Logged: true}
 		if c.Gen < 1<<32-1 {
 			if next := s.Certs[certName(keys.RoleIngest, c.Gen+1)]; next != nil && next.Index < size {
 				k.Until = next.ValidFrom
@@ -124,6 +129,7 @@ func logKeysOf(s *state, size int64) []LogKey {
 				}
 			}
 		}
+		k.Revoked, k.RevokedAt = revokedSince(s.rev, store.KeyRoleIngest, c.Gen, c.IdentityGen)
 		out = append(out, k)
 	}
 	return out
@@ -193,20 +199,121 @@ func verifyLines(text []byte, lines [][]byte, known note.Verifiers) []note.Signa
 	return out
 }
 
-// readHead reads heads/<size>.sig and returns the head whose text the
-// lines verifying with known sign, with those lines. At least one of them
-// must be a log signature (LogSignerName); the text must be a strict head
-// text of that size with Options.Origin when that is set. Any violation
-// is ErrConsistency: a file in heads/ that is no head signed by the log
-// contradicts the committed tree (it names a size the server cannot
-// account for). Head.Note is the file as stored.
-func (l *fileLog) readHead(size int64, known note.Verifiers) (*Head, error) {
-	h, _, err := l.headLines(size, known, ErrConsistency)
-	return h, err
+// headReader reads the published heads of an operator log against the
+// state s of its committed tree (headReader.read).
+type headReader struct {
+	l    *fileLog
+	s    *state
+	keys []LogKey
+	// revoked: the verifiers of the ingest certificates that are invalid
+	// entries of class "revoked" in s, read once when needed.
+	revoked []note.Verifier
+	loaded  bool
 }
 
-// headLines is readHead with the error variable class for every
-// violation; it also returns the text of the head (ending in a newline).
+func (l *fileLog) heads(s *state) *headReader {
+	return &headReader{l: l, s: s, keys: logKeysOf(s, s.Size)}
+}
+
+// read reads heads/<size>.sig and returns the head whose text it holds
+// with the log signatures that verify (Head.Note is the file as stored).
+// The text must be a strict head text of that size with Options.Origin
+// when that is set, and at least one line must be a log signature
+// (LogSignerName) by a valid ingest certificate of s that the pin does
+// not revoke at the head's time (LogKey.Revoked and RevokedAt: its own
+// element of field 7 or that of the identity generation that issued it,
+// D93). A published head of the past may be signed by an earlier
+// generation, so valid_from and the successor's valid_from are not
+// checked here (PublishHead checked them when it wrote the file).
+//
+// A head whose log signature verifies only with an ingest generation
+// the pin revokes for it (a valid certificate revoked at the head's
+// time, or an ingest certificate that is an invalid entry of class
+// "revoked", such as one a thief issued with a revoked identity
+// generation) is ErrRevokedHead, naming the file: it does not belong to
+// the log under the current pin, and RepairTree moves it aside. Every
+// other violation is ErrConsistency: a file in heads/ that is no head
+// signed by the log contradicts the committed tree (it names a size the
+// server cannot account for).
+func (r *headReader) read(size int64) (*Head, error) {
+	l := r.l
+	msg, err := store.ReadFileLimited(l.f.path(HeadPath(size)), MaxHeadNote)
+	if err != nil {
+		return nil, fmt.Errorf("%w: heads/%d.sig: %v", ErrConsistency, size, err)
+	}
+	text, lines, err := splitNote(msg)
+	if err != nil {
+		return nil, fmt.Errorf("%w: heads/%d.sig is no signed note", ErrConsistency, size)
+	}
+	h, err := ParseHeadText(text)
+	if err != nil || h.Size != size || (l.opts.Origin != "" && h.Origin != l.opts.Origin) {
+		return nil, fmt.Errorf("%w: heads/%d.sig holds no head of this log and size", ErrConsistency, size)
+	}
+	var valid, revoked []note.Verifier
+	for _, k := range r.keys {
+		if k.Revoked && h.Time >= k.RevokedAt {
+			revoked = append(revoked, k.Verifier)
+		} else {
+			valid = append(valid, k.Verifier)
+		}
+	}
+	if sigs := verifyLines(text, lines, verifierList(valid...)); hasLogSig(sigs) {
+		h.Sigs, h.Note = sigs, msg
+		return h, nil
+	}
+	if hasLogSig(verifyLines(text, lines, verifierList(append(revoked, r.revokedCerts()...)...))) {
+		return nil, fmt.Errorf("%w: heads/%d.sig (log repair moves it to %s)", ErrRevokedHead, size, RevokedHeadsDir)
+	}
+	return nil, fmt.Errorf("%w: heads/%d.sig carries no valid log signature", ErrConsistency, size)
+}
+
+// revokedCerts returns the verifiers of the ingest certificates that are
+// invalid entries of class "revoked" in r.s. The entries are read
+// without their leaf hash: the result only decides between
+// ErrRevokedHead and ErrConsistency for a head that no valid generation
+// signed, and moving such a head aside gives a writer of log/ nothing he
+// could not have by deleting it.
+func (r *headReader) revokedCerts() []note.Verifier {
+	if r.loaded {
+		return r.revoked
+	}
+	r.loaded = true
+	for _, x := range r.s.Invalid {
+		if x.Class != "revoked" {
+			continue
+		}
+		data, err := r.l.f.readEntry(x.Index)
+		if err != nil {
+			continue
+		}
+		_, obj, err := decodeEntry(data, x.Index)
+		c, ok := obj.(*keys.PlatformCert)
+		if err != nil || !ok || c.Role != keys.RoleIngest {
+			continue
+		}
+		if v, err := NewLogVerifier(ed25519.PublicKey(c.Pub)); err == nil {
+			r.revoked = append(r.revoked, v)
+		}
+	}
+	return r.revoked
+}
+
+// hasLogSig reports whether sigs holds a signature with the log's name.
+func hasLogSig(sigs []note.Signature) bool {
+	for _, s := range sigs {
+		if s.Name == LogSignerName {
+			return true
+		}
+	}
+	return false
+}
+
+// headLines reads heads/<size>.sig for operatorHead and returns the head
+// whose text the lines verifying with known sign, with those lines, and
+// its text (ending in a newline). At least one of them must be a log
+// signature (LogSignerName); the text must be a strict head text of that
+// size with Options.Origin when that is set. Every violation wraps the
+// error variable class.
 func (l *fileLog) headLines(size int64, known note.Verifiers, class error) (*Head, []byte, error) {
 	msg, err := store.ReadFileLimited(l.f.path(HeadPath(size)), MaxHeadNote)
 	if err != nil {
@@ -258,24 +365,15 @@ func (l *fileLog) operatorHead(size int64, known note.Verifiers) (*Head, error) 
 	return h, nil
 }
 
-// logVerifiers returns the verifiers of every valid ingest certificate
-// of s, whatever the time they cover: a published head of the past may be
-// signed by an earlier generation.
-func logVerifiers(s *state) []note.Verifier {
-	var out []note.Verifier
-	for _, k := range logKeysOf(s, s.Size) {
-		out = append(out, k.Verifier)
-	}
-	return out
-}
-
-// published returns the newest published head, nil when there is none.
+// published returns the newest published head, nil when there is none
+// (headReader.read: ErrRevokedHead for a head that does not belong to
+// the log under the current pin).
 func (l *fileLog) published(s *state) (*Head, error) {
 	size, err := l.f.newestHeadSize()
 	if err != nil || size == 0 {
 		return nil, err
 	}
-	return l.readHead(size, verifierList(logVerifiers(s)...))
+	return l.heads(s).read(size)
 }
 
 // extends checks that the committed tree has the root b.Hash at size
@@ -564,7 +662,7 @@ func (o *operatorLog) PublishHead(h *Head) error {
 		return fmt.Errorf("%w: a larger head is published", ErrConsistency)
 	}
 	if newest > 0 {
-		prev, err := l.readHead(newest, verifierList(logVerifiers(cur)...))
+		prev, err := l.heads(cur).read(newest)
 		if err != nil {
 			return err
 		}
@@ -618,17 +716,23 @@ func (o *operatorLog) PublishHead(h *Head) error {
 // opts.Store from the entries and the signed heads (doc.go "What write
 // access to log/ gives an attacker", task 03d finding 3, task 07 finding
 // Q10 (4); an operator action of task 11, "gomail-server log repair").
-// It needs the operator's options (Verifier nil, Identities of the pin;
-// Origin, when set, is required of every head) and works without Open,
+// It needs the operator's options (Verifier nil, Identities and Revoked
+// of the pin; Origin, when set, is required of every head) and works
+// without Open,
 // which refuses exactly the damaged logs it repairs. Under log/lock:
 //
 //  1. m is the largest size for which entries/0.rec to entries/<m-1>.rec
 //     exist and decode (DecodeEntry); the entries are replayed with the
 //     validity rules as Open does;
 //  2. every heads/<s>.sig must carry a valid log signature by an ingest
-//     certificate that is a valid entry of the log, with s <= m and the
-//     root hash of size s recomputed from the entries (ErrConsistency
-//     otherwise: the entries do not hold what the server signed);
+//     certificate that is a valid entry of the log and that the pin does
+//     not revoke at the head's time, with s <= m and the root hash of
+//     size s recomputed from the entries (ErrConsistency otherwise: the
+//     entries do not hold what the server signed). A head that field 7
+//     of the pin makes foreign (ErrRevokedHead, headReader.read: signed
+//     only by an ingest generation the pin revokes for it, D93) is no
+//     head of the log under the pin: it is noted for step 5 and not
+//     checked further;
 //  3. a tree.rec that can be read and names a size above m is
 //     ErrConsistency: entries below the committed size are missing, and
 //     a smaller tree.rec would drop committed entries for good;
@@ -641,9 +745,13 @@ func (o *operatorLog) PublishHead(h *Head) error {
 //     gives an attacker"); then he repairs again. An orphan at m alone
 //     would not stop the log (the next Append removes it as a
 //     leftover); it is reported all the same (task 15d names i >= m);
-//  5. it writes the tiles of tlog.NewTiles(8, 0, m) (a tile with other
-//     bytes is replaced), the key file of every valid entry and then
-//     tree.rec with m and the recomputed root hash.
+//  5. it moves every head noted in step 2 to RevokedHeadsDir
+//     (files.moveHeadAside: copied under the name
+//     RevokedHeadPath(s, SHA-256 of the file), then removed from heads/;
+//     RepairTreeResult reports them), writes the tiles of
+//     tlog.NewTiles(8, 0, m) (a tile with other bytes is replaced), the
+//     key file of every valid entry and then tree.rec with m and the
+//     recomputed root hash.
 //
 // Steps 1 to 4 write no file: only missing directories of log/ and the
 // lock file log/lock (taken for the whole repair, store.LockPath creates
@@ -658,6 +766,34 @@ func (o *operatorLog) PublishHead(h *Head) error {
 // it and the entries after it are orphans (step 4). The hashes of the
 // whole tree are held in memory (about 64 bytes per entry).
 func RepairTree(opts Options) error {
+	_, err := RepairTreeResult(opts)
+	return err
+}
+
+// RepairResult reports what RepairTreeResult changed beyond tree.rec,
+// the tiles and keys/.
+type RepairResult struct {
+	// RevokedHeads are the files moved out of heads/ (step 2 and 5 of
+	// RepairTree: ErrRevokedHead), in the order of the repair.
+	RevokedHeads []MovedHead
+}
+
+// MovedHead is a file RepairTree moved: From is log/heads/<size>.sig,
+// To its place under RevokedHeadsDir (RevokedHeadPath), both relative to
+// the data directory with "/".
+type MovedHead struct {
+	From, To string
+}
+
+// RepairTreeResult is RepairTree and also reports the heads it moved
+// aside, so that the operator command can name them.
+func RepairTreeResult(opts Options) (RepairResult, error) {
+	var res RepairResult
+	err := repairTree(opts, &res)
+	return res, err
+}
+
+func repairTree(opts Options, res *RepairResult) error {
 	if opts.Store == nil {
 		return fmt.Errorf("%w: no data directory", ErrConsistency)
 	}
@@ -670,12 +806,15 @@ func RepairTree(opts Options) error {
 	if err := CheckIdentities(opts.Identities, opts.Identities[len(opts.Identities)-1]); err != nil {
 		return err
 	}
+	if err := CheckRevoked(opts.Revoked, opts.Identities[len(opts.Identities)-1].Gen); err != nil {
+		return err
+	}
 	if opts.Origin != "" {
 		if err := checkOrigin(opts.Origin); err != nil {
 			return err
 		}
 	}
-	l := &fileLog{st: opts.Store, f: &files{root: opts.Store.Root}, opts: opts, ids: opts.Identities}
+	l := &fileLog{st: opts.Store, f: &files{root: opts.Store.Root}, opts: opts, ids: opts.Identities, rev: opts.Revoked}
 	for _, d := range []string{Dir, EntriesDir, TilesDir, HeadsDir, KeysDir} {
 		if err := store.MkdirAll(l.f.path(d)); err != nil {
 			return logErr(d, err)
@@ -687,7 +826,7 @@ func RepairTree(opts Options) error {
 	}
 	defer unlock()
 	// 1. entries
-	s := newState(l.f, l.ids)
+	s := newState(l.f, l.ids, l.rev)
 	var hashes []tlog.Hash
 	rd := combReader(l.f.reader(treeState{}), 0, &hashes)
 	m := int64(0)
@@ -712,12 +851,25 @@ func RepairTree(opts Options) error {
 		}
 	}
 	// 2. heads
-	known := verifierList(logVerifiers(s)...)
+	heads := l.heads(s)
+	type aside struct {
+		size int64
+		sum  [32]byte
+	}
+	var revoked []aside
 	err = l.eachHead(func(size int64) error {
 		if size > m {
 			return fmt.Errorf("%w: heads/%d.sig is beyond the %d entries that exist and decode", ErrConsistency, size, m)
 		}
-		h, err := l.readHead(size, known)
+		h, err := heads.read(size)
+		if errors.Is(err, ErrRevokedHead) {
+			data, rerr := store.ReadFileLimited(l.f.path(HeadPath(size)), MaxHeadNote)
+			if rerr != nil {
+				return logErr("revoked head", rerr)
+			}
+			revoked = append(revoked, aside{size: size, sum: sha256.Sum256(data)})
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -741,7 +893,15 @@ func RepairTree(opts Options) error {
 	if err := l.f.orphans(m); err != nil {
 		return err
 	}
-	// 5. tiles, keys, tree.rec
+	// 5. heads that do not belong to the log under the pin, tiles, keys,
+	// tree.rec
+	for _, a := range revoked {
+		to, err := l.f.moveHeadAside(a.size, a.sum)
+		if err != nil {
+			return err
+		}
+		res.RevokedHeads = append(res.RevokedHeads, MovedHead{From: HeadPath(a.size), To: to})
+	}
 	for _, t := range tlog.NewTiles(TileHeight, 0, m) {
 		data, err := tlog.ReadTileData(t, rd)
 		if err != nil {

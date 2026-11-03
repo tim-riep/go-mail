@@ -113,25 +113,175 @@ var (
 	ErrIO = errors.New("translog: input/output error outside the log")
 )
 
+// ErrRevoked: the entry or signature is by, or concerns, a platform
+// generation that the pin revokes (pin field 7, D93; doc.go "Platform
+// generations"): a certificate or succession issued by a revoked
+// identity generation, a certificate of a revoked admin or ingest
+// generation, or an address assignment of a revoked admin generation or
+// of an admin generation whose certificate a revoked identity generation
+// issued, at a log index at or above revoked_at_size; a head signed by
+// a revoked ingest generation, or by one whose certificate a revoked
+// identity generation issued, with a time at or after revoked_at_time.
+// It wraps ErrOrder: no later entry can repair it.
+var ErrRevoked = fmt.Errorf("%w: platform generation revoked by the pin", ErrOrder)
+
+// ErrRevokedHead: a file heads/<size>.sig holds a head of this log and
+// size whose log signature verifies only with an ingest generation that
+// the pin revokes for it (field 7, D93): an ingest certificate that is
+// invalid under the pin (class "revoked", for example one a thief issued
+// with a revoked identity generation at or above its revoked_at_size),
+// or a valid one revoked at the head's time (its own element of field 7
+// or that of the identity generation that issued it). The head does not
+// belong to the log under the current pin; clients with the pin refuse
+// it. SignHead and PublishHead report it with the file name (the server
+// alerts); RepairTree ("gomail-server log repair") moves such files to
+// RevokedHeadsDir and repairs the log (doc.go "Platform generations"). It
+// wraps ErrConsistency.
+var ErrRevokedHead = fmt.Errorf("%w: head signed only by an ingest generation the pin revokes", ErrConsistency)
+
 // Revoked names a platform key generation that a client update declared
-// compromised (2.3 "Wechsel der Identität": clients reject every
-// signature of the compromised generation from that update on). Role is
+// compromised (pin field 7, D93; 2.3 "Wechsel der Identität"). Role is
 // store.KeyRoleIdentity, store.KeyRoleAdmin or store.KeyRoleIngest.
 //
-// AtSize is the log size of the revocation (pin field 7, doc.go "Pin").
-// TODO(ask): Q8 is open, and Revoked exists only for the case that Q8 is
-// decided as proposed: then the pin carries (role, gen,
-// revoked_at_size) and, as for users (2.2 rule 4), entries with an index
-// below AtSize stay valid and metadata whose receipt time lies before
-// the head time of size AtSize stay valid; everything else signed by the
-// generation is rejected. Until Q8 is decided pins have no field 7,
-// Verifier.Revoked is empty and IsRevoked reports false for every
-// generation; no rule of this design depends on it (task 03c finding
-// 8b).
+// AtSize is revoked_at_size and AtTime revoked_at_time (ms since 1970
+// UTC), both from a witness-confirmed head the operator reads before the
+// ceremony (D93 (2)). Entries the generation issues or concerns with a
+// log index below AtSize stay valid (as for users, 2.2 rule 4), those at
+// or above it are invalid (ErrRevoked); a revoked ingest generation signs
+// heads and metadata validly only with a time before AtTime (doc.go
+// "Platform generations").
 type Revoked struct {
 	Role   uint8
 	Gen    uint32
 	AtSize int64
+	AtTime int64
+}
+
+// CheckRevoked checks the revocation list of a pin (field 7, D93 (1);
+// the rules of store.CheckPinRevoked) for the current identity
+// generation current: at most MaxRevoked elements; every role
+// store.KeyRoleIdentity, store.KeyRoleAdmin or store.KeyRoleIngest; every
+// generation at least 1, an identity generation below current (a pin
+// cannot revoke its own identity); 1 <= AtSize <= MaxTreeSize and AtTime
+// >= 0; strictly ascending (Role, Gen). An empty list is valid. Errors
+// wrap ErrPin.
+func CheckRevoked(list []Revoked, current uint32) error {
+	if len(list) > MaxRevoked {
+		return fmt.Errorf("%w: %d revoked generations", ErrPin, len(list))
+	}
+	for i, r := range list {
+		switch {
+		case r.Role > store.KeyRoleIngest:
+			return fmt.Errorf("%w: revoked generation of an unknown role", ErrPin)
+		case r.Gen == 0:
+			return fmt.Errorf("%w: revoked generation 0", ErrPin)
+		case r.Role == store.KeyRoleIdentity && r.Gen >= current:
+			return fmt.Errorf("%w: the pin revokes its own or a later identity generation", ErrPin)
+		case r.AtSize < 1 || r.AtSize > MaxTreeSize:
+			return fmt.Errorf("%w: revoked_at_size out of range", ErrPin)
+		case r.AtTime < 0:
+			return fmt.Errorf("%w: revoked_at_time out of range", ErrPin)
+		}
+		if i > 0 {
+			p := list[i-1]
+			if p.Role > r.Role || p.Role == r.Role && p.Gen >= r.Gen {
+				return fmt.Errorf("%w: revoked generations not in canonical order or repeated", ErrPin)
+			}
+		}
+	}
+	return nil
+}
+
+// FindRevoked returns the element of list for (role, gen) and whether
+// there is one.
+func FindRevoked(list []Revoked, role uint8, gen uint32) (Revoked, bool) {
+	for _, r := range list {
+		if r.Role == role && r.Gen == gen {
+			return r, true
+		}
+	}
+	return Revoked{}, false
+}
+
+// RevokedAtIndex reports whether an entry at log index index that the
+// generation (role, gen) issues or concerns is invalid by list: the
+// generation is listed and index >= its AtSize (D93 (2)). Index AtSize-1
+// is still valid, AtSize is not.
+func RevokedAtIndex(list []Revoked, role uint8, gen uint32, index int64) bool {
+	r, ok := FindRevoked(list, role, gen)
+	return ok && index >= r.AtSize
+}
+
+// RevokedAtTime reports whether a signature of the generation (role,
+// gen) over something with time t (ms; the receipt time of metadata, the
+// time of a head) is invalid by list: the generation is listed and t >=
+// its AtTime (D93 (2)). Time AtTime-1 is still valid, AtTime is not. It
+// looks at the generation's own element only; the clients' question "is
+// ingest generation g revoked at receipt time t?" also depends on the
+// identity generation that certified g and is RevokedCertAtTime.
+func RevokedAtTime(list []Revoked, role uint8, gen uint32, t int64) bool {
+	r, ok := FindRevoked(list, role, gen)
+	return ok && t >= r.AtTime
+}
+
+// RevokedCertAtIndex reports whether an action at log index index of the
+// admin or ingest generation (role, gen), whose certificate identity
+// generation issuer issued, is invalid by list: its own element revokes
+// it at index (RevokedAtIndex), or the element of the issuing identity
+// generation does (D93, addendum on task 21a: revoking identity
+// generation k at N also ends, from index N on, the actions of every
+// generation that k certified; the certificates themselves and what was
+// logged before N stay valid). The actions at a log index are the
+// address assignments of an admin generation; admin and ingest
+// generations issue no certificates or successions.
+func RevokedCertAtIndex(list []Revoked, role uint8, gen, issuer uint32, index int64) bool {
+	return RevokedAtIndex(list, role, gen, index) || RevokedAtIndex(list, store.KeyRoleIdentity, issuer, index)
+}
+
+// RevokedCertAtTime is RevokedCertAtIndex for a signature over something
+// with time t (a head, the receipt time of metadata): the generation's
+// own element or that of the issuing identity generation revokes it at t
+// (RevokedAtTime; time revoked_at_time-1 valid, revoked_at_time not).
+// For the clients' question "is ingest generation g, certified by
+// identity generation k, revoked at receipt time t?" the call is
+// RevokedCertAtTime(list, store.KeyRoleIngest, g, k, t), k the
+// identity_gen of ingest-<g>.cert.
+func RevokedCertAtTime(list []Revoked, role uint8, gen, issuer uint32, t int64) bool {
+	return RevokedAtTime(list, role, gen, t) || RevokedAtTime(list, store.KeyRoleIdentity, issuer, t)
+}
+
+// revokedSince returns whether list revokes the signatures of generation
+// (role, gen) certified by identity generation issuer at some time, and
+// the earliest such time (RevokedCertAtTime is true exactly for t at or
+// after it).
+func revokedSince(list []Revoked, role uint8, gen, issuer uint32) (bool, int64) {
+	r, own := FindRevoked(list, role, gen)
+	i, byIssuer := FindRevoked(list, store.KeyRoleIdentity, issuer)
+	switch {
+	case own && byIssuer:
+		return true, min(r.AtTime, i.AtTime)
+	case own:
+		return true, r.AtTime
+	case byIssuer:
+		return true, i.AtTime
+	}
+	return false, 0
+}
+
+// AnchorFromPin returns the identity list (pin field 8) and the
+// revocation list (pin field 7) of a decoded pin in the form of Verifier
+// and Options. The pin passed store.DecodePlatformPin or Encode, whose
+// rules equal CheckIdentities and CheckRevoked; the slices are copies.
+func AnchorFromPin(p *store.PlatformPin) ([]Identity, []Revoked) {
+	ids := make([]Identity, 0, len(p.Identities))
+	for _, id := range p.Identities {
+		ids = append(ids, Identity{Gen: id.Gen, Pub: append(ed25519.PublicKey(nil), id.Pub...)})
+	}
+	var rev []Revoked
+	for _, r := range p.Revoked {
+		rev = append(rev, Revoked{Role: r.Role, Gen: r.Gen, AtSize: r.AtSize, AtTime: r.AtTime})
+	}
+	return ids, rev
 }
 
 // Identity is a platform identity generation and its public key: the
@@ -155,21 +305,18 @@ const MaxIdentities = 256
 
 // MaxPinFile is the read limit for identity-<gen>.pin (task 07:
 // store.ReadFileLimited with this limit wherever a pin is read, client
-// and server). It covers the largest pin of the proposal, about 23 KiB
-// with MaxIdentities generations, MaxWitnesses witnesses and an origin
-// of MaxOrigin bytes, and leaves room for field 7 should Q8 be decided
-// as proposed (TestPinSize: with MaxIdentities revoked entries the pin
-// takes about 39 KiB).
+// and server). It covers the largest pin, about 23 KiB with
+// MaxIdentities generations, MaxWitnesses witnesses and an origin of
+// MaxOrigin bytes, and about 61 KiB with MaxRevoked elements in field 7
+// besides (TestPinSize).
 const MaxPinFile = 64 << 10
 
-// MaxRevoked is the most elements pin field 7 may hold, should Q8 be
-// decided as proposed (doc.go "Pin", task 07 finding Q10 (1)); until
-// then pins have no field 7 and the constant only reserves room. With
-// MaxRevoked elements of the proposed four components (role, gen,
-// revoked_at_size and the proposed revoked_at_time) the largest pin
-// stays below MaxPinFile (TestPinSize: about 61 KiB). Reading: two
-// compromised generations for each identity generation the list can
-// hold, far more than a platform ever sees.
+// MaxRevoked is the most elements pin field 7 may hold (D93 (1), doc.go
+// "Pin", task 07 finding Q10 (1); store.MaxPinRevoked). With MaxRevoked
+// elements of the four components (role, gen, revoked_at_size,
+// revoked_at_time) the largest pin stays below MaxPinFile (TestPinSize:
+// about 61 KiB). Reading: two compromised generations for each identity
+// generation the list can hold, far more than a platform ever sees.
 const MaxRevoked = 2 * MaxIdentities
 
 // CheckIdentities checks the identity list of a pin (field 8, doc.go
@@ -228,6 +375,12 @@ type LogKey struct {
 	Gen uint32
 	// Verifier is NewLogVerifier of the certified key.
 	Verifier note.Verifier
+	// IdentityGen is identity_gen of ingest-<Gen>.cert: the identity
+	// generation that issued it. For a Logged key it is that of the
+	// valid entry in the tree of the head being checked. CheckHead
+	// refuses a signature at or after revoked_at_time of that identity
+	// generation when the pin revokes it (RevokedCertAtTime, D93).
+	IdentityGen uint32
 	// ValidFrom is valid_from of ingest-<Gen>.cert (ms). TODO(Q4): the
 	// strictest reading lets a generation sign only heads with a time
 	// at or after it.
@@ -243,18 +396,27 @@ type LogKey struct {
 	// checked, 0 while there is none. The server signs with Gen+1 from
 	// then on.
 	Until int64
+	// Revoked reports that the pin revokes ingest generation Gen or the
+	// identity generation IdentityGen that issued its certificate (field
+	// 7, D93); RevokedAt is the earlier of their revoked_at_time (ms).
+	// The generation then signs only heads with a time before RevokedAt
+	// validly. Refresh and the operator log set both from the pin;
+	// Verifier.CheckHead checks the revocation against Verifier.Revoked
+	// (with Gen and IdentityGen) as well, so a LogKey built without them
+	// is not trusted on this point.
+	Revoked   bool
+	RevokedAt int64
 }
 
 // Covers reports whether k may have signed a head with time t: the
 // certificate is Logged in the tree of that head, ValidFrom <= t
-// (valid_from reached) and, with Until set, t < Until (not superseded
-// by its successor). Revocation (only if Q8) is checked separately
-// (Verifier.IsRevoked). For a given tree at most one generation covers
-// any time t, because the intervals [ValidFrom, Until) of consecutive
-// generations do not overlap; a head therefore needs exactly one log
-// signature (MaxSignatures).
+// (valid_from reached), with Until set t < Until (not superseded by its
+// successor), and with Revoked set t < RevokedAt (D93 (2)). For a given
+// tree at most one generation covers any time t, because the intervals
+// [ValidFrom, Until) of consecutive generations do not overlap; a head
+// therefore needs exactly one log signature (MaxSignatures).
 func (k LogKey) Covers(t int64) bool {
-	return k.Logged && k.ValidFrom <= t && (k.Until == 0 || t < k.Until)
+	return k.Logged && k.ValidFrom <= t && (k.Until == 0 || t < k.Until) && (!k.Revoked || t < k.RevokedAt)
 }
 
 // Pending is an entry this client appended that no verified head
@@ -296,14 +458,15 @@ type Verifier struct {
 	// platform/ that verifies in a chain from the list), independent of
 	// its log status (task 03d finding 1). Their verifiers open heads
 	// (Options.Known). A head needs at least one valid signature by a
-	// LogKey that Covers the head's own time line and is not Revoked
-	// (only if Q8) (ErrHead otherwise): the certificate is a valid entry
-	// in the tree of the head (Logged), its valid_from is reached and it
-	// is not superseded by ingest-<g+1>.cert in that tree; strictest
-	// reading without Q8 (doc.go "Platform generations", task 03c finding
-	// 6). The caller (Refresh) reads platform/ anew before it opens the
-	// newest head, audits the entries the new head covers and sets Logged
-	// and Until from them before it calls CheckHead.
+	// LogKey that Covers the head's own time line (ErrHead otherwise):
+	// the certificate is a valid entry in the tree of the head (Logged),
+	// its valid_from is reached, it is not superseded by
+	// ingest-<g+1>.cert in that tree, and the head time lies before
+	// revoked_at_time when the pin revokes the generation (doc.go
+	// "Platform generations", task 03c finding 6, D93). The caller
+	// (Refresh) reads platform/ anew before it opens the newest head,
+	// audits the entries the new head covers and sets Logged, Until,
+	// Revoked and RevokedAt before it calls CheckHead.
 	LogKeys []LogKey
 	// Witnesses are the pinned witness keys (name and Ed25519 key), each
 	// built with NewWitnessVerifier. Names are unique and differ from
@@ -330,8 +493,10 @@ type Verifier struct {
 	// list (IdentityKey); a succession in the log for a generation in
 	// the list must name the list's key (ErrMismatch).
 	Identities []Identity
-	// Revoked lists compromised platform generations from pin field 7;
-	// empty until Q8 is decided (see Revoked).
+	// Revoked lists the revoked platform generations from pin field 7
+	// (D93, CheckRevoked; empty for a pin without field 7): with
+	// Identities the anchor of the validity rules (doc.go "Validity
+	// rules") and of CheckHead step 2.
 	Revoked []Revoked
 	// Pending are the own appends not yet covered by Last (state.json).
 	// The client log adds one per Append and removes it once a verified
@@ -351,16 +516,20 @@ type Verifier struct {
 // order, failing on the first violation:
 //
 //  0. CheckQuorum(MinWitnesses, len(Witnesses)) (ErrWitness),
-//     CheckIdentities(Identities, Identity) (ErrPin), and h.Size and
+//     CheckIdentities(Identities, Identity) and CheckRevoked(Revoked,
+//     Identity.Gen) (ErrPin), and h.Size and
 //     Last.Size at most MaxTreeSize (ErrHead; ParseHeadText already
 //     refuses larger sizes, a Last read back from state.json is checked
 //     again) before any tlog function runs
 //  1. h.Origin == Origin (ErrHead)
 //  2. at least one valid signature by the Verifier of a LogKey that
-//     Covers(h.Time) and is not IsRevoked(ingest, Gen) (ErrHead): the
-//     signing generation is valid at the head's time line, its
-//     certificate is logged in the tree of h, valid_from is reached, it
-//     is not superseded by its successor and (only if Q8) not revoked
+//     Covers(h.Time) and for which RevokedCertAtTime(Revoked, ingest,
+//     Gen, IdentityGen, h.Time) is false (ErrHead): the signing
+//     generation is valid at the head's time line, its certificate is
+//     logged in the tree of h, valid_from is reached, it is not
+//     superseded by its successor and, when the pin revokes it or the
+//     identity generation that issued its certificate, h.Time lies
+//     before that revoked_at_time (D93)
 //  3. at least MinWitnesses valid signatures by distinct keys in
 //     Witnesses (ErrWitness); signatures by unknown keys never count
 //  4. h.Time <= Now() + MaxClockSkew (ErrHead)
@@ -487,7 +656,7 @@ func (v *Verifier) checkSigned(h *Head) ([]note.Signature, error) {
 		}
 		for _, k := range v.LogKeys {
 			if k.Verifier != nil && k.Verifier.Name() == LogSignerName && k.Verifier.KeyHash() == s.Hash &&
-				k.Covers(h.Time) && !v.IsRevoked(store.KeyRoleIngest, k.Gen) {
+				k.Covers(h.Time) && !RevokedCertAtTime(v.Revoked, store.KeyRoleIngest, k.Gen, k.IdentityGen, h.Time) {
 				logOK = true
 			}
 		}
@@ -521,13 +690,16 @@ func (v *Verifier) checkSigned(h *Head) ([]note.Signature, error) {
 
 // checkConfig checks the pinned anchors: the quorum (ErrWitness), the
 // witnesses (built with NewWitnessVerifier, names unique and not the
-// log's name, keys unique; ErrWitness), the identity list (ErrPin) and
-// the origin (ErrHead).
+// log's name, keys unique; ErrWitness), the identity list and the
+// revocation list (ErrPin) and the origin (ErrHead).
 func (v *Verifier) checkConfig() error {
 	if err := checkWitnessSet(v.Witnesses, v.MinWitnesses); err != nil {
 		return err
 	}
 	if err := CheckIdentities(v.Identities, v.Identity); err != nil {
+		return err
+	}
+	if err := CheckRevoked(v.Revoked, v.Identity.Gen); err != nil {
 		return err
 	}
 	return checkOrigin(v.Origin)
@@ -713,14 +885,45 @@ func (v *Verifier) CheckCheckpoint(origin string, size int64, root tlog.Hash, he
 }
 
 // IsRevoked reports whether the pin declares the platform generation
-// compromised.
+// compromised at all (pin field 7), whatever its AtSize and AtTime. The
+// validity rules use RevokedAtIndex and RevokedAtTime instead: what lies
+// before the boundary stays valid.
 func (v *Verifier) IsRevoked(role uint8, gen uint32) bool {
-	for _, r := range v.Revoked {
-		if r.Role == role && r.Gen == gen {
+	_, ok := FindRevoked(v.Revoked, role, gen)
+	return ok
+}
+
+// RevokedAtTime reports whether a signature of the generation over
+// something with time t is invalid because the pin revokes it from a
+// time at or before t: RevokedAtTime(v.Revoked, role, gen, t), and for
+// an ingest generation also when the pin revokes the identity generation
+// that issued its certificate at t (D93, addendum on task 21a). The
+// issuer is taken from every Logged key of LogKeys with that generation
+// (as of the last Refresh; any of them revoked at t answers true). A
+// caller that holds the certificate asks RevokedCertAtTime with its
+// identity_gen instead, which does not depend on LogKeys. A client asks
+// before it accepts metadata signed by ingest generation g with receipt
+// time t (D93 (2)).
+func (v *Verifier) RevokedAtTime(role uint8, gen uint32, t int64) bool {
+	if RevokedAtTime(v.Revoked, role, gen, t) {
+		return true
+	}
+	if role != store.KeyRoleIngest {
+		return false
+	}
+	for _, k := range v.LogKeys {
+		if k.Logged && k.Gen == gen && RevokedAtTime(v.Revoked, store.KeyRoleIdentity, k.IdentityGen, t) {
 			return true
 		}
 	}
 	return false
+}
+
+// RevokedCertAtTime is RevokedCertAtTime(v.Revoked, role, gen, issuer,
+// t): the client's question "is ingest generation gen, whose certificate
+// identity generation issuer issued, revoked at receipt time t?" (D93).
+func (v *Verifier) RevokedCertAtTime(role uint8, gen, issuer uint32, t int64) bool {
+	return RevokedCertAtTime(v.Revoked, role, gen, issuer, t)
 }
 
 // CheckQuorum reports whether min of n witnesses is an admissible

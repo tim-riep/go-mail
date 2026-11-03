@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -96,10 +97,10 @@ func TestPinFields(t *testing.T) {
 			t.Fatalf("%s decoded", name)
 		}
 	}
-	// Field 7 is not part of the schema until Q8 is decided.
+	// Field 7 after field 8 is out of order.
 	withSeven := append(raw(0, 2, ws)[:0:0], raw(0, 2, ws)...)
 	if _, err := DecodePlatformPin(append(withSeven, 7, 0, 0, 0, 0)); err == nil {
-		t.Fatal("field 7 accepted")
+		t.Fatal("field 7 after field 8 accepted")
 	}
 	if CheckWitnessQuorum(2, 3) != nil || CheckWitnessQuorum(1, 2) == nil || CheckWitnessQuorum(0, 0) == nil {
 		t.Fatal("quorum")
@@ -248,5 +249,155 @@ func TestLockPath(t *testing.T) {
 	}
 	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != FilePerm {
 		t.Fatal("lock file mode")
+	}
+}
+
+// testRevokedPin returns a valid pin of identity generation 3 with
+// field 7 (D93).
+func testRevokedPin() *PlatformPin {
+	p := testPin(pinKey(3))
+	p.Gen = 3
+	p.Identities = []PlatformIdentity{{Gen: 1, Pub: pinKey(1)}, {Gen: 2, Pub: pinKey(2)}, {Gen: 3, Pub: pinKey(3)}}
+	p.Revoked = []PlatformRevoked{
+		{Role: KeyRoleIdentity, Gen: 1, AtSize: 1, AtTime: 0},
+		{Role: KeyRoleIdentity, Gen: 2, AtSize: 40, AtTime: 1_800_000_000_000},
+		{Role: KeyRoleAdmin, Gen: 1, AtSize: MaxCheckpointSize, AtTime: 7},
+		{Role: KeyRoleIngest, Gen: 1, AtSize: 40, AtTime: 1 << 62},
+		{Role: KeyRoleIngest, Gen: 1<<32 - 1, AtSize: 41, AtTime: 1_800_000_000_001},
+	}
+	return p
+}
+
+// TestPinRevoked: field 7 (D93 (1)) round trip, a pin without field 7
+// unchanged byte for byte, and every rejection on Encode and on Decode.
+func TestPinRevoked(t *testing.T) {
+	if KeyRoleIdentity != 0 || KeyRoleAdmin != 1 || KeyRoleIngest != 2 || MaxPinRevoked != 512 {
+		t.Fatal("fixed values of field 7")
+	}
+	p := testRevokedPin()
+	b := mustEncode(t, p)
+	d, err := DecodePlatformPin(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Revoked) != 5 || d.Revoked[4] != p.Revoked[4] || d.Revoked[2] != p.Revoked[2] || !bytes.Equal(mustEncode(t, d), b) {
+		t.Fatalf("round trip %+v", d.Revoked)
+	}
+	if r, ok := d.FindRevoked(KeyRoleIngest, 1); !ok || r.AtSize != 40 || r.AtTime != 1<<62 {
+		t.Fatal("FindRevoked")
+	}
+	if _, ok := d.FindRevoked(KeyRoleAdmin, 2); ok {
+		t.Fatal("FindRevoked of another generation")
+	}
+
+	// Without field 7 the encoding is that of fields 1 to 6 and 8 alone,
+	// for a nil and for an empty list.
+	q := testRevokedPin()
+	q.Revoked = nil
+	plain := mustEncode(t, q)
+	ws := []*rec.Record{rec.New(WitnessSchema).SetString(1, "w1").SetBytes(2, pinKey(201))}
+	var ids []*rec.Record
+	for _, id := range q.Identities {
+		ids = append(ids, rec.New(PlatformIdentitySchema).SetU32(1, id.Gen).SetBytes(2, id.Pub))
+	}
+	want, err := rec.New(PlatformPinSchema).SetU32(1, 3).SetBytes(2, pinKey(3)).SetU8(3, 1).SetString(4, q.Origin).
+		SetList(5, ws).SetU32(6, 1).SetList(8, ids).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Revoked = []PlatformRevoked{}
+	if !bytes.Equal(plain, want) || !bytes.Equal(mustEncode(t, q), want) {
+		t.Fatal("a pin without field 7 changed its encoding")
+	}
+	if d, err := DecodePlatformPin(want); err != nil || d.Revoked != nil {
+		t.Fatalf("pin without field 7: %v", err)
+	}
+
+	// Every rule, on Encode and on Decode.
+	encodeRaw := func(list []PlatformRevoked) []byte {
+		t.Helper()
+		rv := []*rec.Record{}
+		for _, x := range list {
+			rv = append(rv, rec.New(PlatformRevokedSchema).SetU8(1, x.Role).SetU32(2, x.Gen).SetI64(3, x.AtSize).SetI64(4, x.AtTime))
+		}
+		b, err := rec.New(PlatformPinSchema).SetU32(1, 3).SetBytes(2, pinKey(3)).SetU8(3, 1).SetString(4, q.Origin).
+			SetList(5, ws).SetU32(6, 1).SetList(7, rv).SetList(8, ids).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if _, err := DecodePlatformPin(encodeRaw(p.Revoked)); err != nil {
+		t.Fatal(err)
+	}
+	for name, f := range map[string]func(l []PlatformRevoked) []PlatformRevoked{
+		"unknown role":     func(l []PlatformRevoked) []PlatformRevoked { l[3].Role = 3; return l },
+		"role 255":         func(l []PlatformRevoked) []PlatformRevoked { l[4].Role = 255; return l },
+		"gen 0":            func(l []PlatformRevoked) []PlatformRevoked { l[2].Gen = 0; return l },
+		"own identity":     func(l []PlatformRevoked) []PlatformRevoked { l[1].Gen = 3; return l },
+		"later identity":   func(l []PlatformRevoked) []PlatformRevoked { l[1].Gen = 9; return l },
+		"size 0":           func(l []PlatformRevoked) []PlatformRevoked { l[0].AtSize = 0; return l },
+		"size negative":    func(l []PlatformRevoked) []PlatformRevoked { l[3].AtSize = -5; return l },
+		"size above max":   func(l []PlatformRevoked) []PlatformRevoked { l[2].AtSize = MaxCheckpointSize + 1; return l },
+		"time negative":    func(l []PlatformRevoked) []PlatformRevoked { l[0].AtTime = -1; return l },
+		"duplicate":        func(l []PlatformRevoked) []PlatformRevoked { l[4].Gen = 1; return l },
+		"gens descending":  func(l []PlatformRevoked) []PlatformRevoked { l[0], l[1] = l[1], l[0]; return l },
+		"roles descending": func(l []PlatformRevoked) []PlatformRevoked { l[2], l[3] = l[3], l[2]; return l },
+		"empty":            func(l []PlatformRevoked) []PlatformRevoked { return []PlatformRevoked{} },
+	} {
+		l := f(append([]PlatformRevoked(nil), p.Revoked...))
+		x := testRevokedPin()
+		x.Revoked = l
+		if name != "empty" {
+			if _, err := x.Encode(); !errors.Is(err, ErrRecord) {
+				t.Errorf("%s: encoded (%v)", name, err)
+			}
+		}
+		if _, err := DecodePlatformPin(encodeRaw(l)); !errors.Is(err, ErrRecord) {
+			t.Errorf("%s: decoded (%v)", name, err)
+		}
+	}
+
+	// Size limit: MaxPinRevoked elements are accepted, one more is not.
+	big := testRevokedPin()
+	big.Revoked = nil
+	for i := 0; i < MaxPinRevoked; i++ {
+		big.Revoked = append(big.Revoked, PlatformRevoked{Role: KeyRoleIngest, Gen: uint32(i + 1), AtSize: 1, AtTime: 0})
+	}
+	bb := mustEncode(t, big)
+	if len(bb) > MaxPinFile {
+		t.Fatalf("pin with %d revoked generations: %d bytes", MaxPinRevoked, len(bb))
+	}
+	if d, err := DecodePlatformPin(bb); err != nil || len(d.Revoked) != MaxPinRevoked {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "identity-3.pin")
+	if err := WritePrivateFileAtomic(path, bb); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := ReadPlatformPin(path); err != nil || len(d.Revoked) != MaxPinRevoked {
+		t.Fatalf("ReadPlatformPin: %v", err)
+	}
+	big.Revoked = append(big.Revoked, PlatformRevoked{Role: KeyRoleIngest, Gen: MaxPinRevoked + 1, AtSize: 1})
+	if _, err := big.Encode(); !errors.Is(err, ErrRecord) {
+		t.Fatalf("too many: %v", err)
+	}
+	// Decode refuses the count before it reads the elements.
+	over := encodeRaw(big.Revoked[:2])
+	i := bytes.Index(over, []byte{7})
+	for i >= 0 && !(over[i] == 7 && bytes.Equal(over[i+5:i+9], []byte{0, 0, 0, 2})) {
+		j := bytes.Index(over[i+1:], []byte{7})
+		if j < 0 {
+			i = -1
+			break
+		}
+		i += 1 + j
+	}
+	if i < 0 {
+		t.Fatal("field 7 not found")
+	}
+	binary.BigEndian.PutUint32(over[i+5:], MaxPinRevoked+1)
+	if _, err := DecodePlatformPin(over); !errors.Is(err, rec.ErrTooMany) {
+		t.Fatalf("count above MaxPinRevoked: %v", err)
 	}
 }

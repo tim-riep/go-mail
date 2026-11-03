@@ -66,6 +66,7 @@ var allSchemas = []*rec.Schema{
 	store.PlatformKeySchema,
 	store.WitnessSchema,
 	store.PlatformIdentitySchema,
+	store.PlatformRevokedSchema,
 	store.PlatformPinSchema,
 	store.AddressSchema,
 	store.MemberSchema,

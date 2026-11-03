@@ -35,7 +35,7 @@ func (e *tenv) serverOptions() Options {
 	for _, w := range e.ws {
 		wv = append(wv, w.verifier)
 	}
-	return Options{Store: e.st, Identities: e.p.ids(e.t, e.idGen), Origin: testOrigin, Witnesses: wv, MinWitnesses: e.min}
+	return Options{Store: e.st, Identities: e.p.ids(e.t, e.idGen), Revoked: e.rev, Origin: testOrigin, Witnesses: wv, MinWitnesses: e.min}
 }
 
 // cosigned returns h with a note signed by the log signer and the given

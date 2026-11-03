@@ -35,6 +35,8 @@
 //	log/entries/<index>.rec       gomail/v1/rec/log-entry, written once
 //	log/tree/tile/8/<L>/<N>[.p/<W>]  tlog tiles of height 8, every path written once
 //	log/heads/<size>.sig          signed head (note) with all cosignatures
+//	log/heads-revoked/<size>-<hex SHA-256>.sig  heads RepairTree moved out of heads/
+//	                              (ErrRevokedHead, D93; kept as evidence, never read)
 //	log/keys/<kind>/<hex SHA-256(subject)>/<seq>   index of the entry with that key
 //
 // Files are written with store.CreateFileAtomic (entries, tiles, keys:
@@ -181,12 +183,13 @@
 //
 // An entry is valid when it is well formed (ErrEntry), its key is not
 // taken by an earlier valid entry (ErrDuplicate) and it satisfies the
-// rules below against the valid entries before it and the identity
-// anchor: the identity list of a pin, Verifier.Identities for clients
-// and Options.Identities for operators, which take it from a pin as
-// well (finding 03d-2). Validity is a function of the log prefix and
-// the anchor, so every client and operator with the same pin reaches
-// the same verdict. Pins of one platform carry the same key for the
+// rules below against the valid entries before it and the anchor: the
+// identity list of a pin (field 8) together with its list of revoked
+// generations (field 7, D93), Verifier.Identities and Verifier.Revoked
+// for clients and Options.Identities and Options.Revoked for operators,
+// which take them from a pin as well (finding 03d-2). Validity is a
+// function of the log prefix and the anchor, so every client and
+// operator with the same pin reaches the same verdict. Pins of one platform carry the same key for the
 // same generation and differ only in length; an older pin lacks a
 // generation that came without a logged succession (compromise case of
 // 2.3) and judges entries that need it as missing a prerequisite until
@@ -261,9 +264,30 @@
 //     client warns; finding 03c-3). The anchor of an operator log is
 //     the identity list of its pin (Options.Identities, finding 03d-2),
 //     not a chain derived from logged successions.
-//
-// Revocation of platform generations by the pin (field 7) enters the
-// rules only if Q8 is decided as proposed (see "Platform generations").
+//   - revocation by the pin (field 7, D93 (2); ErrRevoked, an
+//     ErrOrder; "Platform generations"): for an entry at index i, with
+//     a generation "revoked at i" when the pin lists it with
+//     revoked_at_size <= i (RevokedAtIndex): a certificate whose
+//     identity_gen is revoked at i; a succession identity-<g>.succ
+//     whose issuer g-1 or whose generation g is revoked at i; a
+//     certificate <role>-<g>.cert whose own generation (admin or
+//     ingest) is revoked at i; an address assignment whose admin_gen is
+//     revoked at i, or whose admin-<admin_gen>.cert (the valid entry)
+//     was issued by an identity generation revoked at i (the cascade of
+//     the D93 addendum, RevokedCertAtIndex: revoking identity
+//     generation k ends from its revoked_at_size on the actions of every
+//     admin and ingest generation that k certified; admin and ingest
+//     generations issue no certificates or successions, so their
+//     actions in the log are the address assignments). Entries below
+//     revoked_at_size stay valid (as for users, 2.2 rule 4), and so do
+//     the entries that depend on them, among them the certificates that
+//     a revoked identity generation issued before it.
+//   - admin supersession (D93 (3)): an address assignment of admin
+//     generation g is invalid (ErrOrder) when admin-<g+1>.cert is valid
+//     and logged before it and the assignment's valid_from is not
+//     before that certificate's valid_from: admin generation g assigns
+//     only until the valid_from of its successor, as an ingest
+//     generation signs only until then.
 //
 // # Who writes (9.1: server and client share the data directory)
 //
@@ -696,7 +720,9 @@
 // and validated exactly once. Validity depends on the anchor ("Validity
 // rules"): when a client update brings a new pin, the client discards
 // the index and rebuilds it from entry 0 against the new identity list
-// (finding 03d-2). Decoding is not free (finding A-11): a
+// and revocation list (finding 03d-2, D93; the anchor hash of the index
+// covers both, and for a pin without field 7 it is the hash of the
+// identity list alone, as before). Decoding is not free (finding A-11): a
 // user entry with 1,024 generations costs about 100 ms, because
 // store.DecodeUser verifies every certificate. MaxContent stays at
 // store.MaxUserFile, which bounds that cost per entry.
@@ -726,16 +752,20 @@
 // the same verdict in every client. Until Q9 is decided only the order
 // rule is checked.
 //
-// # Platform generations (2.3, Q8, finding S3)
+// # Platform generations (2.3, Q8, Q19, finding S3, D93)
 //
-// Strictest reading without Q8 (applied by task 14): an ingest key of
-// generation g signs validly only metadata with a receipt time before
-// valid_from of ingest-<g+1>.cert, as soon as that certificate is a
-// valid entry of the log (Log.CheckPlatform), and only heads with a
-// time before it (Verifier.LogKeys). A thief of an old ingest key thus
-// cannot sign mail received after the rotation. Consequence for the
-// ceremony: valid_from of a new ingest certificate is the switch time;
-// see ceremony.IngestRotate.
+// Supersession (applied by task 14): an ingest key of generation g
+// signs validly only metadata with a receipt time before valid_from of
+// ingest-<g+1>.cert, as soon as that certificate is a valid entry of the
+// log (Log.CheckPlatform), and only heads with a time before it
+// (Verifier.LogKeys). A thief of an old ingest key thus cannot sign mail
+// received after the rotation. Consequence for the ceremony: valid_from
+// of a new ingest certificate is the switch time; see
+// ceremony.IngestRotate. D93 (3) applies the same to admin generations:
+// an address assignment of admin generation g counts only with a
+// valid_from before valid_from of admin-<g+1>.cert once that certificate
+// is valid (at append and audit for assignments logged after it, in
+// CheckAddress for the assignment in force; "Validity rules").
 //
 // Log keys (finding 03c-6, finding 03d-1). The ingest certificates from
 // which a client builds Verifier.LogKeys come from platform/ of the data
@@ -761,28 +791,147 @@
 //     generation depends on), valid_from of ingest-<g>.cert <= head
 //     time, head time < valid_from of ingest-<g+1>.cert as soon as that
 //     certificate is a valid entry in the same tree (not superseded),
-//     and, only if Q8, g is not revoked. Refresh audits the entries the
-//     new head covers before it judges the head and sets Logged and
-//     Until from that audit, so a rotation certificate logged in the
-//     same step counts.
+//     and, when the pin revokes g, head time < its revoked_at_time
+//     (LogKey.Revoked, RevokedAt; CheckHead checks Verifier.Revoked as
+//     well). Refresh audits the entries the new head covers before it
+//     judges the head and sets Logged and Until from that audit, so a
+//     rotation certificate logged in the same step counts.
 //
 // The server signs heads with generation g+1 from valid_from of
 // ingest-<g+1>.cert on, once that certificate is in the log
 // (Operator.SignHead, ceremony.IngestRotate); a head with a time at or
 // after that valid_from signed only by generation g is ErrHead. For a
 // given tree exactly one generation covers each time, so a head carries
-// exactly one log signature (MaxSignatures, finding 03d-10).
+// exactly one log signature (MaxSignatures, finding 03d-10). The
+// operator's log keys carry the revocation of its pin (Options.Revoked):
+// SignHead and PublishHead refuse a revoked ingest generation, and one
+// whose certificate a revoked identity generation issued, for a head
+// time at or after that revoked_at_time (ErrHead).
 //
-// Only if Q8 is decided as proposed, pin field 7 lists (role, gen,
-// revoked_at_size) (Revoked.AtSize). Entries with an index below
-// revoked_at_size that depend on the generation stay valid (as for
-// users, 2.2 rule 4), and metadata whose receipt time lies before the
-// head time of size revoked_at_size stay valid; everything else signed
-// by the generation is rejected. TODO(ask), Q8: heads of one size are
-// re-signed with times not earlier (Reading in "Heads"), so "the head time of
-// size revoked_at_size" is not unique and not recoverable from the log
-// for a new device; proposal: field 7 also carries that time
-// (revoked_at_time, ms), set by the issuer of the update.
+// Heads that field 7 makes foreign (task 21a rework, spec review M1).
+// The heads already in heads/ are read with every valid ingest
+// certificate whose generation the pin does not revoke at the head's
+// time (valid_from and the successor are not checked again: a head of
+// the past may be signed by an earlier generation). A head whose log
+// signature verifies only with an ingest generation the new pin
+// revokes for it (a valid certificate revoked at its time, directly or
+// through its issuing identity generation, or an ingest certificate
+// that is an invalid entry of class "revoked", such as the thief's
+// ingest-<g>.cert issued with a revoked identity generation at or above
+// its revoked_at_size) does not belong to the log under that pin;
+// clients with the pin refuse it as well (CheckHead rule 2). SignHead
+// and PublishHead stop on it with ErrRevokedHead (an ErrConsistency)
+// naming the file, and "gomail-server log repair" (RepairTree) moves it
+// to log/heads-revoked/<size>-<hex SHA-256>.sig (RevokedHeadsDir,
+// RepairTreeResult reports it) instead of failing. Moving is chosen
+// over removing: the file is evidence of the compromise and the move
+// is reversible; and it gives nobody more than a writer of log/ has
+// already, who can delete heads. Only such heads are moved: a head with
+// no log signature by any certificate of the log stays ErrConsistency
+// for SignHead and RepairTree, as before (the operator deletes it).
+// After a ceremony whose field 7 revokes an ingest generation, or the
+// identity generation that certified it, every head that generation
+// signed at or after revoked_at_time is such a head, honest or not;
+// with revoked_at_time equal to the time of the confirmed head (D93
+// (2)) that head is one of them (time revoked_at_time is not valid).
+// The operator repairs once after the ceremony; the server then signs
+// with the reissued generation, from the newest head left in heads/ as
+// its base (TestRevokedThiefHeadRecovery, TestRevokedCompromise).
+//
+// Revocation (D93, Q8 and Q19 decided as proposed, option A). Pin field
+// 7 lists (role, gen, revoked_at_size, revoked_at_time) (Revoked; roles
+// store.KeyRoleIdentity, KeyRoleAdmin, KeyRoleIngest). Both boundaries
+// come from a witness-confirmed head the operator reads before the
+// ceremony: revoked_at_size is its size, revoked_at_time its time. What
+// the generation issues or concerns at a log index at or above
+// revoked_at_size is invalid (ErrRevoked; "Validity rules":
+// certificates and successions issued by a revoked identity generation,
+// successions to it, certificates of a revoked admin or ingest
+// generation, address assignments of a revoked admin generation); what
+// was logged before stays valid (as for users, 2.2 rule 4). Index
+// revoked_at_size-1 is valid, revoked_at_size is not. Signatures of a
+// revoked ingest generation over heads and metadata count only with a
+// time before revoked_at_time (time revoked_at_time-1 valid,
+// revoked_at_time not): heads through LogKey.Covers and CheckHead,
+// metadata through the client, which asks
+// Verifier.RevokedCertAtTime(store.KeyRoleIngest, g, identity_gen of
+// ingest-<g>.cert, receipt time), or Verifier.RevokedAtTime(
+// store.KeyRoleIngest, g, receipt time), which takes the issuer from
+// the logged keys of the last Refresh (task 21b).
+//
+// Cascade (D93 addendum, attack review F1). Revoking identity
+// generation k with (revoked_at_size N, revoked_at_time T) also ends
+// every admin and ingest generation whose valid certificate k issued,
+// the operator's own as well as a foreign one the thief certified
+// before N: an admin generation assigns no address at or after index N,
+// an ingest generation signs no head and no metadata with a time at or
+// after T (RevokedCertAtIndex, RevokedCertAtTime; LogKey.IdentityGen
+// carries the issuer). Their certificates and what they logged before N
+// stay valid. Without the cascade a foreign admin generation certified
+// before N could assign any address after the revocation, backdated
+// below the valid_from of the honest successor
+// (TestRevokedForeignAdminBeforeBoundary). After succeed --compromised
+// admin and ingest are therefore reissued under the new identity before
+// they act again (D93 (4)); an ingest certificate with valid_from at or
+// before T leaves no time without a signing generation. Metadata is not
+// logged, so metadata that a thief backdates to before T stays valid;
+// nothing in the log can end that.
+// The time is a component of its own because heads of one size are
+// re-signed with times not earlier (Reading in "Heads"): "the head time
+// of size revoked_at_size" is not unique and not recoverable from the
+// log for a new device (formerly an open question of Q8, resolved by D93).
+//
+// Reading for the operator (D93 (2) to (4), task 21a rework):
+//
+//   - A foreign admin or ingest generation the thief certified with the
+//     revoked identity generation before its revoked_at_size keeps its
+//     certificate but acts no more from the boundaries on (cascade
+//     above); it needs no element of its own in field 7. The reissue
+//     under the new identity ends nothing by itself: supersession only
+//     ends later dates (next point).
+//   - Rotation alone (admin-rotate, an ingest rotation) does not stop a
+//     leaked key (attack review F2): admin generation g still assigns
+//     with a valid_from below valid_from of admin-<g+1>.cert, also
+//     logged after it (TestAdminRotateDoesNotRevoke), and ingest
+//     generation g still signs metadata backdated before its
+//     successor's valid_from. A leaked admin or ingest key is revoked
+//     (revoke, field 7).
+//   - A certificate the thief logged with the revoked identity
+//     generation at or above its revoked_at_size is invalid and holds
+//     no key: <role>-<g>.cert is reissued under the new identity with
+//     the same name (TestRevokedThiefHeadRecovery). The same holds when
+//     the operator chooses revoked_at_size at or below the index of a
+//     foreign certificate on purpose: that certificate becomes invalid
+//     and its name is free for the reissue; the role is not locked.
+//   - Field 7 lists an admin or ingest generation only when its
+//     certificate is a valid entry below that element's
+//     revoked_at_size (spec review L3). Listing one whose certificate is
+//     not (for example the thief's ingest-<g>.cert at or above N, which
+//     the identity revocation already invalidates) locks the role for
+//     good: no <role>-<g>.cert can become valid at or after the
+//     boundary (ErrRevoked), and <role>-<g+1>.cert lacks its
+//     prerequisite (ErrPrerequisite; TestRevokedPrerequisiteLockout).
+//     Only a pin without that element repairs it.
+//   - A stolen admin key can log, before the confirmed head, an
+//     assignment with a far-future valid_from (attack review F3). It
+//     stays valid: the successor cannot assign the address again
+//     (valid_from must increase), and from that time on the address is
+//     the thief's or, once superseded, fails closed. The repair is a
+//     revoked_at_size for that admin generation at or below the index of
+//     the thief's first such entry instead of the confirmed head's size
+//     (TestRevokedFarFutureFreeze); the generation's honest assignments
+//     from that index on become invalid too and are logged again by the
+//     successor.
+//   - The admin supersession in CheckAddress is retroactive and fails
+//     closed (spec review L2): the assignment in force, whenever it was
+//     logged, fails with ErrOrder when its valid_from is not before
+//     valid_from of a valid admin-<g+1>.cert, and no older assignment
+//     takes its place. A backdated admin-<g+1>.cert (valid_from 0, by a
+//     thief before N) thus makes every address of generation g fail at
+//     every time; revoking admin g+1 or its identity does not undo it,
+//     since the certificate was logged before N. The successor assigns
+//     the addresses again; reads from that valid_from on succeed,
+//     earlier reads keep failing (TestAdminSupersessionBackdatedCert).
 //
 // # Client checkpoints (2.7 "Abgleich zwischen Clients")
 //
@@ -860,9 +1009,9 @@
 //	4 origin         string  log origin, CheckOrigin rules
 //	5 witnesses      list of gomail/v1/rec/witness (1 name string, 2 pub 32 B)
 //	6 min_witnesses  u32     CheckQuorum: 1 <= min <= len(witnesses) and 2*min > len(witnesses)
-//	7 revoked        only if Q8 is decided as proposed: list of
-//	                 gomail/v1/rec/platform-revoked
-//	                 (1 role u8, 2 gen u32, 3 revoked_at_size i64), optional
+//	7 revoked        optional (D93 (1)): list of gomail/v1/rec/platform-revoked
+//	                 (1 role u8, 2 gen u32, 3 revoked_at_size i64,
+//	                 4 revoked_at_time i64), at most MaxRevoked
 //	8 identities     list of gomail/v1/rec/platform-identity (1 gen u32,
 //	                 2 pub 32 B): every identity generation from 1 to gen
 //	                 in ascending order, at most MaxIdentities
@@ -872,8 +1021,18 @@
 // gen without gap, distinct keys, last element equal to fields 1 and 2.
 //
 // Built by task 07 (store.PlatformPin, store.DecodePlatformPin): fields
-// 4 to 6 and 8 are required, field 7 is not part of the schema (a pin
-// with it is refused like any unknown field). store.PlatformPin carries
+// 4 to 6 and 8 are required. Field 7 is built by task 21a (D93):
+// store.PlatformRevoked, store.PlatformPin.Revoked, store.CheckPinRevoked
+// and here CheckRevoked with the same rules: at most MaxRevoked
+// elements, roles identity (0), admin (1) and ingest (2), generations at
+// least 1 and an identity generation below the pin's own (a pin cannot
+// revoke its current identity), 1 <= revoked_at_size <= MaxTreeSize,
+// revoked_at_time >= 0, strictly ascending (role, gen), which excludes
+// two elements for one generation. Field 7 is never encoded empty: a pin
+// without revoked generations has no field 7 and its encoding is the one
+// from before D93, byte for byte; a present empty field 7 is refused
+// (canonical form). AnchorFromPin turns a decoded pin into Identities
+// and Revoked. store.PlatformPin carries
 // the identity list (Identities, store.PlatformIdentity), so that
 // ceremony.PublishOptions.Pin (*store.PlatformPin) supplies the whole
 // list for Options.Identities, and the witnesses (store.Witness); the
@@ -892,11 +1051,10 @@
 // and the largest pin, with MaxWitnesses = 16 witnesses with names of 64
 // bytes and an origin of 128 bytes besides, about 23 KiB (TestPinSize
 // measures it: 23,343 bytes). Task 07 reads pins with the limit
-// MaxPinFile = 64 KiB (store.ReadPlatformPin), which also leaves room
-// for field 7 should Q8 be decided as proposed: at most MaxRevoked = 512
-// elements (task 07 finding Q10 (1)); with all of them, of the four
-// proposed components including revoked_at_time, the largest pin takes
-// 62,264 bytes (TestPinSize).
+// MaxPinFile = 64 KiB (store.ReadPlatformPin), which also covers field
+// 7: at most MaxRevoked = 512 elements (task 07 finding Q10 (1), D93);
+// with all of them, of the four components, the largest pin stays below
+// MaxPinFile (TestPinSize, with store.PlatformPin.Encode).
 //
 // Field 8 (finding 03c-3). Reading: a new device gets the pin of the
 // current generation, say identity-2.pin, and has to check admin-1.cert
@@ -913,14 +1071,14 @@
 // list with one element, ceremony.Succeed the old list plus the new
 // generation.
 //
-// Field 7 is TODO(ask), Q8: 2.3 distributes a compromised identity
-// generation by client update but has no record for a compromised
-// ingest or admin generation. Until Q8 is decided pins carry no field 7,
-// Verifier.Revoked stays empty and no rule of this design depends on it;
-// its shape above is the one to build if Q8 is decided as proposed (see
-// "Platform generations"; a fourth component revoked_at_time is proposed
-// there). The witness element schema is store.WitnessSchema since task
-// 07 (see above).
+// Field 7 (D93): 2.3 distributes a compromised identity generation by
+// client update; the same update carries the revocation of compromised
+// identity, admin and ingest generations in field 7 (see "Platform
+// generations"). The pin is unsigned and distributed outside the
+// platform, so field 7 needs no new signed record and no new signature
+// domain. Follow-up pins carry field 7 over (ceremony, task 21c). The
+// witness element schema is store.WitnessSchema since task 07 (see
+// above).
 //
 // # Additions to 9.2
 //
@@ -943,8 +1101,8 @@
 //     validity rules, tiles, tree.rec, keys/, Lookup, proofs, Verifier
 //     (quorum, Pending, ErrWithheld), audit index, all Check methods;
 //     move Unverified to translogtest; store: pin fields 4 to 6 and 8
-//     with the quorum and identity list rules (field 7 only if Q8 is
-//     decided as proposed), read limit MaxPinFile, a blocking exported
+//     with the quorum and identity list rules (field 7 followed with
+//     task 21a, D93), read limit MaxPinFile, a blocking exported
 //     record lock for log/lock, store.ReplaceEpoch (see "Who writes");
 //     Append refuses instead of deleting beyond index n (finding
 //     03d-3); LogKeys from platform/ before opening a head (finding
@@ -992,14 +1150,18 @@
 //     (a) RepairTree fails closed on every file in heads/ that it cannot
 //     read as a head of the log (no log signature by a valid ingest
 //     certificate, another size or origin, a root the entries do not
-//     give); the operator deletes such a file and repairs again;
+//     give); the operator deletes such a file and repairs again. Since
+//     task 21a (rework) a head that field 7 makes foreign
+//     (ErrRevokedHead, "Platform generations") is moved to
+//     log/heads-revoked/ instead;
 //     (b) PublishHead does not check the head time against the server's
 //     own clock: SignHead signs with the injected time, and a head time
 //     in the future is refused by the witness (its rule 2) and by the
 //     client (MaxClockSkew in CheckHead);
 //     (c) RepairTree checks the log signature of a head with every
-//     valid ingest certificate, not with the generation that covers the
-//     head time: the covering generation is a rule of PublishHead and of
+//     valid ingest certificate (since task 21a not revoked by the pin at
+//     the head's time), not with the generation that covers the head
+//     time: the covering generation is a rule of PublishHead and of
 //     the client (CheckHead), and a head that violates it is refused
 //     there, not repaired;
 //     (d) POST /gomail/log/cosign (package loghttp) accepts several
@@ -1146,6 +1308,21 @@
 //     named as every rollback with entries/<n+1>.rec removed since the
 //     newest published head. The behaviour of refuse, view and Append
 //     is unchanged.
+//   - 21a (D93, Q8 and Q19): pin field 7 in store (PlatformRevoked,
+//     CheckPinRevoked); Revoked with revoked_at_time, ErrRevoked,
+//     CheckRevoked, RevokedAtIndex, RevokedAtTime, AnchorFromPin,
+//     Options.Revoked, LogKey.Revoked and RevokedAt; the revocation
+//     rules and the admin supersession in the validity rules (Append,
+//     audit, SignHead, RepairTree), in CheckAddress and in the judging
+//     of heads; the anchor hash of the audit index covers field 7.
+//     Rework after review: the cascade from a revoked identity
+//     generation to the admin and ingest generations it certified
+//     (RevokedCertAtIndex, RevokedCertAtTime, LogKey.IdentityGen,
+//     Verifier.RevokedCertAtTime); heads that field 7 makes foreign
+//     (ErrRevokedHead; RepairTree moves them to RevokedHeadsDir,
+//     RepairTreeResult); the readings for the operator. Client, ingest
+//     and server follow in task 21b, the ceremony (succeed
+//     --compromised, revoke, admin-rotate) in task 21c.
 //
 // # Open phase-3 log sites
 //
@@ -1231,7 +1408,7 @@
 // Without a call site today (task 14): client checkpoints
 // (Verifier.CheckCheckpoint), successions of the platform identity
 // (CheckPlatform on identity-<gen>.succ), compromised platform
-// generations (pin field 7, only if Q8), the identity list of the pin
+// generations (pin field 7, D93: tasks 21b and 21c), the identity list of the pin
 // (field 8), the comparison of mailbox.rec with the newest logged epoch
 // (Lookup), withheld own entries (ErrWithheld).
 

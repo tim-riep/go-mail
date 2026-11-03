@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -137,7 +138,7 @@ func TestAnchorErrors(t *testing.T) {
 	if errors.Is(ErrUnloggedSigner, ErrOrder) || errors.Is(ErrPin, ErrMismatch) {
 		t.Fatal("error classes must stay apart")
 	}
-	// Until Q8 the pin has no field 7: an empty Revoked list revokes nothing.
+	// A pin without field 7: an empty Revoked list revokes nothing.
 	if (&Verifier{}).IsRevoked(1, 1) {
 		t.Fatal("IsRevoked without field 7")
 	}
@@ -146,11 +147,12 @@ func TestAnchorErrors(t *testing.T) {
 // TestPinSize measures the largest pin of the proposal in doc.go "Pin"
 // (task 03d finding 9): fields 1 to 6 and 8 at their limits, with
 // MaxIdentities identity generations, MaxWitnesses witnesses with names
-// of 64 bytes and an origin of MaxOrigin bytes. Field 7 exists only if
-// Q8 is decided; it is measured with MaxRevoked elements of the four
-// proposed components (revoked_at_time included) to show that the
-// largest pin stays below MaxPinFile (task 07 finding Q10 (1)). The
-// schemas of fields 5 and 8 must agree with those of store.
+// of 64 bytes and an origin of MaxOrigin bytes. Field 7 (D93) is
+// measured with MaxRevoked elements of the four components
+// (revoked_at_time included) to show that the largest pin stays below
+// MaxPinFile (task 07 finding Q10 (1); TestPinSizeWithRevoked measures it
+// through store.PlatformPin). The schemas of fields 5, 7 and 8 must
+// agree with those of store.
 func TestPinSize(t *testing.T) {
 	identity := rec.MustSchema("gomail/v1/rec/platform-identity",
 		rec.Field{Num: 1, Name: "gen", Kind: rec.U32, Required: true},
@@ -230,6 +232,12 @@ func TestPinSize(t *testing.T) {
 	}
 	if !bytes.Equal(enc, without) {
 		t.Fatal("store.PlatformPin differs from the proposal of doc.go \"Pin\"")
+	}
+	if store.PlatformRevokedSchema.Type != revoked.Type || !reflect.DeepEqual(store.PlatformRevokedSchema.Fields, revoked.Fields) {
+		t.Fatal("store.PlatformRevokedSchema differs from the proposal of doc.go \"Pin\"")
+	}
+	if f := store.PlatformPinSchema.Fields[6]; f.Num != 7 || f.Required || f.Kind != rec.List || f.Elem != store.PlatformRevokedSchema || f.MaxCount != MaxRevoked {
+		t.Fatal("field 7 of store.PlatformPinSchema differs from doc.go \"Pin\"")
 	}
 }
 

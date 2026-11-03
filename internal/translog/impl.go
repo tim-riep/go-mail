@@ -38,7 +38,10 @@ type fileLog struct {
 	opts Options
 	v    *Verifier
 	ids  []Identity
-	now  func() time.Time
+	// rev is the revocation list of the pin (field 7, D93): Options.Revoked
+	// of an operator log, Verifier.Revoked of a client log.
+	rev []Revoked
+	now func() time.Time
 	// ref is the client's audit index: the valid entries of the tree of
 	// v.Last (doc.go "Audit").
 	ref *state
@@ -113,6 +116,10 @@ func Open(opts Options) (Log, error) {
 			return nil, err
 		}
 		l.ids = opts.Identities
+		if err := CheckRevoked(opts.Revoked, opts.Identities[len(opts.Identities)-1].Gen); err != nil {
+			return nil, err
+		}
+		l.rev = opts.Revoked
 		if opts.Origin != "" {
 			if err := checkOrigin(opts.Origin); err != nil {
 				return nil, err
@@ -149,7 +156,7 @@ func Open(opts Options) (Log, error) {
 			return nil, err
 		}
 		l.opts.IndexFile = idx
-		l.ids = v.Identities
+		l.ids, l.rev = v.Identities, v.Revoked
 	}
 	if err := l.create(); err != nil {
 		return nil, err
@@ -316,7 +323,7 @@ func (l *fileLog) getCur(tree treeState) (*state, error) {
 		if l.ref != nil {
 			return l.ref.clone()
 		}
-		return newState(l.f, l.ids)
+		return newState(l.f, l.ids, l.rev)
 	}
 	fresh := false
 	if l.cur == nil || (l.ref != nil && l.cur.Size < l.ref.Size) {
@@ -364,7 +371,7 @@ func (l *fileLog) operatorCur(tree treeState) (*state, error) {
 		}
 	}
 	if l.cur == nil {
-		l.cur = newState(l.f, l.ids)
+		l.cur = newState(l.f, l.ids, l.rev)
 	}
 	if err := l.sync(l.cur, tree); err != nil {
 		l.cur = nil
@@ -928,6 +935,13 @@ func (l *fileLog) CheckAddress(address string, mailbox store.ID, at int64) error
 		if !ok {
 			return fmt.Errorf("%w: entry is no address assignment", errIndex)
 		}
+		if adminSuperseded(s, as.AdminGen, as.ValidFrom) {
+			// D93 (3): logged before admin-<g+1>.cert but dated at or
+			// after its valid_from; admin generation g no longer
+			// assigns from then on (fail closed, no fallback to an
+			// older assignment).
+			return fmt.Errorf("%w: the assignment in force is dated after its admin generation was superseded", ErrOrder)
+		}
 		if as.MailboxID != mailbox {
 			return fmt.Errorf("%w: the address is assigned to another mailbox", ErrMismatch)
 		}
@@ -1226,7 +1240,7 @@ func (l *fileLog) candidates(s *state) []candidate {
 		idk[g] = sc.Pub
 	}
 	var out []candidate
-	add := func(gen uint32, pub ed25519.PublicKey, validFrom int64) {
+	add := func(gen uint32, pub ed25519.PublicKey, validFrom int64, issuer uint32) {
 		for _, c := range out {
 			if c.key.Gen == gen && c.pub.Equal(pub) && c.key.ValidFrom == validFrom {
 				return
@@ -1236,7 +1250,7 @@ func (l *fileLog) candidates(s *state) []candidate {
 		if err != nil {
 			return
 		}
-		out = append(out, candidate{key: LogKey{Gen: gen, Verifier: v, ValidFrom: validFrom}, pub: pub})
+		out = append(out, candidate{key: LogKey{Gen: gen, Verifier: v, ValidFrom: validFrom, IdentityGen: issuer}, pub: pub})
 	}
 	if ents, err := os.ReadDir(l.st.Path("platform")); err == nil {
 		for _, de := range ents {
@@ -1252,12 +1266,12 @@ func (l *fileLog) candidates(s *state) []candidate {
 			if err != nil || c.Role != keys.RoleIngest || c.Gen != g || idk[c.IdentityGen] == nil || c.Verify(idk[c.IdentityGen]) != nil {
 				continue
 			}
-			add(c.Gen, c.Pub, c.ValidFrom)
+			add(c.Gen, c.Pub, c.ValidFrom, c.IdentityGen)
 		}
 	}
 	for _, c := range s.Certs {
 		if c.Role == uint8(keys.RoleIngest) {
-			add(c.Gen, ed25519.PublicKey(c.Pub), c.ValidFrom)
+			add(c.Gen, ed25519.PublicKey(c.Pub), c.ValidFrom, c.IdentityGen)
 		}
 	}
 	return out
@@ -1281,15 +1295,21 @@ func mergeCandidates(a, b []candidate) []candidate {
 	return out
 }
 
-// judge sets Logged and Until of every candidate from the state s of
-// the tree of the head being checked (doc.go "Platform generations").
-// A certificate logged in an earlier tree stays logged: s extends it.
+// judge sets Logged, Until, Revoked and RevokedAt of every candidate
+// from the state s of the tree of the head being checked and the pin's
+// revocation list (doc.go "Platform generations"), and for a logged one
+// IdentityGen from the valid entry (the issuer that counts for the
+// revocation of its identity generation). A certificate logged in an
+// earlier tree stays logged: s extends it.
 func judge(s *state, cands []candidate) []LogKey {
 	out := make([]LogKey, 0, len(cands))
 	for _, c := range cands {
 		k := c.key
 		lc := s.Certs[certName(keys.RoleIngest, k.Gen)]
 		k.Logged = lc != nil && bytes.Equal(lc.Pub, c.pub) && lc.ValidFrom == k.ValidFrom
+		if k.Logged {
+			k.IdentityGen = lc.IdentityGen
+		}
 		k.Until = 0
 		if next := s.Certs[certName(keys.RoleIngest, k.Gen+1)]; next != nil && k.Gen < 1<<32-1 {
 			k.Until = next.ValidFrom
@@ -1297,6 +1317,7 @@ func judge(s *state, cands []candidate) []LogKey {
 				k.Until = -1 // valid_from 0: generation Gen covers nothing
 			}
 		}
+		k.Revoked, k.RevokedAt = revokedSince(s.rev, store.KeyRoleIngest, k.Gen, k.IdentityGen)
 		out = append(out, k)
 	}
 	return out
@@ -1536,9 +1557,9 @@ func (l *fileLog) fresh(now time.Time) error {
 // loadIndex reads the audit index or rebuilds it from entry 0 against
 // Verifier.Last.
 func (l *fileLog) loadIndex() error {
-	anchor := anchorHash(l.ids)
+	anchor := anchorHash(l.ids, l.rev)
 	if data, err := store.ReadFileLimited(l.opts.IndexFile, MaxIndexFile); err == nil {
-		if s, err := unmarshalState(data, l.f, l.ids); err == nil && s.Anchor == anchor && l.matchesLast(s) {
+		if s, err := unmarshalState(data, l.f, l.ids, l.rev); err == nil && s.Anchor == anchor && l.matchesLast(s) {
 			l.ref = s
 			return nil
 		}
@@ -1549,7 +1570,7 @@ func (l *fileLog) loadIndex() error {
 // buildIndex builds the audit index from entry 0 against Verifier.Last,
 // writes it and makes it the reference index.
 func (l *fileLog) buildIndex() error {
-	s := newState(l.f, l.ids)
+	s := newState(l.f, l.ids, l.rev)
 	if l.v.Last != nil {
 		if err := l.audit(s, l.v.Last); err != nil {
 			return err

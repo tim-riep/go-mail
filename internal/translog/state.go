@@ -50,6 +50,7 @@ type state struct {
 
 	f        *files
 	ids      []Identity
+	rev      []Revoked
 	subjects map[string][]ref        // subjectID -> valid entries in log order
 	chains   map[string]*store.Chain // mailbox ID -> chain of its valid epochs
 }
@@ -92,7 +93,7 @@ type succState struct {
 // (written past Append). It occupies no key and no answer relies on it;
 // the client warns (doc.go "Validity rules"). Class names the error:
 // "entry", "duplicate", "order", "prerequisite", "unlogged-signer" or
-// "mismatch".
+// "mismatch", or "revoked" (ErrRevoked, D93).
 type InvalidEntry struct {
 	Index int64  `json:"i"`
 	Class string `json:"err"`
@@ -112,9 +113,14 @@ var errIndex = fmt.Errorf("%w: the audit index contradicts the log", ErrConsiste
 // directory.
 const MaxIndexFile = 256 << 20
 
-// anchorHash fingerprints the identity list: validity depends on it, so a
-// client discards its index when the pin changes (doc.go "Audit").
-func anchorHash(ids []Identity) tlog.Hash {
+// anchorHash fingerprints the identity list and the revocation list of
+// the pin (fields 8 and 7): validity depends on both, so a client
+// discards its index when the pin changes (doc.go "Audit"). Without
+// revoked generations the hash is the one of the identity list alone, as
+// before D93, so that an index built for a pin without field 7 stays
+// valid; with them a separator with the count follows, and each element
+// with its four components at fixed width.
+func anchorHash(ids []Identity, rev []Revoked) tlog.Hash {
 	h := sha256.New()
 	h.Write([]byte("gomail/v1/translog-anchor\x00"))
 	for _, id := range ids {
@@ -123,13 +129,24 @@ func anchorHash(ids []Identity) tlog.Hash {
 		h.Write(b[:])
 		h.Write(id.Pub)
 	}
+	if len(rev) > 0 {
+		h.Write([]byte("\x00gomail/v1/translog-revoked\x00"))
+		h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(rev))))
+		for _, r := range rev {
+			b := []byte{r.Role}
+			b = binary.BigEndian.AppendUint32(b, r.Gen)
+			b = binary.BigEndian.AppendUint64(b, uint64(r.AtSize))
+			b = binary.BigEndian.AppendUint64(b, uint64(r.AtTime))
+			h.Write(b)
+		}
+	}
 	var out tlog.Hash
 	copy(out[:], h.Sum(nil))
 	return out
 }
 
-func newState(f *files, ids []Identity) *state {
-	s := &state{Version: stateVersion, Anchor: anchorHash(ids), f: f, ids: ids}
+func newState(f *files, ids []Identity, rev []Revoked) *state {
+	s := &state{Version: stateVersion, Anchor: anchorHash(ids, rev), f: f, ids: ids, rev: rev}
 	s.init()
 	return s
 }
@@ -166,7 +183,7 @@ func (s *state) init() {
 
 // clone returns a deep copy (without the chain cache).
 func (s *state) clone() *state {
-	c := &state{Version: s.Version, Anchor: s.Anchor, Size: s.Size, Root: s.Root, f: s.f, ids: s.ids,
+	c := &state{Version: s.Version, Anchor: s.Anchor, Size: s.Size, Root: s.Root, f: s.f, ids: s.ids, rev: s.rev,
 		Valid: make(map[string]ref, len(s.Valid)), Users: make(map[string]*userState, len(s.Users)),
 		Epochs: make(map[string]uint32, len(s.Epochs)), Addresses: make(map[string][]addrState, len(s.Addresses)),
 		Certs: make(map[string]*certState, len(s.Certs)), Succs: make(map[uint32]*succState, len(s.Succs)),
@@ -208,7 +225,7 @@ func (s *state) marshal() ([]byte, error) { return json.Marshal(s) }
 // unmarshalState decodes an audit index and checks its structure. Any
 // violation is an error; the client then rebuilds the index from entry 0
 // (doc.go "Audit").
-func unmarshalState(data []byte, f *files, ids []Identity) (*state, error) {
+func unmarshalState(data []byte, f *files, ids []Identity, rev []Revoked) (*state, error) {
 	if len(data) > MaxIndexFile {
 		return nil, fmt.Errorf("%w: audit index too large", ErrConsistency)
 	}
@@ -219,7 +236,7 @@ func unmarshalState(data []byte, f *files, ids []Identity) (*state, error) {
 	if err := s.checkStructure(); err != nil {
 		return nil, err
 	}
-	s.f, s.ids = f, ids
+	s.f, s.ids, s.rev = f, ids, rev
 	s.init()
 	return s, nil
 }
@@ -389,6 +406,8 @@ func errClass(err error) string {
 		return "prerequisite"
 	case errors.Is(err, ErrDuplicate):
 		return "duplicate"
+	case errors.Is(err, ErrRevoked):
+		return "revoked"
 	case errors.Is(err, ErrOrder):
 		return "order"
 	case errors.Is(err, ErrMismatch):
@@ -590,12 +609,26 @@ func (s *state) admitAddress(a *store.AddressAssignment) (func(int64), error) {
 	if len(list) > 0 && a.ValidFrom <= list[len(list)-1].ValidFrom {
 		return nil, fmt.Errorf("%w: valid_from does not increase", ErrOrder)
 	}
+	if RevokedAtIndex(s.rev, store.KeyRoleAdmin, a.AdminGen, s.Size) {
+		// D93 (2): an assignment of a revoked admin generation logged
+		// from revoked_at_size on.
+		return nil, fmt.Errorf("%w: assignment of revoked admin generation %d", ErrRevoked, a.AdminGen)
+	}
 	c := s.Certs[certName(keys.RoleAdmin, a.AdminGen)]
 	if c == nil {
 		return nil, fmt.Errorf("%w: admin certificate %d is not logged", ErrPrerequisite, a.AdminGen)
 	}
+	if RevokedAtIndex(s.rev, store.KeyRoleIdentity, c.IdentityGen, s.Size) {
+		// D93, addendum on task 21a: the identity generation that
+		// issued admin-<g>.cert is revoked at this index; the
+		// generation it certified assigns nothing from then on.
+		return nil, fmt.Errorf("%w: assignment of admin generation %d certified by revoked identity generation %d", ErrRevoked, a.AdminGen, c.IdentityGen)
+	}
 	if c.ValidFrom > a.ValidFrom {
 		return nil, fmt.Errorf("%w: assignment before the admin certificate", ErrOrder)
+	}
+	if adminSuperseded(s, a.AdminGen, a.ValidFrom) {
+		return nil, fmt.Errorf("%w: assignment of admin generation %d dated after its successor's valid_from", ErrOrder, a.AdminGen)
 	}
 	if err := a.Verify(c.Pub); err != nil {
 		return nil, fmt.Errorf("%w: admin signature", ErrOrder)
@@ -603,6 +636,19 @@ func (s *state) admitAddress(a *store.AddressAssignment) (func(int64), error) {
 	return func(index int64) {
 		s.Addresses[sub] = append(s.Addresses[sub], addrState{ValidFrom: a.ValidFrom, Mailbox: a.MailboxID.String(), Index: index})
 	}, nil
+}
+
+// adminSuperseded reports whether admin generation gen is superseded at
+// time validFrom (D93 (3), doc.go "Platform generations"): admin-<gen+1>.cert
+// is a valid entry of s and validFrom is not before its valid_from.
+// Admin generation gen is valid only until then, as an ingest
+// generation is.
+func adminSuperseded(s *state, gen uint32, validFrom int64) bool {
+	if gen == 1<<32-1 {
+		return false
+	}
+	next := s.Certs[certName(keys.RoleAdmin, gen+1)]
+	return next != nil && validFrom >= next.ValidFrom
 }
 
 // identityKey returns the key of identity generation gen: from the
@@ -618,6 +664,15 @@ func (s *state) identityKey(gen uint32) (ed25519.PublicKey, error) {
 }
 
 func (s *state) admitCert(c *keys.PlatformCert) (func(int64), error) {
+	// D93 (2): from revoked_at_size on, a revoked identity generation
+	// issues no certificate, and no certificate of a revoked admin or
+	// ingest generation is valid.
+	if RevokedAtIndex(s.rev, store.KeyRoleIdentity, c.IdentityGen, s.Size) {
+		return nil, fmt.Errorf("%w: certificate issued by revoked identity generation %d", ErrRevoked, c.IdentityGen)
+	}
+	if RevokedAtIndex(s.rev, uint8(c.Role), c.Gen, s.Size) {
+		return nil, fmt.Errorf("%w: certificate of a revoked generation", ErrRevoked)
+	}
 	if c.Gen > 1 && s.Certs[certName(c.Role, c.Gen-1)] == nil {
 		return nil, fmt.Errorf("%w: certificate of generation %d is not logged", ErrPrerequisite, c.Gen-1)
 	}
@@ -635,6 +690,15 @@ func (s *state) admitCert(c *keys.PlatformCert) (func(int64), error) {
 }
 
 func (s *state) admitSucc(sc *keys.PlatformSuccession) (func(int64), error) {
+	// D93 (2): from revoked_at_size on, a revoked identity generation
+	// issues no succession, and no succession to a revoked generation is
+	// valid.
+	if RevokedAtIndex(s.rev, store.KeyRoleIdentity, sc.Gen-1, s.Size) {
+		return nil, fmt.Errorf("%w: succession issued by revoked identity generation %d", ErrRevoked, sc.Gen-1)
+	}
+	if RevokedAtIndex(s.rev, store.KeyRoleIdentity, sc.Gen, s.Size) {
+		return nil, fmt.Errorf("%w: succession to revoked identity generation %d", ErrRevoked, sc.Gen)
+	}
 	prev, err := s.identityKey(sc.Gen - 1)
 	if err != nil {
 		return nil, err

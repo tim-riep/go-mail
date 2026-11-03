@@ -138,7 +138,7 @@ func FuzzAuditIndex(f *testing.F) {
 	ids := e.p.ids(f, 1)
 	fs := &files{root: e.st.Root}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		s, err := unmarshalState(b, fs, ids)
+		s, err := unmarshalState(b, fs, ids, nil)
 		if err != nil {
 			return
 		}
@@ -146,7 +146,7 @@ func FuzzAuditIndex(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := unmarshalState(again, fs, ids); err != nil {
+		if _, err := unmarshalState(again, fs, ids, nil); err != nil {
 			t.Fatalf("re-encoded index refused: %v", err)
 		}
 		for _, x := range []struct {

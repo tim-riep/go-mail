@@ -244,7 +244,7 @@ func TestRetryAfterIOFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unmarshalState(data, c.f, c.ids); err != nil {
+	if _, err := unmarshalState(data, c.f, c.ids, c.rev); err != nil {
 		t.Fatalf("rebuilt index file: %v", err)
 	}
 }

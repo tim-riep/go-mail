@@ -336,6 +336,13 @@ const (
 	// HeadsDir holds heads/<size>.sig: the signed head of that size as a
 	// note (log signature and all witness cosignatures collected so far).
 	HeadsDir = Dir + "/heads"
+	// RevokedHeadsDir holds the files that RepairTree moved out of
+	// heads/ because they do not belong to the log under the current pin
+	// (ErrRevokedHead, D93): heads-revoked/<size>-<hex SHA-256 of the
+	// file>.sig, byte for byte as they were in heads/. Nothing reads
+	// them; they are kept for the operator as evidence (doc.go
+	// "Platform generations").
+	RevokedHeadsDir = Dir + "/heads-revoked"
 	// KeysDir holds the duplicate index:
 	// keys/<kind>/<hex SHA-256(subject)>/<seq>, each containing the
 	// decimal index of the entry with that key. It is derived data that
@@ -366,6 +373,12 @@ func EntryPath(index int64) string {
 // HeadPath returns log/heads/<size>.sig.
 func HeadPath(size int64) string {
 	return path.Join(HeadsDir, strconv.FormatInt(size, 10)+".sig")
+}
+
+// RevokedHeadPath returns log/heads-revoked/<size>-<hex sum>.sig, where
+// RepairTree keeps a head file with the SHA-256 sum of its content.
+func RevokedHeadPath(size int64, sum [32]byte) string {
+	return path.Join(RevokedHeadsDir, strconv.FormatInt(size, 10)+"-"+hex.EncodeToString(sum[:])+".sig")
 }
 
 // TilePath returns the path of a tile under log/tree/.

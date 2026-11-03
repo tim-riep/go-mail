@@ -1151,8 +1151,8 @@ func TestNewPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := unmarshalState(data, nil, nil)
-	if err != nil || s.Anchor != anchorHash(e.p.ids(t, 2)) {
+	s, err := unmarshalState(data, nil, nil, nil)
+	if err != nil || s.Anchor != anchorHash(e.p.ids(t, 2), nil) {
 		t.Fatal("index not rebuilt for the new pin")
 	}
 }
