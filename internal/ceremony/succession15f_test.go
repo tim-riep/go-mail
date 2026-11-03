@@ -20,25 +20,25 @@ import (
 // diesem Update jede Signatur der kompromittierten Generation ab"), taken
 // over from the review of task 15b. After succeed --compromised (pin 2
 // without succession, generation 1 still in its identity list so that
-// old certificates stay verifiable) the owner of the stolen identity key
-// 1 issues ingest-3.cert and admin-2.cert. They must neither be
-// published with pin 2 nor be valid in its operator log. Nothing in the
-// pin, the succession or the log marks generation 1 as compromised, so
-// today they would be (the review reproduced it); the compromise case is
-// therefore locked (ErrCompromised) and this test is skipped until Q19
-// specifies the revocation (a record revocation-<g>.rec signed by the new
-// identity, or pin field 7 after Q8). Whoever lifts the lock removes the
-// Skip; the test then has to pass.
+// old certificates stay verifiable, and revoked in field 7 from the
+// witness-confirmed head of size 2 on, D93) the owner of the stolen
+// identity key 1 issues ingest-3.cert and admin-2.cert. They are neither
+// published with pin 2 nor valid in its operator log: Publish refuses
+// them (translog.ErrRevoked) before anything is written, and Append of
+// the operator log refuses them as well.
 func TestVerifyCompromisedIdentityStillIssues(t *testing.T) {
-	t.Skip("Q19: the revocation of a compromised platform generation is not specified; succeed --compromised is locked (ErrCompromised) until it is")
 	f := newFixture(t)
 	st := newData(t, filepath.Join(f.base, "data"))
 	if err := Publish(PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin}); err != nil {
 		t.Fatal(err)
 	}
+	// The boundary: the newest witness-confirmed head, read before the
+	// ceremony.
+	h := f.signHead(t, st, f.res.Pin, 1, headAt, f.ws...)
 	u, _ := f.unlock(1, 2, 3)
 	out2 := filepath.Join(f.base, "succ2")
-	res2, err := Succeed(SucceedOptions{UnlockOptions: u, Out: out2, Pin: f.res.Pin, Compromised: true})
+	res2, err := Succeed(SucceedOptions{UnlockOptions: u, Out: out2, Pin: f.res.Pin, Compromised: true,
+		HeadSize: h.Size, HeadTime: h.Time})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +61,12 @@ func TestVerifyCompromisedIdentityStillIssues(t *testing.T) {
 	a2pub, a2 := f.cert(t, 1, keys.RoleAdmin, 2)
 	dir := writeExport(t, filepath.Join(f.base, "attack"), map[string][]byte{
 		"ingest-3.pub": i3pub, "ingest-3.cert": i3, "admin-2.pub": a2pub, "admin-2.cert": a2})
-	if err := Publish(PublishOptions{From: dir, Data: st, Pin: res2.Pin}); err == nil {
-		t.Fatal("publish takes certificates issued by the compromised generation 1 with pin 2")
+	before := listDir(t, filepath.Join(st.Root, "platform"))
+	if err := Publish(PublishOptions{From: dir, Data: st, Pin: res2.Pin}); !errors.Is(err, translog.ErrRevoked) {
+		t.Fatalf("publish of certificates issued by the compromised generation 1 with pin 2: %v", err)
+	}
+	if after := listDir(t, filepath.Join(st.Root, "platform")); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Fatalf("written: %v", after)
 	}
 	l, err := OpenLog(st, res2.Pin)
 	if err != nil {
@@ -75,6 +79,33 @@ func TestVerifyCompromisedIdentityStillIssues(t *testing.T) {
 		}
 		if err := l.CheckPlatform(n, data); err == nil {
 			t.Fatalf("%s issued by the compromised generation 1 is valid in the operator log of pin 2", n)
+		}
+	}
+	// The operator log itself refuses them (the files written directly,
+	// as a thief with write access to platform/ would).
+	for _, n := range []string{"ingest-3", "admin-2"} {
+		pub, data := i3pub, i3
+		if n == "admin-2" {
+			pub, data = a2pub, a2
+		}
+		if err := st.WritePlatformFile(n+".pub", pub); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.WritePlatformFile(n+".cert", data); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.AppendPlatform(n+".cert", data); !errors.Is(err, translog.ErrRevoked) {
+			t.Fatalf("operator log appends %s.cert issued by the compromised generation 1: %v", n, err)
+		}
+	}
+	// What identity 1 logged before the boundary stays valid.
+	for _, n := range []string{"admin-1.cert", "ingest-1.cert"} {
+		data, err := st.ReadPlatformFile(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if es, err := l.Lookup(translog.KindPlatform, []byte(n)); err != nil || len(es) != 1 || !bytes.Equal(es[0].Content, data) {
+			t.Fatalf("%s logged before the boundary: %v", n, err)
 		}
 	}
 }

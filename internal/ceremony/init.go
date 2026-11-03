@@ -66,12 +66,89 @@ func guardOf(p Prompter) CommitGuard {
 // rule of the log (ingest generation g is valid only until valid_from of
 // g+1) it would invalidate ingest signatures of the old generation made
 // since then. The zero time stands for Now and passes.
-func checkValidFrom(validFrom time.Time, now func() time.Time) error {
-	if !validFrom.IsZero() && validFrom.Before(now()) {
-		return fmt.Errorf("%w: valid_from %s is before the current time of the ceremony",
+//
+// b describes a revocation of the predecessor in the pin of the rotation
+// (rotationBound, D93): with b.exact the predecessor itself is revoked
+// at b.at (its revoked_at_time) and valid_from must be exactly b.at
+// (D93 addendum: not later, else no ingest generation signs between
+// b.at and valid_from; not earlier, else signatures of the predecessor
+// before its boundary would become invalid); the zero time stands for
+// b.at. With b.floor (the pin revokes the identity generation before the
+// current one: succeed --compromised) valid_from may lie in the past down
+// to b.at, not before; Publish refuses a successor of an ingest
+// generation that the revoked identity certified whose valid_from lies
+// after b.at (checkSuccessors).
+//
+// With b.alt set (both revocations above, the identity's earlier) the
+// ceremony cannot tell which applies (it does not know which identity
+// generation certified the predecessor): valid_from must be given and be
+// b.alt or b.at, anything else is ErrRevocation naming both.
+func checkValidFrom(validFrom time.Time, now func() time.Time, b rotationBound) (time.Time, error) {
+	at := time.UnixMilli(b.at).UTC()
+	switch {
+	case b.exact && b.alt != 0 && (validFrom.IsZero() || validFrom.UnixMilli() != b.at && validFrom.UnixMilli() != b.alt):
+		return time.Time{}, fmt.Errorf("%w: the pin revokes the predecessor from %d (%s) and the identity generation before the current one from %d (%s): valid_from must be %s if the predecessor's certificate was issued by that identity generation (the earlier time applies), else %s (D93); give it explicitly",
+			ErrRevocation, b.at, at.Format(time.RFC3339Nano), b.alt, rfc3339(b.alt), rfc3339(b.alt), at.Format(time.RFC3339Nano))
+	case b.exact && b.alt != 0:
+		return validFrom, nil
+	case b.exact && validFrom.IsZero():
+		return at, nil
+	case b.exact && validFrom.UnixMilli() != b.at:
+		return time.Time{}, fmt.Errorf("%w: valid_from %s must be revoked_at_time %d (%s) of the revoked predecessor (D93)",
+			ErrRevocation, validFrom.UTC().Format(time.RFC3339Nano), b.at, at.Format(time.RFC3339Nano))
+	case b.exact:
+		return validFrom, nil
+	case validFrom.IsZero():
+		return validFrom, nil
+	case b.floor && validFrom.UnixMilli() < b.at:
+		return time.Time{}, fmt.Errorf("%w: valid_from %s is before revoked_at_time %d (%s) of the compromised identity generation",
+			ErrOptions, validFrom.UTC().Format(time.RFC3339Nano), b.at, at.Format(time.RFC3339Nano))
+	case b.floor:
+		return validFrom, nil
+	case validFrom.Before(now()):
+		return time.Time{}, fmt.Errorf("%w: valid_from %s is before the current time of the ceremony",
 			ErrOptions, validFrom.UTC().Format(time.RFC3339))
 	}
-	return nil
+	return validFrom, nil
+}
+
+// rotationBound is what field 7 of the pin of a rotation says about
+// valid_from of the new ingest generation (checkValidFrom).
+type rotationBound struct {
+	exact, floor bool
+	at           int64
+	// alt, when not 0, is a second admissible exact valid_from, earlier
+	// than at: revoked_at_time of the identity generation before the
+	// current one, which applies instead of at when that generation
+	// certified the predecessor (the cascade of D93).
+	alt int64
+}
+
+// boundOf returns the rotationBound of ingest generation gen under
+// identity generation idGen for the revocation list rev: exact when rev
+// revokes ingest generation gen-1, floor when it revokes identity
+// generation idGen-1 (the compromise that made idGen). When rev revokes
+// both, the predecessor is revoked from the earlier of the two times if
+// identity generation idGen-1 certified it, else from its own (spec
+// review 21c Low-2; Publish's checkSuccessors takes the earlier one, as
+// translog does): with the identity's time not earlier the own time is
+// the earlier one in either case; with the identity's time earlier the
+// ceremony, offline, cannot tell, and checkValidFrom takes exactly one
+// of the two, given explicitly (alt).
+func boundOf(rev []store.PlatformRevoked, gen, idGen uint32) rotationBound {
+	list := revokedOf(rev)
+	own, hasOwn := translog.FindRevoked(list, store.KeyRoleIngest, gen-1)
+	id, hasID := translog.FindRevoked(list, store.KeyRoleIdentity, idGen-1)
+	hasID = hasID && idGen > 1
+	switch {
+	case hasOwn && hasID && id.AtTime < own.AtTime:
+		return rotationBound{exact: true, at: own.AtTime, alt: id.AtTime}
+	case hasOwn:
+		return rotationBound{exact: true, at: own.AtTime}
+	case hasID:
+		return rotationBound{floor: true, at: id.AtTime}
+	}
+	return rotationBound{}
 }
 
 func runInit(opts InitOptions) (*Result, error) {
@@ -153,9 +230,15 @@ func runInit(opts InitOptions) (*Result, error) {
 	return &Result{KeyDir: keyDir, IdentityPub: idPub, Pin: pin, Out: out}, nil
 }
 
-func runRotate(opts RotateOptions) (*RotateResult, error) {
+// runRotate is IngestRotate (role store.KeyRoleIngest) and AdminRotate
+// (store.KeyRoleAdmin).
+func runRotate(opts RotateOptions, role uint8) (*RotateResult, error) {
+	name := RoleName(role)
+	if role != store.KeyRoleIngest && role != store.KeyRoleAdmin {
+		return nil, fmt.Errorf("%w: no admin or ingest role", ErrOptions)
+	}
 	if opts.Gen < 2 {
-		return nil, fmt.Errorf("%w: a new ingest generation is at least 2", keys.ErrGeneration)
+		return nil, fmt.Errorf("%w: a new %s generation is at least 2", keys.ErrGeneration, name)
 	}
 	if err := checkUnlock(&opts.UnlockOptions); err != nil {
 		return nil, err
@@ -167,12 +250,23 @@ func runRotate(opts RotateOptions) (*RotateResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	ingestKey := keyFile{role: store.KeyRoleIngest, name: "ingest", gen: opts.Gen}
-	if err := checkKeyFiles(keyDir, ingestKey.fileName()); err != nil {
+	newKey := keyFile{role: role, name: name, gen: opts.Gen}
+	if err := checkKeyFiles(keyDir, newKey.fileName()); err != nil {
 		return nil, err
 	}
 	now := nowOrDefault(opts.Now)
-	if err := checkValidFrom(opts.ValidFrom, now); err != nil {
+	// Never certify a revoked key again (D93 addendum): the key of a
+	// generation derives from the root and its number, so the stolen key
+	// of a revoked generation is exactly the one of that number.
+	if r, ok := translog.FindRevoked(revokedOf(opts.Revoked), role, opts.Gen); ok {
+		return nil, fmt.Errorf("%w: the pin revokes %s generation %d (from log index %d): its key is the stolen one; the new generation is the highest existing one + 1",
+			ErrRevocation, name, opts.Gen, r.AtSize)
+	}
+	var bound rotationBound
+	if role == store.KeyRoleIngest {
+		bound = boundOf(opts.Revoked, opts.Gen, opts.IdentityGen)
+	}
+	if _, err := checkValidFrom(opts.ValidFrom, now, bound); err != nil {
 		return nil, err
 	}
 
@@ -183,10 +277,10 @@ func runRotate(opts RotateOptions) (*RotateResult, error) {
 	defer seed.Zero()
 	// Entering the shares takes time: checked again, and the default
 	// read only now.
-	if err := checkValidFrom(opts.ValidFrom, now); err != nil {
+	validFrom, err := checkValidFrom(opts.ValidFrom, now, bound)
+	if err != nil {
 		return nil, err
 	}
-	validFrom := opts.ValidFrom
 	if validFrom.IsZero() {
 		validFrom = now()
 	}
@@ -197,16 +291,23 @@ func runRotate(opts RotateOptions) (*RotateResult, error) {
 		return nil, err
 	}
 	defer keys.Wipe(identity)
-	if ingestKey.key, err = p.IngestKey(opts.Gen); err != nil {
+	keyRole := keys.RoleIngest
+	if role == store.KeyRoleAdmin {
+		keyRole = keys.RoleAdmin
+		newKey.key, err = p.AdminKey(opts.Gen)
+	} else {
+		newKey.key, err = p.IngestKey(opts.Gen)
+	}
+	if err != nil {
 		return nil, err
 	}
-	defer keys.Wipe(ingestKey.key)
-	pub := pubOf(ingestKey.key)
+	defer keys.Wipe(newKey.key)
+	pub := pubOf(newKey.key)
 	files := map[string][]byte{}
-	if err := certFiles(files, identity, opts.IdentityGen, keys.RoleIngest, opts.Gen, pub, validFrom.UnixMilli()); err != nil {
+	if err := certFiles(files, identity, opts.IdentityGen, keyRole, opts.Gen, pub, validFrom.UnixMilli()); err != nil {
 		return nil, err
 	}
-	if err := commit(out, files, keyDir, []keyFile{ingestKey}, guardOf(opts.Prompter)); err != nil {
+	if err := commit(out, files, keyDir, []keyFile{newKey}, guardOf(opts.Prompter)); err != nil {
 		return nil, err
 	}
 	return &RotateResult{Gen: opts.Gen, Pub: pub}, nil
@@ -248,10 +349,18 @@ func succeedTrust(opts *SucceedOptions) (string, []witness.Key, int, error) {
 }
 
 func runSucceed(opts SucceedOptions) (*Result, error) {
-	// TODO(Q19): the compromise case is locked before anything else
-	// (task 15f point 1); the code for it below stays, unreachable.
-	if opts.Compromised {
-		return nil, ErrCompromised
+	// The boundary of a compromise first, before anything else is
+	// checked or asked (D93 (4)).
+	now := nowOrDefault(opts.Now)
+	switch {
+	case opts.Compromised && opts.HeadSize == 0 && opts.HeadTime == 0:
+		return nil, fmt.Errorf("%w: %w", ErrRevocation, ErrCompromised)
+	case opts.Compromised:
+		if err := checkBoundary(opts.HeadSize, opts.HeadTime, now); err != nil {
+			return nil, err
+		}
+	case opts.HeadSize != 0 || opts.HeadTime != 0:
+		return nil, fmt.Errorf("%w: a boundary of a revocation only with Compromised", ErrOptions)
 	}
 	if opts.Pin == nil {
 		return nil, fmt.Errorf("%w: no pin", ErrOptions)
@@ -259,6 +368,15 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 	ids, err := PinIdentities(opts.Pin)
 	if err != nil {
 		return nil, err
+	}
+	// Field 7 of the current pin is carried over (D93 (4)); after a
+	// compromise it revokes the current generation as well.
+	revoked := append([]store.PlatformRevoked(nil), opts.Pin.Revoked...)
+	if opts.Compromised {
+		if revoked, err = addRevoked(revoked, store.PlatformRevoked{Role: store.KeyRoleIdentity, Gen: opts.IdentityGen,
+			AtSize: opts.HeadSize, AtTime: opts.HeadTime + 1}); err != nil {
+			return nil, err
+		}
 	}
 	origin, witnesses, minWitnesses, err := succeedTrust(&opts)
 	if err != nil {
@@ -281,7 +399,6 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := nowOrDefault(opts.Now)
 
 	seed, _, err := unlock(&opts.UnlockOptions)
 	if err != nil {
@@ -290,17 +407,8 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 	defer seed.Zero()
 	p := keys.DerivePlatform(seed)
 	defer p.Zero()
-	// Every generation of the list derives from this root.
-	for _, id := range ids {
-		k, err := p.IdentityKey(id.Gen)
-		if err != nil {
-			return nil, err
-		}
-		same := pubOf(k).Equal(id.Pub)
-		keys.Wipe(k)
-		if !same {
-			return nil, fmt.Errorf("%w: identity generation %d of the list", ErrIdentity, id.Gen)
-		}
+	if err := checkList(p, ids); err != nil {
+		return nil, err
 	}
 	g := opts.IdentityGen + 1
 	prev, err := p.IdentityKey(opts.IdentityGen)
@@ -318,12 +426,13 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 	// The new list: the list of the current pin plus the new generation
 	// (translog doc.go "Pin", store.CheckPinIdentities).
 	ids = append(ids, translog.Identity{Gen: g, Pub: bytes.Clone(nextPub)})
-	pin, pinBytes, err := newPin(&pinData{Identities: ids, Origin: origin, Witnesses: witnesses, MinWitnesses: minWitnesses})
+	pin, pinBytes, err := newPin(&pinData{Identities: ids, Origin: origin, Witnesses: witnesses, MinWitnesses: minWitnesses, Revoked: revoked})
 	if err != nil {
 		return nil, err
 	}
 	files := map[string][]byte{exportPin(g): pinBytes, exportPlatform("identity", g, "pub"): nextPub}
-	// Always true while the compromise case is locked (ErrCompromised).
+	// After a compromise no succession: the thief could sign one himself,
+	// and the pin alone carries generation g (D93 (4)).
 	if !opts.Compromised {
 		s, err := keys.NewPlatformSuccession(prev, g, nextPub, now().UnixMilli())
 		if err != nil {
@@ -339,4 +448,21 @@ func runSucceed(opts SucceedOptions) (*Result, error) {
 		return nil, err
 	}
 	return &Result{IdentityPub: nextPub, Pin: pin, Out: out}, nil
+}
+
+// checkList checks that every generation of the identity list ids
+// derives from the root of p (ErrIdentity otherwise).
+func checkList(p *keys.PlatformRoot, ids []translog.Identity) error {
+	for _, id := range ids {
+		k, err := p.IdentityKey(id.Gen)
+		if err != nil {
+			return err
+		}
+		same := pubOf(k).Equal(id.Pub)
+		keys.Wipe(k)
+		if !same {
+			return fmt.Errorf("%w: identity generation %d of the list", ErrIdentity, id.Gen)
+		}
+	}
+	return nil
 }

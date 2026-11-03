@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/sumdb/note"
 
@@ -295,12 +296,18 @@ const replaceHint = "; publish --replace-witnesses (ReplaceWitnesses) replaces i
 // an older pin cannot follow the chain: a client whose pin ends below g
 // needs every succession up to g logged before an entry that depends on
 // it, and an entry logged too early stays invalid for it for good (the
-// key is taken for the newer anchors). Generation 1 needs none.
+// key is taken for the newer anchors). Generation 1 needs none, and
+// neither does a generation g whose predecessor g-1 the pin revokes
+// (field 7, D93 (4)): it entered the identity list by Succeed with
+// Compromised, without succession; a client knows it from the pin
+// alone (an older pin cannot follow it at all, it needs the client
+// update), and the chain starts anew at g.
 type succChain struct {
 	files map[string]platformFile // the export
 	st    *store.Store
 	log   translog.Log
 	known map[uint32]ed25519.PublicKey
+	rev   []translog.Revoked      // field 7 of the pin
 	ok    map[uint32]bool         // generations found to be there
 	relog map[uint32]platformFile // from data/platform/, to log first
 }
@@ -312,6 +319,11 @@ func (c *succChain) need(g uint32, by string) error {
 	var found []platformFile
 	var seen []uint32
 	for ; g >= 2 && !c.ok[g]; g-- {
+		if _, ok := translog.FindRevoked(c.rev, store.KeyRoleIdentity, g-1); ok {
+			// After a compromise of g-1: g needs no succession.
+			seen = append(seen, g)
+			break
+		}
 		name := store.PlatformFileName("identity", g, "succ")
 		if _, ok := c.files[name]; ok {
 			seen = append(seen, g)
@@ -349,11 +361,12 @@ func (c *succChain) need(g uint32, by string) error {
 }
 
 // OpenLog opens the operator log of the data directory st as
-// gomail-server does (translog.Open with the identity list and the
-// origin of pin, the witnesses and the quorum of the pin as Known,
-// Witnesses and MinWitnesses; D80): the tiles must match tree.rec, and
-// the newest published head, if any, must open with a valid log
-// signature (Head). Publish uses it when PublishOptions.Log is nil.
+// gomail-server does (translog.Open with the identity list, the
+// revocation list (field 7, D93) and the origin of pin, the witnesses
+// and the quorum of the pin as Known, Witnesses and MinWitnesses; D80):
+// the tiles must match tree.rec, and the newest published head, if
+// any, must open with a valid log signature (Head). Publish uses it when
+// PublishOptions.Log is nil.
 func OpenLog(st *store.Store, pin *store.PlatformPin) (translog.Log, error) {
 	ids, err := PinIdentities(pin)
 	if err != nil {
@@ -364,8 +377,8 @@ func OpenLog(st *store.Store, pin *store.PlatformPin) (translog.Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Origin: pin.Origin, Known: note.VerifierList(wvs...),
-		Witnesses: wvs, MinWitnesses: ws.Min})
+	l, err := translog.Open(translog.Options{Store: st, Identities: ids, Revoked: revokedOf(pin.Revoked), Origin: pin.Origin,
+		Known: note.VerifierList(wvs...), Witnesses: wvs, MinWitnesses: ws.Min})
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +469,35 @@ func runPublish(opts PublishOptions) error {
 	if err := checkDataLog(log, pin); err != nil {
 		return err
 	}
-	chain := &succChain{files: files, st: st, log: log, known: known, ok: map[uint32]bool{}, relog: map[uint32]platformFile{}}
+	rev := revokedOf(pin.Revoked)
+	// Field 7 against the log and data/platform/ (D93); next is the
+	// smallest log index an entry appended now can get, as far as the
+	// newest published head tells.
+	var next int64
+	if len(rev) > 0 {
+		h, err := checkRevocations(log, pin)
+		if err != nil {
+			return err
+		}
+		if err := checkSuccessors(log, files, rev); err != nil {
+			return err
+		}
+		next = h.Size
+		if opts.RevocationsChecked != nil {
+			opts.RevocationsChecked(h)
+		}
+		if opts.RevokedHead != nil {
+			if err := revokedHead(log, h, opts.RevokedHead); err != nil {
+				return err
+			}
+		}
+		if opts.IngestGap != nil {
+			if err := ingestGaps(log, files, rev, opts.IngestGap); err != nil {
+				return err
+			}
+		}
+	}
+	chain := &succChain{files: files, st: st, log: log, known: known, rev: rev, ok: map[uint32]bool{}, relog: map[uint32]platformFile{}}
 
 	var succs []platformFile
 	for _, f := range files {
@@ -496,9 +537,9 @@ func runPublish(opts PublishOptions) error {
 			if !known[f.gen].Equal(ed25519.PublicKey(f.data)) {
 				return fmt.Errorf("%w: %s differs from the trusted identity", ErrIdentity, f.name)
 			}
-			// No identity key without its succession (task 15g point 1):
-			// a key of generation g >= 2 alone is the state of the
-			// compromise case, which is locked (Q19).
+			// No identity key without its succession (task 15g point 1),
+			// unless the pin revokes its predecessor (compromise, D93
+			// (4); succChain).
 			if err := chain.need(f.gen, f.name); err != nil {
 				return err
 			}
@@ -531,14 +572,24 @@ func runPublish(opts PublishOptions) error {
 			if err := chain.need(c.IdentityGen, f.name); err != nil {
 				return err
 			}
+			// The predecessor <role>-<g-1>.cert must be in the export or a
+			// valid entry of the log, as Append requires it (translog
+			// doc.go "Validity rules"): checked here, before any file is
+			// written (attack review 21c F1: a detour to generation g+1
+			// past an invalid entry of generation g left its files in
+			// data/platform/). A file in data/platform/ alone does not
+			// count; nor does an invalid entry (for example the thief's
+			// certificate that field 7 invalidates).
 			if f.gen > 1 {
 				prev := store.PlatformFileName(f.role, f.gen-1, "cert")
 				if _, ok := files[prev]; !ok {
-					if _, err := st.ReadPlatformCert(roleOf(f.role), f.gen-1); err != nil {
-						if errors.Is(err, store.ErrNotFound) {
-							return fmt.Errorf("%w: %s needs %s", translog.ErrPrerequisite, f.name, prev)
-						}
-						return err
+					es, err := log.Lookup(translog.KindPlatform, []byte(prev))
+					if err != nil {
+						return fmt.Errorf("ceremony: looking up %s in the log: %w", prev, err)
+					}
+					if len(es) == 0 {
+						return fmt.Errorf("%w: %s needs %s, which is neither in the export nor a valid entry of the log: publish the export of %s generation %d first",
+							translog.ErrPrerequisite, f.name, prev, f.role, f.gen-1)
 					}
 				}
 			}
@@ -546,14 +597,39 @@ func runPublish(opts PublishOptions) error {
 		}
 	}
 
-	// Existing files: identical ones are skipped, others refused before
-	// anything is written.
+	// Field 7 (D93 (2)): nothing that the pin's revocations make invalid
+	// at the index it would get is written or logged; the successions
+	// relogged from data/platform/ included.
+	for _, f := range chain.relog {
+		if err := checkNotRevoked(log, f, f.gen-1, rev, next); err != nil {
+			return err
+		}
+	}
+	for _, f := range succs {
+		if err := checkNotRevoked(log, f, f.gen-1, rev, next); err != nil {
+			return err
+		}
+	}
+	for _, f := range certs {
+		c, err := keys.DecodePlatformCert(f.data)
+		if err != nil {
+			return err
+		}
+		if err := checkNotRevoked(log, f, c.IdentityGen, rev, next); err != nil {
+			return err
+		}
+	}
+
+	// Existing files: identical ones are skipped; one with other content
+	// is replaced only when its name is free in the log (freeName), and
+	// refused otherwise, before anything is written.
 	names := make([]string, 0, len(files))
 	for n := range files {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	var todo []string
+	replace := map[string]bool{}
 	for _, n := range names {
 		have, err := readData(st, n)
 		if err != nil {
@@ -563,18 +639,35 @@ func runPublish(opts PublishOptions) error {
 			todo = append(todo, n)
 			continue
 		}
-		if !bytes.Equal(have, files[n].data) {
-			return existsErr(files[n])
+		if bytes.Equal(have, files[n].data) {
+			continue
 		}
+		free, why, err := freeName(st, log, files, n)
+		if err != nil {
+			return err
+		}
+		if !free {
+			return existsErr(opts.From, st, files[n], why)
+		}
+		todo = append(todo, n)
+		replace[n] = true
 	}
 
 	// Files first (translog doc.go "Who writes": record first, then log
-	// entry), public keys before the records that name them.
+	// entry), public keys before the records that name them (so that a
+	// crash between the replacement of a public key and that of its
+	// certificate leaves a certificate that differs and is replaced on
+	// the next run).
 	sort.SliceStable(todo, func(i, j int) bool {
 		return files[todo[i]].ext == "pub" && files[todo[j]].ext != "pub"
 	})
 	for _, n := range todo {
-		if err := st.WritePlatformFile(n, files[n].data); err != nil {
+		if replace[n] {
+			// Under the server lock, after every check, atomically.
+			if err := store.WriteFileAtomic(st.Path("platform", n), files[n].data); err != nil {
+				return err
+			}
+		} else if err := st.WritePlatformFile(n, files[n].data); err != nil {
 			if !errors.Is(err, store.ErrExists) {
 				return err
 			}
@@ -583,7 +676,7 @@ func runPublish(opts PublishOptions) error {
 				return rerr
 			}
 			if !bytes.Equal(have, files[n].data) {
-				return existsErr(files[n])
+				return existsErr(opts.From, st, files[n], " (written meanwhile)")
 			}
 		}
 		if err := hook("publish-file"); err != nil {
@@ -635,11 +728,328 @@ func runPublish(opts PublishOptions) error {
 	return nil
 }
 
-// existsErr reports a file of the data directory with other content;
-// for a certificate or succession it is also a duplicate log key.
-func existsErr(f platformFile) error {
+// freeName decides whether platform/<n> of the data directory, which
+// differs from the export's file n, may be replaced by it (attack review
+// 21c F1; translog doc.go "Reading for the operator": a certificate that
+// field 7 makes invalid holds no key, and <role>-<g>.cert is reissued
+// under the new identity with the same name). A certificate or
+// succession is replaced when the log holds no valid entry of its name
+// under the pin (Log.Lookup returns valid entries only): the entry there
+// is invalid (such as the thief's certificate issued with a revoked
+// identity generation at or above its revoked_at_size, class "revoked")
+// or there is none (a file left by a crash before its log entry, which
+// gives nobody anything: translog doc.go "Platform generations"). The
+// public key <role>-<g>.pub of an admin or ingest generation is replaced
+// only together with its certificate: when <role>-<g>.cert of the data
+// directory differs from the export's and is replaced by this rule.
+// Everything else is refused; why completes the message (existsErr).
+// The caller has checked the export's files already (signature, pin,
+// field 7, prerequisites).
+func freeName(st *store.Store, log translog.Log, files map[string]platformFile, n string) (bool, string, error) {
+	f := files[n]
+	cert := n
 	if f.ext == "pub" {
-		return fmt.Errorf("%w: %s with other content", store.ErrExists, f.name)
+		if f.role == "identity" {
+			return false, "", nil
+		}
+		cert = store.PlatformFileName(f.role, f.gen, "cert")
+		have, err := readData(st, cert)
+		if err != nil {
+			return false, "", err
+		}
+		if have == nil || bytes.Equal(have, files[cert].data) {
+			return false, fmt.Sprintf(", while platform/%s is missing there or the same: a public key is replaced only together with its certificate", cert), nil
+		}
 	}
-	return fmt.Errorf("%w: %w: %s with other content", store.ErrExists, translog.ErrDuplicate, f.name)
+	es, err := log.Lookup(translog.KindPlatform, []byte(cert))
+	if err != nil {
+		return false, "", fmt.Errorf("ceremony: looking up %s in the log: %w", cert, err)
+	}
+	if len(es) > 0 {
+		return false, fmt.Sprintf(", and %s is a valid entry of the log under this pin: a valid entry is never replaced", cert), nil
+	}
+	return true, "", nil
+}
+
+// existsErr reports a file of the data directory with other content than
+// the export's file f (export directory from), naming both files; for a
+// certificate or succession it is also a duplicate log key. why
+// completes the message.
+func existsErr(from string, st *store.Store, f platformFile, why string) error {
+	what := fmt.Sprintf("%s with other content than %s of the export%s",
+		st.Path("platform", f.name), filepath.Join(from, "platform", f.name), why)
+	if f.ext == "pub" {
+		return fmt.Errorf("%w: %s", store.ErrExists, what)
+	}
+	return fmt.Errorf("%w: %w: %s", store.ErrExists, translog.ErrDuplicate, what)
+}
+
+// checkRevocations checks field 7 of pin against the log (D93;
+// PublishOptions, Publish) and returns the newest published head it
+// checked against: the head must exist and carry the witness quorum of
+// the pin (the boundaries come from a witness-confirmed head of this
+// log), every revoked_at_size must be at most its size and every
+// revoked_at_time - 1 ms (the time of the head the boundary was read
+// from, D93 addendum) at most its time (a later boundary would leave
+// entries of a compromised generation valid that this log already
+// holds: a mistyped value or a head of another log) and not before
+// minHeadTime (a time in seconds); the certificate of every revoked
+// admin or ingest generation must be a valid entry of the log below that
+// element's revoked_at_size (a mistyped generation would leave the
+// compromised one valid, and without such a certificate no certificate
+// of the role can become valid any more: translog doc.go "Reading for
+// the operator"), and its revoked_at_time must lie after the
+// certificate's valid_from unless that lies after the head's time (the
+// generation would never have been valid: attack review 21c F2). A
+// revoked identity generation is in the identity list of the pin by
+// store.CheckPinRevoked. Every failure is ErrRevocation.
+//
+// The newest published head is the one the operator log opens (OpenLog,
+// translog Log.Head of an operator): with the log signature of any
+// valid ingest certificate of the committed tree, also of a generation
+// that field 7 revokes at the head's time (attack review 21c F3). Its
+// witness cosignatures are what the check relies on. Such a head is
+// reported (PublishOptions.RevokedHead): "gomail-server log repair"
+// moves it out of heads/ afterwards.
+func checkRevocations(log translog.Log, pin *store.PlatformPin) (*translog.Head, error) {
+	h, err := log.Head()
+	if err != nil {
+		return nil, fmt.Errorf("%w: the pin revokes platform generations, but the newest published head of the log does not open (%w); the boundary must come from a witness-confirmed head of this log",
+			ErrRevocation, err)
+	}
+	cos := map[string]bool{}
+	for _, s := range h.Sigs {
+		for _, w := range pin.Witnesses {
+			if s.Name == w.Name && s.Name != translog.LogSignerName {
+				cos[s.Name] = true
+			}
+		}
+	}
+	if len(cos) < pin.MinWitnesses {
+		return nil, fmt.Errorf("%w: the newest published head of the log (size %d) carries %d of the %d witness signatures the pin requires",
+			ErrRevocation, h.Size, len(cos), pin.MinWitnesses)
+	}
+	for _, r := range pin.Revoked {
+		what := fmt.Sprintf("%s generation %d", RoleName(r.Role), r.Gen)
+		if r.AtSize > h.Size {
+			return nil, fmt.Errorf("%w: the pin revokes %s from log index %d, beyond the newest witness-confirmed head of the log (size %d): the boundary comes from no head of this log",
+				ErrRevocation, what, r.AtSize, h.Size)
+		}
+		if r.AtTime-1 > h.Time {
+			return nil, fmt.Errorf("%w: the pin revokes %s from time %d, the boundary of a head of time %d, later than the newest witness-confirmed head of the log (time %d): the boundary comes from no head of this log",
+				ErrRevocation, what, r.AtTime, r.AtTime-1, h.Time)
+		}
+		if r.AtTime-1 < minHeadTime {
+			return nil, fmt.Errorf("%w: the pin revokes %s from time %d (%s), the boundary of a head before %s: a time in seconds instead of milliseconds?",
+				ErrRevocation, what, r.AtTime, rfc3339(r.AtTime), rfc3339(minHeadTime))
+		}
+		if r.Role == store.KeyRoleIdentity {
+			continue
+		}
+		name := store.PlatformFileName(RoleName(r.Role), r.Gen, "cert")
+		es, err := log.Lookup(translog.KindPlatform, []byte(name))
+		if err != nil {
+			return nil, fmt.Errorf("ceremony: looking up %s in the log: %w", name, err)
+		}
+		// Lookup returns valid entries only, judged with field 7 of this
+		// pin: a certificate of the revoked generation at an index at or
+		// above r.AtSize is invalid by r itself (translog doc.go
+		// "Validity rules"), so a valid one lies below r.AtSize.
+		if len(es) == 0 {
+			return nil, fmt.Errorf("%w: the pin revokes %s, whose certificate %s is no valid entry of the log below index %d: a mistyped generation, or one that locks the role for good (no %s certificate could become valid any more); check the generation",
+				ErrRevocation, what, name, r.AtSize, RoleName(r.Role))
+		}
+		// A revoked_at_time at or before valid_from of the generation
+		// leaves it no time at which it signs or assigns validly: a time in
+		// seconds, or a head older than the generation (attack review 21c
+		// F2). A generation not valid yet at the newest head (valid_from
+		// after its time) is revoked before it acts, which is allowed.
+		c, err := keys.DecodePlatformCert(es[0].Content)
+		if err != nil {
+			return nil, err
+		}
+		if r.AtTime <= c.ValidFrom && c.ValidFrom <= h.Time {
+			return nil, fmt.Errorf("%w: the pin revokes %s from time %d (%s), not after valid_from %d (%s) of %s, although the generation was valid at the newest head of the log (time %d): it would never have been valid; a time in seconds, or the head of the boundary is older than the generation",
+				ErrRevocation, what, r.AtTime, rfc3339(r.AtTime), c.ValidFrom, rfc3339(c.ValidFrom), name, h.Time)
+		}
+	}
+	return h, nil
+}
+
+// rfc3339 returns a time in milliseconds since 1970 UTC in RFC 3339
+// with fractional seconds (for messages).
+func rfc3339(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339Nano) }
+
+// revokedHead calls report when the log key that signed the newest
+// published head h (the one checkRevocations checked against) is revoked
+// by field 7 at or before the time of h: by the element of its ingest
+// generation or, by the cascade of D93, of the identity generation that
+// certified it (translog.LogKey Revoked and RevokedAt, the earlier of
+// the two). The operator log opens its newest head with every valid
+// ingest certificate of the committed tree, whatever field 7 says about
+// the head's time (translog: Log.Head of an operator); clients refuse
+// such a head (CheckHead), and "gomail-server log repair" moves it to
+// log/heads-revoked/ (translog doc.go "Heads that field 7 makes
+// foreign"). If the boundary of the pin was read from that head, or from
+// a head it replaced in heads/ (the same size, signed again later), no
+// witness-confirmed head the boundary comes from is left afterwards
+// (attack review 21c F3). A log that is no translog.Operator (a test's)
+// is not looked at.
+func revokedHead(log translog.Log, h *translog.Head, report func(h *translog.Head, gen uint32, at int64)) error {
+	op, ok := log.(translog.Operator)
+	if !ok {
+		return nil
+	}
+	ks, err := op.LogKeys()
+	if err != nil {
+		return fmt.Errorf("ceremony: log keys of the operator log: %w", err)
+	}
+	for _, k := range ks {
+		if k.Verifier == nil {
+			continue
+		}
+		if _, err := note.Open(h.Note, note.VerifierList(k.Verifier)); err != nil {
+			continue
+		}
+		if k.Revoked && h.Time >= k.RevokedAt {
+			report(h, k.Gen, k.RevokedAt)
+		}
+		return nil
+	}
+	return nil
+}
+
+// ingestRevokedAt returns the valid certificate ingest-<gen>.cert of the
+// log (nil when there is none) and, when the revocation list rev revokes
+// the generation at some time, that time: the own element of field 7 or
+// the element of the identity generation that certified it (the cascade
+// of D93), the earlier one.
+func ingestRevokedAt(log translog.Log, rev []translog.Revoked, gen uint32) (*keys.PlatformCert, int64, bool, error) {
+	name := store.PlatformFileName("ingest", gen, "cert")
+	es, err := log.Lookup(translog.KindPlatform, []byte(name))
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("ceremony: looking up %s in the log: %w", name, err)
+	}
+	if len(es) == 0 {
+		return nil, 0, false, nil
+	}
+	c, err := keys.DecodePlatformCert(es[0].Content)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	at, revoked := int64(0), false
+	if r, ok := translog.FindRevoked(rev, store.KeyRoleIngest, gen); ok {
+		at, revoked = r.AtTime, true
+	}
+	if r, ok := translog.FindRevoked(rev, store.KeyRoleIdentity, c.IdentityGen); ok && (!revoked || r.AtTime < at) {
+		at, revoked = r.AtTime, true
+	}
+	return c, at, revoked, nil
+}
+
+// checkSuccessors refuses a new certificate ingest-<g+1>.cert of the
+// export (not yet a valid entry of the log) whose predecessor ingest
+// generation g the pin revokes at time A (ingestRevokedAt) with a
+// valid_from after A (ErrRevocation, D93 addendum): from A on g signs no
+// head validly, and until valid_from no other generation would.
+func checkSuccessors(log translog.Log, files map[string]platformFile, rev []translog.Revoked) error {
+	for _, f := range files {
+		if f.role != "ingest" || f.ext != "cert" || f.gen < 2 {
+			continue
+		}
+		c, err := keys.DecodePlatformCert(f.data)
+		if err != nil {
+			return err
+		}
+		_, at, revoked, err := ingestRevokedAt(log, rev, f.gen-1)
+		if err != nil {
+			return err
+		}
+		if !revoked || c.ValidFrom <= at {
+			continue
+		}
+		es, err := log.Lookup(translog.KindPlatform, []byte(f.name))
+		if err != nil {
+			return fmt.Errorf("ceremony: looking up %s in the log: %w", f.name, err)
+		}
+		if len(es) > 0 && bytes.Equal(es[0].Content, f.data) {
+			continue // logged before; Append is idempotent
+		}
+		atText := time.UnixMilli(at).UTC().Format(time.RFC3339Nano)
+		return fmt.Errorf("%w: %s is valid from %d (%s), after ingest generation %d is revoked (%d, %s): no ingest generation would sign heads in between; make it valid from %s (ingest-rotate --valid-from)",
+			ErrRevocation, f.name, c.ValidFrom, time.UnixMilli(c.ValidFrom).UTC().Format(time.RFC3339Nano), f.gen-1, at, atText, atText)
+	}
+	return nil
+}
+
+// checkNotRevoked reports translog.ErrRevoked when the pin's revocation
+// list rev makes the certificate or succession f invalid at the log
+// index it would get (D93 (2), translog doc.go "Validity rules"): issued
+// by identity generation issuer (a certificate's identity_gen, g-1 for
+// identity-<g>.succ) that is revoked, a succession to a revoked identity
+// generation, or the certificate of a revoked admin or ingest
+// generation. next is the newest published head's size: no entry
+// appended now gets a smaller index, and checkRevocations made every
+// boundary at most next, so every listed generation is revoked for it.
+// An entry that is already a valid entry of the log with the same
+// content stays as it is (Append is idempotent).
+func checkNotRevoked(log translog.Log, f platformFile, issuer uint32, rev []translog.Revoked, next int64) error {
+	if len(rev) == 0 {
+		return nil
+	}
+	var why string
+	switch {
+	case translog.RevokedAtIndex(rev, store.KeyRoleIdentity, issuer, next):
+		why = fmt.Sprintf("issued by identity generation %d", issuer)
+	case f.ext == "succ" && translog.RevokedAtIndex(rev, store.KeyRoleIdentity, f.gen, next):
+		why = fmt.Sprintf("a succession to identity generation %d", f.gen)
+	case f.ext == "cert" && translog.RevokedAtIndex(rev, uint8(roleOf(f.role)), f.gen, next):
+		why = fmt.Sprintf("%s generation %d", f.role, f.gen)
+	default:
+		return nil
+	}
+	es, err := log.Lookup(translog.KindPlatform, []byte(f.name))
+	if err != nil {
+		return fmt.Errorf("ceremony: looking up %s in the log: %w", f.name, err)
+	}
+	for _, e := range es {
+		if bytes.Equal(e.Content, f.data) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s: %s, which the pin revokes (field 7); nothing written", translog.ErrRevoked, f.name, why)
+}
+
+// ingestGaps calls report for every ingest generation of the log that
+// the revocation list rev revokes at some time (ingestRevokedAt) whose
+// successor has a valid_from after that time (a valid entry of the log;
+// a new one in the export is refused by checkSuccessors), or that has no
+// successor in the log or the export (validFrom 0); see
+// PublishOptions.IngestGap. The ingest generations of the log are
+// consecutive from 1 (translog: ingest-<g>.cert needs ingest-<g-1>.cert).
+func ingestGaps(log translog.Log, files map[string]platformFile, rev []translog.Revoked, report func(gen uint32, at, validFrom int64)) error {
+	for g := uint32(1); g < math.MaxUint32; g++ {
+		c, at, revoked, err := ingestRevokedAt(log, rev, g)
+		if err != nil {
+			return err
+		}
+		if c == nil {
+			return nil
+		}
+		if !revoked {
+			continue
+		}
+		next, _, _, err := ingestRevokedAt(log, rev, g+1)
+		if err != nil {
+			return err
+		}
+		_, inExport := files[store.PlatformFileName("ingest", g+1, "cert")]
+		switch {
+		case next != nil && next.ValidFrom > at:
+			report(g, at, next.ValidFrom)
+		case next == nil && !inExport:
+			report(g, at, 0)
+		}
+	}
+	return nil
 }

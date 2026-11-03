@@ -97,6 +97,9 @@ func TestStderrNull(t *testing.T) {
 		{"reshare", "--pin", pinPath, "--shares", "2-of-3"},
 		{"ingest-rotate", "--pin", pinPath, "--gen", "2", "--out", o2, "--keys", filepath.Join(base, "keys"), "--valid-from", "2026-11-01T00:00:00Z"},
 		{"succeed", "--pin", pinPath, "--out", o2, "--origin", "o", "--witness", w1, "--min-witnesses", "1"},
+		{"admin-rotate", "--pin", pinPath, "--gen", "2", "--out", o2, "--keys", filepath.Join(base, "keys"), "--valid-from", "2026-11-01T00:00:00Z"},
+		{"revoke", "--pin", pinPath, "--out", o2, "--role", "ingest", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1790000000000"},
+		{"succeed", "--pin", pinPath, "--out", o2, "--compromised", "--revoke-at-size", "2", "--revoke-at-time", "1790000000000"},
 	} {
 		for _, noTerm := range []bool{false, true} {
 			term := newTTY()

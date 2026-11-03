@@ -780,16 +780,17 @@ func TestPTYInterrupt(t *testing.T) {
 	}
 }
 
-// shareCommands returns the four commands that show or read shares, for
-// the pin pinPath, writing below base.
+// shareCommands returns the commands that show or read shares (the four
+// of task 10 and the three of task 21c, revocationCommands), for the pin
+// pinPath, writing below base.
 func shareCommands(base, pinPath, w1 string) [][]string {
 	validFrom := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	return [][]string{
+	return append([][]string{
 		{"init", "--shares", "3-of-5", "--out", filepath.Join(base, "o2"), "--keys", filepath.Join(base, "k2"), "--origin", "o", "--witness", w1, "--min-witnesses", "1"},
 		{"reshare", "--pin", pinPath, "--shares", "3-of-5"},
 		{"ingest-rotate", "--pin", pinPath, "--gen", "2", "--out", filepath.Join(base, "o2"), "--keys", filepath.Join(base, "k2"), "--valid-from", validFrom},
 		{"succeed", "--pin", pinPath, "--out", filepath.Join(base, "o2"), "--origin", "o", "--witness", w1, "--min-witnesses", "1"},
-	}
+	}, revocationCommands(base, pinPath)...)
 }
 
 // refusedAlone waits for the program to end by itself (nobody answers)
@@ -1402,5 +1403,5 @@ func TestEchoReadBack(t *testing.T) {
 			t.Fatalf("%s written", d)
 		}
 	}
-	t.Logf("%d swallowed TCSETS, all four commands refused", n)
+	t.Logf("%d swallowed TCSETS, all seven commands refused", n)
 }

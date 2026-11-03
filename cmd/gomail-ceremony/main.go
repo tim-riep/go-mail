@@ -4,9 +4,13 @@
 //	gomail-ceremony init --shares 3-of-5 --out <export> --keys <keydir> --origin <origin>
 //	                     --witness <name>=<vkey> [--witness ...] --min-witnesses <k>
 //	gomail-ceremony ingest-rotate --pin <pin> --gen <n> --out <export> --keys <keydir> --valid-from <RFC3339>
+//	gomail-ceremony admin-rotate --pin <pin> --gen <n> --out <export> --keys <keydir> --valid-from <RFC3339>
 //	gomail-ceremony reshare --pin <pin> --shares <k-of-n>
 //	gomail-ceremony succeed --pin <pin> --out <export> [--origin <origin>]
 //	                        [--witness <name>=<vkey> ...] [--min-witnesses <k>]
+//	                        [--compromised --revoke-at-size <N> --revoke-at-time <T>]
+//	gomail-ceremony revoke --pin <pin> --out <export> --role admin|ingest --generation <g>
+//	                       --revoke-at-size <N> --revoke-at-time <T>
 //	gomail-ceremony publish --from <export> --data <datadir> --pin <pin> [--replace-witnesses]
 //	gomail-ceremony init --dev --data <datadir> --keys <keydir>   (test build only)
 //
@@ -16,14 +20,15 @@
 // into a file. Shares are typed on standard input with the echo off.
 //
 // Terminal rule (task 10c finding 1): every command that shows or reads
-// shares (init, reshare, ingest-rotate, succeed) requires, before its
+// shares (init, reshare, ingest-rotate, admin-rotate, succeed, revoke:
+// shareCommands) requires, before its
 // first prompt, that standard output is a terminal and that standard
 // input is a terminal whose attributes can be read and whose echo can
 // be switched off (ECHO cleared and read back). Otherwise it refuses
 // with a message, before anything is shown, read or written; there is
 // no flag around it. Standard input from a file or a pipe is refused
 // (a share must never be on disk), and so is every system where this
-// program cannot switch the echo with syscall (tty_other.go: all four
+// program cannot switch the echo with syscall (tty_other.go: all six
 // commands refuse there).
 //
 // The input is normalized (2.2 "Eingabe von Wörtern", package words)
@@ -105,7 +110,7 @@
 // The prompts go to standard error, which need not be a terminal; but
 // it must be a terminal, a pipe or a regular file, open for writing
 // (task 15l, task 15m point 3). Before the
-// terminal check, before anything is shown, read or written, the four
+// terminal check, before anything is shown, read or written, the six
 // commands refuse with a usage error (exit code 2) a standard error that
 // is closed: the runtime puts /dev/null in place of a descriptor 2 that
 // is closed when the program starts, and every prompt would vanish
@@ -140,15 +145,57 @@
 // 6 and 8). init takes them from its flags; succeed takes them from the
 // pin given with --pin: --origin may be given only as a check (it never
 // changes), --witness and --min-witnesses change witnesses and quorum
-// on purpose. succeed --compromised is locked (task 15f point 1, Q19): a
-// usage error with exit code 2 before anything is shown, read or
-// written, until the revocation of a platform generation is specified
-// (ceremony.ErrCompromised). init shows the clock of the computer before
-// the first prompt, and succeed when it signs a succession: it gives
-// valid_from of what they sign (RUNBOOK).
+// on purpose. init shows the clock of the computer before the first
+// prompt, and succeed when it signs a succession: it gives valid_from of
+// what they sign (RUNBOOK).
+//
+// Revocation (D93, RUNBOOK 7.3): succeed --compromised writes the pin of
+// the next identity generation without succession, revoking the current
+// one in field 7; revoke writes the pin of the same identity generation
+// with one more admin or ingest generation revoked in field 7;
+// admin-rotate creates a new admin generation as ingest-rotate creates
+// an ingest generation. --revoke-at-size and --revoke-at-time are the
+// size and the time of a witness-confirmed head that the operator reads
+// before the ceremony, written exactly as the head shows them: the size
+// in decimal, the time in decimal milliseconds since 1970 UTC (the line
+// "time <T>" of the head), both without sign or leading zeros; both are
+// required with --compromised and with revoke, and refused (usage error)
+// without --compromised. The pin gets revoked_at_size = <N> and
+// revoked_at_time = <T> + 1 ms (D93 addendum: the confirmed head itself
+// stays valid). Before the first share is asked, the command shows the
+// head and the boundary, the times also in RFC 3339, so that the holders
+// compare them with the head read; the ceremony refuses a time after its
+// clock (plus translog.MaxClockSkew) and one before 2025-01-01 (a time in
+// seconds instead of milliseconds), both ceremony.ErrRevocation. The new pin
+// of revoke has the name of the current one (identity-<g>.pin) in the
+// export directory; it replaces the old one everywhere.
+//
+// Order after a revocation (D93 addendum): for a compromised ingest key
+// revoke, then ingest-rotate with the new pin and --valid-from exactly
+// revoked_at_time (<T> + 1 ms; revoke prints the RFC 3339 form): with a
+// pin that revokes the predecessor no other valid_from is taken, so that
+// no time is left without an ingest generation that signs heads. After
+// succeed --compromised the new pin allows a --valid-from in the past
+// down to the boundary of the compromised identity, and publish refuses
+// an ingest successor of a generation that the compromised identity
+// certified whose valid_from lies after the boundary; ingest-rotate
+// warns on standard error, before the first share, when --valid-from
+// lies after it and names the boundary. A generation that
+// the pin revokes is never rotated to again (its key is the stolen one).
+// publish warns on standard error when a revoked ingest generation has
+// no successor yet (ceremony.PublishOptions IngestGap) and when the
+// newest head carries the log signature of an ingest generation the pin
+// revokes at its time (RevokedHead: gomail-server log repair moves it).
+// A certificate the thief logged with the compromised identity at or
+// after the boundary is invalid and its name free: publish replaces the
+// file (and its public key) in data/platform/ by the reissued one of the
+// same name; a certificate or succession that is a valid entry of the
+// log is never replaced. admin-rotate
+// alone does not end a leaked admin key (it can still assign with a
+// backdated valid_from): revoke does.
 //
 // Targets: Linux, macOS and the BSDs control the terminal (tty_unix.go);
-// on the other systems the program builds, but the four commands refuse
+// on the other systems the program builds, but the six commands refuse
 // (tty_other.go). plan9 and js/wasm are not supported and the program
 // does not build there: package ceremony needs syscall.Rename, which
 // plan9 lacks, and this command syscall.SIGHUP, which js/wasm lacks
@@ -170,10 +217,12 @@
 // gomail_dev (dev_dev.go), the production program refuses --dev as an
 // unknown flag.
 //
-// Additions to 9.2 (proposed by task 03, flags by task 10): the commands
-// succeed and publish, and the flags --out, --keys, --origin, --witness,
-// --min-witnesses, --pin, --gen, --valid-from, --compromised (locked),
-// --from, --data and --replace-witnesses of the real ceremony.
+// Additions to 9.2 (proposed by task 03, flags by task 10, task 21c):
+// the commands succeed, publish, admin-rotate and revoke, and the flags
+// --out, --keys, --origin, --witness, --min-witnesses, --pin, --gen,
+// --valid-from, --compromised, --revoke-at-size, --revoke-at-time,
+// --role, --generation, --from, --data and --replace-witnesses of the
+// real ceremony.
 package main
 
 import (
@@ -200,6 +249,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/ceremony"
 	"github.com/tim-riep/go-mail/internal/shamir"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/translog"
 	"github.com/tim-riep/go-mail/internal/witness"
 	"github.com/tim-riep/go-mail/internal/words"
 )
@@ -224,13 +274,19 @@ const usage = `Aufruf:
                        --witness <name>=<verifier-zeile> [--witness ...] --min-witnesses <k>
   gomail-ceremony ingest-rotate --pin <pin> --gen <n> --out <export> --keys <schlüssel>
                        --valid-from <RFC3339>
+  gomail-ceremony admin-rotate --pin <pin> --gen <n> --out <export> --keys <schlüssel>
+                       --valid-from <RFC3339>
   gomail-ceremony reshare --pin <pin> --shares <k-of-n>
   gomail-ceremony succeed --pin <pin> --out <export> [--origin <origin>]
                        [--witness <name>=<verifier-zeile> ...] [--min-witnesses <k>]
+                       [--compromised --revoke-at-size <N> --revoke-at-time <T>]
+  gomail-ceremony revoke --pin <pin> --out <export> --role admin|ingest --generation <g>
+                       --revoke-at-size <N> --revoke-at-time <T>
   gomail-ceremony publish --from <export> --data <datenverzeichnis> --pin <pin>
                        [--replace-witnesses]
 
-init, ingest-rotate, reshare und succeed laufen auf einem Rechner ohne Netzwerk.
+init, ingest-rotate, admin-rotate, reshare, succeed und revoke laufen auf einem
+Rechner ohne Netzwerk.
 Die Anteile erscheinen nur auf diesem Bildschirm, nie in einer Datei:
 Standardeingabe und Standardausgabe müssen ein Terminal sein, dessen Echo sich
 abschalten lässt (keine Umleitung, keine Pipe); die Standardfehlerausgabe mit
@@ -245,8 +301,22 @@ Pins (nach succeed --witness/--min-witnesses). Die Pin-Datei ist nicht
 signiert: mit --replace-witnesses hängen die Zeugen, denen der Server traut,
 allein an ihrer Echtheit (Vertrauensanker des Betreibers, wie beim Serverstart).
 --pin ist der Pin der aktuellen Identität (identity-<gen>.pin), bei publish
-nach einer Nachfolge der neue.
-succeed --compromised ist noch nicht verfügbar (Q19).
+nach einer Nachfolge oder einem Widerruf der neue.
+Widerruf (RUNBOOK 7.3): <N> und <T> sind Größe und Zeit eines von den Zeugen
+bestätigten Kopfes, vor der Zeremonie abgelesen: <T> in Millisekunden seit 1970
+UTC wie in der Zeile "time <T>" des Kopfes (nicht vor 2025-01-01, also nicht in
+Sekunden). Der Pin widerruft ab Logindex <N>
+und ab Zeit <T> + 1 ms; der Kopf selbst bleibt gültig. succeed --compromised
+schreibt den Pin der nächsten Identitätsgeneration ohne Nachfolge und widerruft
+die bisherige; danach admin-rotate und ingest-rotate mit dem neuen Pin (Pflicht),
+die Ingest-Generation mit --valid-from nicht nach <T> + 1 ms. revoke schreibt den
+Pin derselben Identitätsgeneration mit einem weiteren Widerruf (Admin oder
+Ingest); er ersetzt den bisherigen Pin überall. Bei einem kompromittierten
+Ingest-Schlüssel zuerst revoke, dann ingest-rotate mit dem neuen Pin und
+--valid-from genau <T> + 1 ms (RFC 3339, wie revoke ihn nennt). Eine widerrufene
+Generation wird nie neu zertifiziert. admin-rotate allein beendet einen
+entwendeten Admin-Schlüssel nicht (er kann rückdatiert weiter zuordnen): dafür
+revoke.
 `
 
 // exitUsage and exitFail are the exit codes for wrong arguments and a
@@ -307,7 +377,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "init":
 		return e.init(args[1:])
 	case "ingest-rotate":
-		return e.rotate(args[1:])
+		return e.rotate(args[1:], store.KeyRoleIngest)
+	case "admin-rotate":
+		return e.rotate(args[1:], store.KeyRoleAdmin)
+	case "revoke":
+		return e.revoke(args[1:])
 	case "reshare":
 		return e.reshare(args[1:])
 	case "succeed":
@@ -714,7 +788,8 @@ func (e *env) refuse(err error) int {
 }
 
 // checkTerminal is the first step of every command that shows or reads
-// shares (init, reshare, ingest-rotate, succeed; task 10c finding 1):
+// shares (init, reshare, ingest-rotate, admin-rotate, succeed, revoke;
+// task 10c finding 1):
 // standard error must be usable (checkStderr, first: task 15l point 2),
 // standard output must be a terminal, and standard input a terminal
 // whose attributes can be read. Otherwise errStderrClosed or
@@ -2086,13 +2161,16 @@ func (t *term) clockHint(what string) {
 		now().UTC().Format(time.RFC3339), what)
 }
 
-func (e *env) rotate(args []string) int {
-	fs := e.flags("ingest-rotate")
+// rotate is ingest-rotate (role store.KeyRoleIngest) and admin-rotate
+// (store.KeyRoleAdmin, D93 (3)).
+func (e *env) rotate(args []string, role uint8) int {
+	name := ceremony.RoleName(role)
+	fs := e.flags(name + "-rotate")
 	pinPath := fs.String("pin", "", "Pin der aktuellen Identität")
-	genArg := fs.String("gen", "", "neue Ingest-Generation (höchste vorhandene + 1)")
+	genArg := fs.String("gen", "", "neue Generation (höchste vorhandene + 1)")
 	out := fs.String("out", "", "Exportverzeichnis, neu oder leer")
-	keyDir := fs.String("keys", "", "Verzeichnis für den privaten Ingest-Schlüssel")
-	validArg := fs.String("valid-from", "", "Umschaltzeitpunkt (RFC 3339, nicht in der Vergangenheit), ab dem der Server den neuen Schlüssel benutzt")
+	keyDir := fs.String("keys", "", "Verzeichnis für den privaten Schlüssel")
+	validArg := fs.String("valid-from", "", "Umschaltzeitpunkt (RFC 3339, nicht in der Vergangenheit; ingest-rotate mit einem Pin, der die Vorgängerin widerruft: ab deren Widerrufszeit), ab dem der neue Schlüssel gilt")
 	if !parse(fs, args) || *pinPath == "" || *genArg == "" || *out == "" || *keyDir == "" || *validArg == "" {
 		return e.usage("")
 	}
@@ -2115,17 +2193,67 @@ func (e *env) rotate(args []string) int {
 	if err != nil {
 		return e.fail(err)
 	}
-	res, err := ceremony.IngestRotate(ceremony.RotateOptions{
+	if role == store.KeyRoleIngest {
+		if w := lateAfterCompromise(pin, uint32(gen), validFrom); w != "" {
+			t.prompt("%s", w)
+		}
+	}
+	opts := ceremony.RotateOptions{
 		UnlockOptions: e.unlockOptions(pin, t), Out: *out, KeyDir: *keyDir, Gen: uint32(gen), ValidFrom: validFrom,
-	})
+		Revoked: pin.Revoked,
+	}
+	var res *ceremony.RotateResult
+	if role == store.KeyRoleAdmin {
+		res, err = ceremony.AdminRotate(opts)
+	} else {
+		res, err = ceremony.IngestRotate(opts)
+	}
 	if err := t.finish(err); err != nil {
 		return e.fail(err)
 	}
+	keyFile := filepath.Join(*keyDir, store.PlatformFileName(name, res.Gen, "key"))
+	if role == store.KeyRoleAdmin {
+		fmt.Fprintf(e.stdout, "Admin-Generation %d erzeugt, gültig ab %s.\n", res.Gen, validFrom.UTC().Format(time.RFC3339))
+		fmt.Fprintf(e.stdout, "Exportverzeichnis:   %s  (gomail-ceremony publish auf dem Server)\n", *out)
+		fmt.Fprintf(e.stdout, "Admin-Schlüssel:     %s  (zum Administrator)\n", keyFile)
+		fmt.Fprintf(e.stdout, "Die bisherige Admin-Generation ordnet nur bis %s gültig zu; ist ihr Schlüssel entwendet, sie mit revoke widerrufen.\n", validFrom.UTC().Format(time.RFC3339))
+		return 0
+	}
 	fmt.Fprintf(e.stdout, "Ingest-Generation %d erzeugt, gültig ab %s.\n", res.Gen, validFrom.UTC().Format(time.RFC3339))
 	fmt.Fprintf(e.stdout, "Exportverzeichnis:   %s  (gomail-ceremony publish vor dem Umschalten)\n", *out)
-	fmt.Fprintf(e.stdout, "Ingest-Schlüssel:    %s\n", filepath.Join(*keyDir, store.PlatformFileName("ingest", res.Gen, "key")))
+	fmt.Fprintf(e.stdout, "Ingest-Schlüssel:    %s\n", keyFile)
 	fmt.Fprintln(e.stdout, "Die Zeugen brauchen den neuen Log-Schlüssel (--log-key).")
 	return 0
+}
+
+// lateAfterCompromise returns the warning that ingest-rotate shows on
+// standard error before any share is asked (empty when none) when it runs with the pin of succeed --compromised
+// (field 7 revokes identity generation pin.Gen-1, not ingest generation
+// gen-1 itself) and --valid-from lies after the boundary of that
+// identity (spec review 21c Low-1): the ceremony takes it (it does not
+// know which identity certified ingest generation gen-1), but publish
+// refuses it if the compromised identity certified gen-1, because no
+// ingest generation would sign heads in between.
+func lateAfterCompromise(pin *store.PlatformPin, gen uint32, validFrom time.Time) string {
+	if pin.Gen < 2 || gen < 2 {
+		return ""
+	}
+	var at int64
+	for _, r := range pin.Revoked {
+		switch {
+		case r.Role == store.KeyRoleIngest && r.Gen == gen-1:
+			return "" // the exact rule, checked by the ceremony itself
+		case r.Role == store.KeyRoleIdentity && r.Gen == pin.Gen-1:
+			at = r.AtTime
+		}
+	}
+	if at == 0 || validFrom.UnixMilli() <= at {
+		return ""
+	}
+	return fmt.Sprintf("WARNUNG: --valid-from %s liegt nach der Widerrufszeit %d (%s) der kompromittierten Identitätsgeneration %d. "+
+		"Hat diese ingest-%d.cert ausgestellt, verweigert publish das neue Zertifikat (dazwischen signierte kein Ingest-Schlüssel gültige Köpfe): "+
+		"dann --valid-from %s. Weicht das ab, jetzt mit Strg-C abbrechen.\n",
+		validFrom.UTC().Format(time.RFC3339Nano), at, rfc3339ms(at), pin.Gen-1, gen-1, rfc3339ms(at))
 }
 
 func (e *env) reshare(args []string) int {
@@ -2167,17 +2295,21 @@ func (e *env) succeed(args []string) int {
 	var ws witnessFlag
 	fs.Var(&ws, "witness", "Zeuge <name>=<verifier-zeile> (mehrfach; nur für eine ausdrückliche Änderung, sonst die des Pins)")
 	minW := fs.Int("min-witnesses", 0, "nötige Zeugensignaturen (nur für eine ausdrückliche Änderung, sonst die des Pins)")
-	compromised := fs.Bool("compromised", false, "gesperrt: noch nicht verfügbar (Q19)")
-	if !parse(fs, args) {
+	compromised := fs.Bool("compromised", false, "die aktuelle Identitätsgeneration ist kompromittiert: Pin ohne Nachfolge, sie wird widerrufen (D93)")
+	var b boundaryFlags
+	b.register(fs)
+	if !parse(fs, args) || *pinPath == "" || *out == "" || *minW < 0 {
 		return e.usage("")
 	}
+	if !*compromised && b.set() {
+		return e.usage("--revoke-at-size und --revoke-at-time nur mit --compromised")
+	}
+	var size, at int64
 	if *compromised {
-		// TODO(Q19): locked (task 15f point 1) before anything is shown,
-		// read or written, the terminal check included.
-		return e.usage(errCompromised)
-	}
-	if *pinPath == "" || *out == "" || *minW < 0 {
-		return e.usage("")
+		var msg string
+		if size, at, msg = b.values(); msg != "" {
+			return e.usage("succeed --compromised: " + msg)
+		}
 	}
 	if err := e.checkTerminal(); err != nil {
 		return e.refuse(err)
@@ -2194,22 +2326,178 @@ func (e *env) succeed(args []string) int {
 		return e.fail(err)
 	}
 	// The clock gives valid_from of the succession; it is shown only when
-	// a succession is signed (task 15f point 4): after a compromise
-	// (locked above, Q19) none would be.
-	if !*compromised {
+	// a succession is signed (task 15f point 4). After a compromise the
+	// boundary of the revocation is shown instead, with the clock it is
+	// checked against.
+	if *compromised {
+		t.boundaryHint(fmt.Sprintf("Identitätsgeneration %d", pin.Gen), size, at)
+	} else {
 		t.clockHint("Nachfolge")
 	}
 	res, err := ceremony.Succeed(ceremony.SucceedOptions{
 		UnlockOptions: e.unlockOptions(pin, t), Out: *out, Pin: pin,
 		Origin: *origin, Witnesses: ws, MinWitnesses: *minW,
+		Compromised: *compromised, HeadSize: size, HeadTime: at,
 	})
 	if err := t.finish(err); err != nil {
 		return e.fail(err)
 	}
-	fmt.Fprintf(e.stdout, "Identitätsgeneration %d erzeugt.\n", res.Pin.Gen)
+	pinOut := filepath.Join(res.Out, store.PlatformFileName("identity", res.Pin.Gen, "pin"))
+	if *compromised {
+		fmt.Fprintf(e.stdout, "Identitätsgeneration %d erzeugt, ohne Nachfolge; Generation %d ist widerrufen.\n", res.Pin.Gen, pin.Gen)
+		fmt.Fprintf(e.stdout, "Widerruf im Pin:     %s\n", boundaryText(fmt.Sprintf("Identitätsgeneration %d", pin.Gen), size, at))
+	} else {
+		fmt.Fprintf(e.stdout, "Identitätsgeneration %d erzeugt.\n", res.Pin.Gen)
+	}
 	fmt.Fprintf(e.stdout, "Exportverzeichnis:   %s\n", res.Out)
-	fmt.Fprintf(e.stdout, "Neuer Pin:           %s  (Client-Update und gomail-server --pin, vor publish)\n", filepath.Join(res.Out, store.PlatformFileName("identity", res.Pin.Gen, "pin")))
+	fmt.Fprintf(e.stdout, "Neuer Pin:           %s  (Client-Update und gomail-server --pin, vor publish)\n", pinOut)
+	if *compromised {
+		fmt.Fprintf(e.stdout, "Pflicht: Admin und Ingest unter Generation %d neu ausstellen: admin-rotate und ingest-rotate mit --pin %s; "+
+			"die neue Ingest-Generation mit --valid-from %s (nicht später).\n", res.Pin.Gen, pinOut, rfc3339ms(at+1))
+	}
 	return 0
+}
+
+// revoke revokes an admin or ingest generation in a new pin of the same
+// identity generation (D93 (4), RUNBOOK 7.3.3 and 7.3.4).
+func (e *env) revoke(args []string) int {
+	fs := e.flags("revoke")
+	pinPath := fs.String("pin", "", "Pin der aktuellen Identität")
+	out := fs.String("out", "", "Exportverzeichnis für den neuen Pin, neu oder leer")
+	roleArg := fs.String("role", "", "Rolle der widerrufenen Generation: admin oder ingest")
+	genArg := fs.String("generation", "", "widerrufene Generation")
+	var b boundaryFlags
+	b.register(fs)
+	if !parse(fs, args) || *pinPath == "" || *out == "" || *roleArg == "" || *genArg == "" {
+		return e.usage("")
+	}
+	var role uint8
+	switch *roleArg {
+	case "admin":
+		role = store.KeyRoleAdmin
+	case "ingest":
+		role = store.KeyRoleIngest
+	default:
+		return e.usage("--role: admin oder ingest (eine Identitätsgeneration widerruft succeed --compromised)")
+	}
+	gen, ok := parseDecimal(*genArg, 1<<32-1)
+	if !ok || gen == 0 {
+		return e.usage("--generation: keine Generation")
+	}
+	size, at, msg := b.values()
+	if msg != "" {
+		return e.usage("revoke: " + msg)
+	}
+	if err := e.checkTerminal(); err != nil {
+		return e.refuse(err)
+	}
+	pin, err := readPin(*pinPath)
+	if err != nil {
+		return e.fail(err)
+	}
+	t, err := e.openTerm()
+	if err != nil {
+		return e.fail(err)
+	}
+	what := fmt.Sprintf("%s-Generation %d", roleLabel(role), gen)
+	t.boundaryHint(what, size, at)
+	res, err := ceremony.Revoke(ceremony.RevokeOptions{
+		UnlockOptions: e.unlockOptions(pin, t), Out: *out, Pin: pin,
+		Role: role, Gen: uint32(gen), HeadSize: size, HeadTime: at,
+	})
+	if err := t.finish(err); err != nil {
+		return e.fail(err)
+	}
+	fmt.Fprintf(e.stdout, "Widerruf eingetragen: %s.\n", boundaryText(what, size, at))
+	newPin := filepath.Join(res.Out, store.PlatformFileName("identity", res.Pin.Gen, "pin"))
+	fmt.Fprintf(e.stdout, "Neuer Pin:           %s  (ersetzt %s überall: Server, Administrator, Clients)\n",
+		newPin, store.PlatformFileName("identity", res.Pin.Gen, "pin"))
+	if role == store.KeyRoleIngest {
+		fmt.Fprintf(e.stdout, "Nachfolgerin (Pflicht, ohne Lücke): ingest-rotate --pin %s --gen %d ... --valid-from %s\n",
+			newPin, gen+1, rfc3339ms(at+1))
+	} else {
+		fmt.Fprintf(e.stdout, "Neue Admin-Generation: admin-rotate --pin %s --gen %d ...\n", newPin, gen+1)
+	}
+	return 0
+}
+
+// roleLabel names a role in messages.
+func roleLabel(role uint8) string {
+	if role == store.KeyRoleAdmin {
+		return "Admin"
+	}
+	return "Ingest"
+}
+
+// boundaryFlags are --revoke-at-size and --revoke-at-time (D93): the
+// size and the time of a witness-confirmed head, as the head shows them.
+type boundaryFlags struct{ size, at *string }
+
+func (b *boundaryFlags) register(fs *flag.FlagSet) {
+	b.size = fs.String("revoke-at-size", "", "Größe des von den Zeugen bestätigten Kopfes (wird revoked_at_size)")
+	b.at = fs.String("revoke-at-time", "", "Zeit desselben Kopfes in Millisekunden seit 1970 UTC, wie in der Zeile \"time <T>\" (revoked_at_time wird diese Zeit + 1 ms)")
+}
+
+func (b *boundaryFlags) set() bool { return *b.size != "" || *b.at != "" }
+
+// values returns both values, or a message for the usage error: both
+// are required, decimal without sign or leading zeros, the size from 1
+// to translog.MaxTreeSize (the strict form of a head, translog
+// ParseHeadText) and the time at least 1. The comparison with the clock
+// of the ceremony is ceremony.Succeed's and ceremony.Revoke's.
+func (b *boundaryFlags) values() (int64, int64, string) {
+	if *b.size == "" || *b.at == "" {
+		return 0, 0, "--revoke-at-size und --revoke-at-time sind nötig (Größe und Zeit eines von den Zeugen bestätigten Kopfes)"
+	}
+	size, ok := parseDecimal(*b.size, uint64(translog.MaxTreeSize))
+	if !ok || size == 0 {
+		return 0, 0, fmt.Sprintf("--revoke-at-size: keine Größe eines Kopfes (dezimal, 1 bis %d)", translog.MaxTreeSize)
+	}
+	at, ok := parseDecimal(*b.at, 1<<63-2)
+	if !ok || at == 0 {
+		return 0, 0, "--revoke-at-time: keine Zeit eines Kopfes (Millisekunden seit 1970 UTC, dezimal, wie in der Zeile \"time <T>\")"
+	}
+	return int64(size), int64(at), ""
+}
+
+// parseDecimal parses s as a decimal number without sign or leading
+// zeros of at most max (the strict form of the numbers of a head).
+func parseDecimal(s string, max uint64) (uint64, bool) {
+	if s == "" || len(s) > 20 || (len(s) > 1 && s[0] == '0') {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || v > max {
+		return 0, false
+	}
+	return v, true
+}
+
+// boundaryText describes a revocation for the head of size size and
+// time head: what, revoked_at_size and revoked_at_time = head + 1 ms
+// (D93 addendum; also in RFC 3339).
+func boundaryText(what string, size, head int64) string {
+	return fmt.Sprintf("%s ab Logindex %d und Zeit %d (%s)", what, size, head+1, rfc3339ms(head+1))
+}
+
+// rfc3339ms returns a time in milliseconds since 1970 UTC in RFC 3339
+// with fractional seconds, as --valid-from takes it.
+func rfc3339ms(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339Nano) }
+
+// boundaryHint shows the revocation before the first prompt, with the
+// head it comes from and the clock of the ceremony computer it is
+// checked against (D93): the holders compare it with the head read
+// before the ceremony.
+func (t *term) boundaryHint(what string, size, head int64) {
+	t.prompt("Widerruf: %s. Kopf: Größe %d, \"time %d\" (%s); der Kopf selbst bleibt gültig. "+
+		"Mit dem abgelesenen Kopf vergleichen; weicht etwas ab, jetzt mit Strg-C abbrechen.\n",
+		boundaryText(what, size, head), size, head, rfc3339ms(head))
+	t.prompt("Uhr dieses Rechners: %s; die Zeit des Kopfes liegt nicht danach.\n", now().UTC().Format(time.RFC3339))
 }
 
 func (e *env) publish(args []string) int {
@@ -2229,11 +2517,34 @@ func (e *env) publish(args []string) int {
 	if err != nil {
 		return e.fail(err)
 	}
-	var replaced string
+	var replaced, revoked string
+	var gaps []string
 	opts := ceremony.PublishOptions{From: *from, Data: st, Pin: pin, ReplaceWitnesses: *replaceW,
 		WitnessesReplaced: func(before, after *witness.Witnesses) {
 			replaced = fmt.Sprintf("platform/witnesses.rec ersetzt: bisher Quorum %d von %d (%s), jetzt Quorum %d von %d (%s) wie im Pin.\n",
 				before.Min, len(before.List), witnessNames(before.List), after.Min, len(after.List), witnessNames(after.List))
+		},
+		RevocationsChecked: func(h *translog.Head) {
+			revoked = fmt.Sprintf("Widerrufe des Pins (%d) geprüft gegen den neuesten bestätigten Kopf (Größe %d, Zeit %d).\n",
+				len(pin.Revoked), h.Size, h.Time)
+		},
+		IngestGap: func(gen uint32, at, validFrom int64) {
+			from := time.UnixMilli(at).UTC().Format(time.RFC3339Nano)
+			if validFrom == 0 {
+				gaps = append(gaps, fmt.Sprintf("WARNUNG: Ingest-Generation %d ist ab %s widerrufen, ingest-%d.cert gibt es noch nicht: "+
+					"bis zu ihrem valid_from signiert kein Ingest-Schlüssel gültige Köpfe; Clients stoppen 24 Stunden nach dem letzten Kopf. "+
+					"Nachfolgerin mit ingest-rotate --pin <dieser Pin> --valid-from %s.\n", gen, from, gen+1, from))
+				return
+			}
+			gaps = append(gaps, fmt.Sprintf("WARNUNG: Ingest-Generation %d ist ab %s widerrufen, ingest-%d.cert gilt erst ab %s: "+
+				"dazwischen signiert kein Ingest-Schlüssel gültige Köpfe, und Clients stoppen 24 Stunden nach dem letzten Kopf.\n",
+				gen, from, gen+1, time.UnixMilli(validFrom).UTC().Format(time.RFC3339Nano)))
+		},
+		RevokedHead: func(h *translog.Head, gen uint32, at int64) {
+			gaps = append(gaps, fmt.Sprintf("WARNUNG: der neueste Kopf (Größe %d, Zeit %d, %s) trägt die Logsignatur von Ingest-Generation %d, die der Pin ab %d (%s) widerruft: "+
+				"Clients verwerfen ihn, gomail-server log repair verschiebt ihn nach log/heads-revoked/. "+
+				"Stammt die Grenze des Pins aus ihm (oder aus einem Kopf gleicher Größe, den er ersetzt hat), bleibt danach kein bestätigter Kopf, aus dem sie stammt.\n",
+				h.Size, h.Time, rfc3339ms(h.Time), gen, at, rfc3339ms(at)))
 		}}
 	if err := ceremony.Publish(opts); err != nil {
 		if errors.Is(err, store.ErrLocked) {
@@ -2242,14 +2553,14 @@ func (e *env) publish(args []string) int {
 		return e.fail(err)
 	}
 	fmt.Fprint(e.stdout, replaced)
+	fmt.Fprint(e.stdout, revoked)
+	for _, g := range gaps {
+		fmt.Fprint(e.stderr, g)
+	}
 	fmt.Fprintf(e.stdout, "%s in %s veröffentlicht und ins Log eingetragen.\n", *from, *data)
 	fmt.Fprintf(e.stdout, "Den Server jetzt mit diesem Pin starten: gomail-server serve --pin %s ...\n", *pinPath)
 	return 0
 }
-
-// errCompromised is the fixed text of the refusal of succeed
-// --compromised (task 15f point 1, ceremony.ErrCompromised).
-const errCompromised = "succeed --compromised: noch nicht verfügbar: Widerruf einer Plattformgeneration ist nicht festgelegt (Q19)"
 
 // witnessNames returns the names of ws, comma separated (names are
 // checked by witness.CheckName; no secret).

@@ -616,6 +616,34 @@ func TestUsage(t *testing.T) {
 		{1, []string{"succeed", "--pin", devPin, "--out", o}},
 		{1, []string{"succeed", "--pin", devPin, "--out", o, "--origin", "o", "--witness", w1, "--min-witnesses", "1"}},
 		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "2"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-time", "1790000000000"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--revoke-at-size", "2", "--revoke-at-time", "1790000000000"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "02", "--revoke-at-time", "1790000000000"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "0", "--revoke-at-time", "1790000000000"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "1099511627777", "--revoke-at-time", "1790000000000"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "2", "--revoke-at-time", "2026-10-01T12:00:00Z"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "2", "--revoke-at-time", "-1"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "+2", "--revoke-at-time", "1"}},
+		{2, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "2", "--revoke-at-time", "0"}},
+		{1, []string{"succeed", "--pin", devPin, "--out", o, "--compromised", "--revoke-at-size", "1099511627776", "--revoke-at-time", "1790000000000"}},
+		{2, []string{"admin-rotate", "--pin", devPin}},
+		{2, []string{"admin-rotate", "--pin", devPin, "--gen", "x", "--out", o, "--keys", k, "--valid-from", "2026-11-01T00:00:00Z"}},
+		{2, []string{"admin-rotate", "--pin", devPin, "--gen", "2", "--out", o, "--keys", k, "--valid-from", "morgen"}},
+		{1, []string{"admin-rotate", "--pin", devPin, "--gen", "2", "--out", o, "--keys", k, "--valid-from", "2026-11-01T00:00:00Z"}},
+		{2, []string{"revoke", "--pin", devPin}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "ingest", "--generation", "1", "--revoke-at-size", "2"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "identity", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "Ingest", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "ingest", "--generation", "0", "--revoke-at-size", "2", "--revoke-at-time", "1"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "ingest", "--generation", "4294967296", "--revoke-at-size", "2", "--revoke-at-time", "1"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "admin", "--generation", "1", "--revoke-at-size", "x", "--revoke-at-time", "1"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "admin", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "99999999999999999999"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "admin", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "9223372036854775807"}},
+		{1, []string{"revoke", "--pin", devPin, "--out", o, "--role", "admin", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "9223372036854775806"}},
+		{2, []string{"revoke", "--pin", devPin, "--out", o, "--role", "admin", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1", "extra"}},
+		{1, []string{"revoke", "--pin", devPin, "--out", o, "--role", "admin", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1"}},
+		{1, []string{"revoke", "--pin", filepath.Join(base, "missing"), "--out", o, "--role", "ingest", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1"}},
 		{2, []string{"publish", "--from", o, "--replace-witnesses"}},
 		{2, []string{"publish", "--from", o}},
 		{1, []string{"publish", "--from", o, "--data", base, "--pin", devPin}},
@@ -666,6 +694,9 @@ func TestNoTerminal(t *testing.T) {
 		{"reshare", "--pin", pinPath, "--shares", "2-of-3"},
 		{"ingest-rotate", "--pin", pinPath, "--gen", "2", "--out", o2, "--keys", filepath.Join(base, "keys"), "--valid-from", "2026-11-01T00:00:00Z"},
 		{"succeed", "--pin", pinPath, "--out", o2, "--origin", "o", "--witness", w1, "--min-witnesses", "1"},
+		{"admin-rotate", "--pin", pinPath, "--gen", "2", "--out", o2, "--keys", filepath.Join(base, "keys"), "--valid-from", "2026-11-01T00:00:00Z"},
+		{"revoke", "--pin", pinPath, "--out", o2, "--role", "ingest", "--generation", "1", "--revoke-at-size", "2", "--revoke-at-time", "1790000000000"},
+		{"succeed", "--pin", pinPath, "--out", o2, "--compromised", "--revoke-at-size", "2", "--revoke-at-time", "1790000000000"},
 	} {
 		refused := func(what string, code int, msgs string) {
 			t.Helper()
@@ -1038,65 +1069,6 @@ func TestScrubInput(t *testing.T) {
 	r.chunks = [][]byte{[]byte("\n")}
 	if _, err := e.readLine(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestSucceedCompromised: succeed --compromised is locked (task 15f
-// point 1, Q19 stopping point 2): a usage error with exit code 2 and the
-// fixed text, before the terminal is checked, a share is asked or the
-// clock is shown; nothing is written, with or without the other flags.
-func TestSucceedCompromised(t *testing.T) {
-	fixClock(t)
-	base := t.TempDir()
-	w1, w2, w3 := witnessArg(t, "w1"), witnessArg(t, "w2"), witnessArg(t, "w3")
-	out, kd := filepath.Join(base, "out"), filepath.Join(base, "keys")
-	tt := newTTY()
-	if code := tt.run("init", "--shares", "2-of-2", "--out", out, "--keys", kd, "--origin", "o", "--witness", w1, "--min-witnesses", "1"); code != 0 {
-		t.Fatal(tt.msgs.String())
-	}
-	shares := tt.shares
-	pin1 := filepath.Join(out, "identity-1.pin")
-	succ := filepath.Join(base, "succ")
-	const fixed = "noch nicht verfügbar: Widerruf einer Plattformgeneration ist nicht festgelegt (Q19)"
-	for _, args := range [][]string{
-		{"succeed", "--pin", pin1, "--out", succ, "--compromised"},
-		{"succeed", "--pin", pin1, "--out", succ, "--witness", w1, "--witness", w2, "--witness", w3, "--min-witnesses", "2", "--compromised"},
-		{"succeed", "--compromised"},
-		{"succeed", "--compromised", "--pin", filepath.Join(base, "missing"), "--out", succ},
-	} {
-		tt = newTTY()
-		tt.queue = []string{shares[1], shares[2]}
-		code := tt.run(args...)
-		if code != exitUsage || !strings.Contains(tt.msgs.String(), fixed) {
-			t.Fatalf("%v: %d %s", args, code, tt.msgs.String())
-		}
-		if len(tt.typed) != 0 || tt.reads != 0 || tt.prompts != 0 || tt.echoOff || tt.flowOff || tt.out.Len() != 0 ||
-			strings.Contains(tt.msgs.String(), "Uhr dieses Rechners") {
-			t.Fatalf("%v: the terminal was used: %q", args, tt.screen.String())
-		}
-		if _, err := os.Stat(succ); err == nil {
-			t.Fatalf("%v: export written", args)
-		}
-	}
-	// Without the stand-in terminal it is the same usage error.
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"succeed", "--pin", pin1, "--out", succ, "--compromised"}, strings.NewReader(""), &stdout, &stderr); code != exitUsage ||
-		!strings.Contains(stderr.String(), fixed) {
-		t.Fatalf("plain run: %d %s", code, stderr.String())
-	}
-	// The library refuses it too (ceremony.ErrCompromised), before any
-	// share is asked.
-	pin, err := ceremony.ReadPin(pin1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := &countingPrompter{}
-	if _, err := ceremony.Succeed(ceremony.SucceedOptions{UnlockOptions: ceremony.UnlockOptions{IdentityGen: 1, IdentityPub: pin.Pub, Prompter: p},
-		Out: succ, Pin: pin, Compromised: true}); !errors.Is(err, ceremony.ErrCompromised) {
-		t.Fatalf("library: %v", err)
-	}
-	if _, err := os.Stat(succ); err == nil || p.calls != 0 {
-		t.Fatal("library: export written or share asked")
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/mod/sumdb/note"
+
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/shamir"
 	"github.com/tim-riep/go-mail/internal/store"
@@ -115,6 +117,9 @@ type fixture struct {
 	scr    *screen
 	shares map[int][]string
 	w      []witness.Key
+	// ws are the note signers of the witnesses w (newFixture), for heads
+	// cosigned in tests (signHead).
+	ws []note.Signer
 }
 
 func (f *fixture) opts(out, keyDir string, p *prompter) InitOptions {
@@ -131,7 +136,10 @@ func newFixture(t *testing.T) *fixture {
 	if _, err := rand.Read(f.root[:]); err != nil {
 		t.Fatal(err)
 	}
-	f.w = []witness.Key{witnessKey(t, "w1"), witnessKey(t, "w2"), witnessKey(t, "w3")}
+	for _, name := range []string{"w1", "w2", "w3"} {
+		k, signer := witnessPair(t, name)
+		f.w, f.ws = append(f.w, k), append(f.ws, signer)
+	}
 	f.scr = &screen{}
 	p := &prompter{scr: f.scr}
 	res, err := Init(f.opts(filepath.Join(f.base, "out"), filepath.Join(f.base, "keys"), p))
@@ -855,13 +863,13 @@ func TestSucceed(t *testing.T) {
 		t.Fatalf("pin: %v", err)
 	}
 
-	// A compromise of generation 2 is locked (task 15f point 1, Q19):
-	// ErrCompromised before any share is asked, nothing written.
+	// A compromise of generation 2 without the boundary of the revocation
+	// (D93): ErrCompromised before any share is asked, nothing written.
 	u, p := f.unlock(2, 3, 4)
 	u.IdentityGen, u.IdentityPub = 2, res.IdentityPub
 	locked := SucceedOptions{UnlockOptions: u, Out: filepath.Join(f.base, "succ3c"), Pin: res.Pin, Compromised: true,
 		Origin: f.res.Pin.Origin, Witnesses: f.w[:1], MinWitnesses: 1}
-	if _, err := Succeed(locked); !errors.Is(err, ErrCompromised) {
+	if _, err := Succeed(locked); !errors.Is(err, ErrCompromised) || !errors.Is(err, ErrRevocation) {
 		t.Fatalf("compromise: %v", err)
 	}
 	if len(p.asked) != 0 || len(p.handovers) != 0 {

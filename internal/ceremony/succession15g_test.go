@@ -160,6 +160,13 @@ func TestPublishCertNeedsSuccession(t *testing.T) {
 	with := map[string][]byte{"ingest-2.pub": pub, "ingest-2.cert": cert,
 		"identity-2.pub": c.file(t, c.out2, "identity-2.pub"), "identity-2.succ": c.file(t, c.out2, "identity-2.succ")}
 	log := newLog(t)
+	// The recording log knows the predecessor ingest-1.cert as logged
+	// (the data directory's log has it; Publish looks it up).
+	i1, err := c.st.ReadPlatformFile("ingest-1.cert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.logged = map[string][]byte{"ingest-1.cert": i1}
 	if err := Publish(PublishOptions{From: writeExport(t, filepath.Join(c.f.base, "cs"), with), Data: c.st, Log: log, Pin: c.res2.Pin}); err != nil {
 		t.Fatal(err)
 	}

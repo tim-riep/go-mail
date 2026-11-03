@@ -15,8 +15,9 @@ package ceremony
 //     the pin reaches clients with a client update, never through the
 //     data directory, D58), with fields 1 to 6 and 8 of
 //     store.PlatformPin (newPin, pin.go; the origin, the witnesses with
-//     their quorum and the identity list 1..gen; field 7 only if Q8 is
-//     decided as proposed);
+//     their quorum and the identity list 1..gen), and with field 7 (the
+//     revoked platform generations, D93) once a pin revokes one: every
+//     later pin carries the list over;
 //   - private admin and ingest keys into KeyDir (gomail/v1/rec/platform-key,
 //     rights 0600, directory 0700, exclusive create, file names
 //     <role>-<gen>.key as in D58). KeyDir must not be inside Out and Out
@@ -55,7 +56,44 @@ package ceremony
 // "gomail-ceremony publish --from <out> --data <dir>" (an offline
 // ceremony cannot append to the server's log) and "gomail-ceremony
 // succeed" (2.3 "Wechsel der Identität" has no command in 9.2) are
-// proposed by task 03.
+// proposed by task 03; "admin-rotate", "revoke" and "succeed
+// --compromised" come with D93 (task 21c).
+//
+// # Revocation (D93)
+//
+// A compromised platform generation is revoked in field 7 of a new pin
+// (store.PlatformRevoked: role, generation, revoked_at_size,
+// revoked_at_time): Succeed with Compromised for the current identity
+// generation, Revoke for an admin or ingest generation. Whatever the
+// generation issues or concerns from log index revoked_at_size on is
+// invalid, and what it signs with a time from revoked_at_time on
+// (translog doc.go "Platform generations"); what it logged before stays
+// valid. The operator reads size N and time T of a witness-confirmed
+// head before the ceremony (RUNBOOK 7.3); the ceremony writes
+// revoked_at_size = N and revoked_at_time = T + 1 ms (D93 addendum: the
+// confirmed head itself stays valid). The ceremony runs offline and
+// knows no head: it checks N and T for plausibility only (checkBoundary:
+// 1 <= N <= translog.MaxTreeSize, 2025-01-01T00:00:00Z <= T <= the clock
+// of the ceremony + translog.MaxClockSkew, T in milliseconds; the lower
+// bound catches a time in seconds). Publish knows the log: a pin with
+// field 7 is accepted only when the newest published head of the data
+// directory carries the witness quorum of the pin, is at least as large
+// as every revoked_at_size and not earlier than every revoked_at_time -
+// 1 ms, and when the certificate of every revoked admin and ingest
+// generation is a valid entry of the log below that element's
+// revoked_at_size (else the role would be locked for good, translog
+// doc.go "Reading for the operator") with a valid_from before the
+// element's revoked_at_time (unless the generation was not valid yet at
+// that head). That newest head is the one the operator log opens, with
+// the log signature of any valid ingest certificate, also one that field
+// 7 revokes at the head's time (such a head is reported,
+// PublishOptions.RevokedHead, and moved by "gomail-server log repair"
+// afterwards); and a new successor of an ingest generation that is
+// revoked at some time (by its own element or by the element of the
+// identity generation that certified it) must have a valid_from not
+// after that time (D93 addendum, checkSuccessors). A revocation stays in
+// every later pin (newPin, addRevoked); its boundary is never moved, and
+// a revoked admin or ingest key is never certified again (runRotate).
 //
 // # Files per ceremony
 //
@@ -63,11 +101,18 @@ package ceremony
 //	              ingest-1.pub, ingest-1.cert, witnesses.rec;
 //	              Out/identity-1.pin; KeyDir/admin-1.key, KeyDir/ingest-1.key
 //	IngestRotate  Out/platform/ingest-<g>.pub, ingest-<g>.cert; KeyDir/ingest-<g>.key
+//	AdminRotate   Out/platform/admin-<g>.pub, admin-<g>.cert; KeyDir/admin-<g>.key
 //	Reshare       nothing (new shares on Display only)
 //	Succeed       Out/platform/identity-<g>.pub, identity-<g>.succ;
-//	              Out/identity-<g>.pin with the whole identity list 1..g
-//	              (the compromise case is locked, ErrCompromised, Q19)
-//	Publish       data/platform/<files of Out/platform> (exclusive;
+//	              Out/identity-<g>.pin with the whole identity list 1..g;
+//	              after a compromise (Compromised) no identity-<g>.succ,
+//	              and the pin revokes generation g-1 in field 7
+//	Revoke        Out/identity-<g>.pin: the pin of the same identity
+//	              generation g with one more element in field 7 (admin or
+//	              ingest)
+//	Publish       data/platform/<files of Out/platform> (exclusive; a
+//	              certificate or succession whose name has no valid log
+//	              entry, and its public key, replaced atomically;
 //	              witnesses.rec, the server's working copy, only when the
 //	              data directory has none, and it must equal the pin's
 //	              witnesses and quorum; replaced by the pin's only with
@@ -121,14 +166,21 @@ var (
 	// ErrOutDir: the export directory is not new or empty, or overlaps
 	// the key directory.
 	ErrOutDir = errors.New("ceremony: unusable export directory")
+	// ErrRevocation: a revocation (Succeed with Compromised, Revoke) that
+	// is not plausible or not allowed: a boundary out of range or after
+	// the clock of the ceremony, a role other than admin or ingest for
+	// Revoke, a generation the pin already revokes, too many revoked
+	// generations; for Publish a pin whose field 7 contradicts the log
+	// or the data directory. Nothing is asked or written.
+	ErrRevocation = errors.New("ceremony: invalid revocation")
 	// ErrCompromised: a succession after a compromise
-	// (SucceedOptions.Compromised) is locked until the revocation of a
-	// platform generation is specified. TODO(Q19): without a mark in the
-	// pin, the succession or the log, the compromised generation would
-	// go on issuing certificates that Publish, the log and clients
-	// accept (2.3 asks that clients reject every signature of it from
-	// the update on). Nothing is asked or written.
-	ErrCompromised = errors.New("ceremony: not available yet: the revocation of a platform generation is not specified (Q19)")
+	// (SucceedOptions.Compromised) without the boundary of the
+	// revocation (HeadSize, HeadTime): without it the
+	// compromised generation would go on issuing certificates that
+	// Publish, the log and clients accept (2.3: clients reject every
+	// signature of it from the update on). The error wraps ErrRevocation
+	// as well. Nothing is asked or written.
+	ErrCompromised = errors.New("ceremony: a succession after a compromise needs the boundary of the revocation (revoked_at_size and revoked_at_time)")
 )
 
 // MaxShareCount is the largest n of "k-of-n" (shamir allows 255; a
@@ -296,14 +348,14 @@ type UnlockOptions struct {
 	Now         func() time.Time
 }
 
-// RotateOptions configures IngestRotate.
+// RotateOptions configures IngestRotate and AdminRotate.
 type RotateOptions struct {
 	UnlockOptions
 	Out    string
 	KeyDir string
-	// Gen is the new ingest generation: the highest existing one + 1
-	// (the operator reads it from data/platform/ingest-*.cert), at least
-	// 2. A gap or an existing generation is not detectable offline;
+	// Gen is the new ingest (admin) generation: the highest existing
+	// one + 1 (the operator reads it from data/platform/ingest-*.cert or
+	// admin-*.cert), at least 2. A gap or an existing generation is not detectable offline;
 	// Publish refuses it: a gap with translog.ErrPrerequisite (translog
 	// doc.go "Validity rules": <role>-<g>.cert with g > 1 follows
 	// <role>-<g-1>.cert), an existing generation with other content with
@@ -311,11 +363,35 @@ type RotateOptions struct {
 	Gen uint32
 	// ValidFrom is valid_from of the new certificate, the switch time
 	// (see IngestRotate); the zero time means Now. A time before Now is
-	// ErrOptions (task 10c finding 7).
+	// ErrOptions (task 10c finding 7), with two exceptions for
+	// IngestRotate (D93 addendum, checkValidFrom):
+	//   - Revoked revokes ingest generation Gen-1: ValidFrom must be its
+	//     revoked_at_time exactly (the zero time means it; anything else
+	//     is ErrRevocation), so that some ingest generation signs heads
+	//     at every time and no signature of Gen-1 before its boundary
+	//     becomes invalid;
+	//   - Revoked revokes identity generation IdentityGen-1 (the pin of
+	//     succeed --compromised): ValidFrom may lie in the past down to
+	//     its revoked_at_time, not before (ErrOptions). Publish refuses a
+	//     successor of an ingest generation certified by the revoked
+	//     identity whose valid_from lies after that time.
+	// When Revoked revokes both, with the identity's revoked_at_time
+	// earlier than the predecessor's own, the earlier time applies if
+	// identity generation IdentityGen-1 certified Gen-1, else the own
+	// one; the ceremony does not know which, so ValidFrom must be one of
+	// the two, given explicitly (anything else, the zero time included,
+	// is ErrRevocation naming both). With the identity's time not earlier
+	// the own one applies as above.
 	ValidFrom time.Time
+	// Revoked is field 7 of the pin the rotation runs with (the command
+	// line passes the pin of --pin): ValidFrom above, and a generation
+	// Gen that it revokes for the role is ErrRevocation before any share
+	// is asked (its key, derived from the root and Gen, is the stolen
+	// one: a revoked key is never certified again).
+	Revoked []store.PlatformRevoked
 }
 
-// RotateResult names the new ingest generation.
+// RotateResult names the new ingest or admin generation.
 type RotateResult struct {
 	Gen uint32
 	Pub ed25519.PublicKey
@@ -341,7 +417,7 @@ type RotateResult struct {
 //
 // The old ingest key stays valid for checking old signatures: its
 // certificate is not revoked and metadata received while it was the
-// current key remain verifiable. Rule (strictest reading without Q8,
+// current key remain verifiable. Rule (D93,
 // translog doc.go "Platform generations", task 14): an ingest signature
 // of generation Gen-1 is valid only for metadata received before
 // valid_from of ingest-<Gen>.cert once that certificate is in the log,
@@ -359,7 +435,42 @@ type RotateResult struct {
 // signatures of the old generation made since then invalid
 // retroactively. Without ValidFrom the certificate is valid from Now
 // read after the shares were entered.
-func IngestRotate(opts RotateOptions) (*RotateResult, error) { return runRotate(opts) }
+//
+// A compromised ingest generation is not ended by the rotation alone (it
+// could still sign metadata dated before valid_from): Revoke revokes it
+// in a new pin (D93, RUNBOOK 7.3.3). Order: Revoke first, then
+// IngestRotate with the new pin (Revoked) and ValidFrom equal to
+// revoked_at_time of the revoked generation (required, see ValidFrom): a
+// later ValidFrom would leave the time from revoked_at_time to ValidFrom
+// without a valid ingest generation (no head can be signed, clients stop
+// 24 hours after the last one). The same holds after Succeed with
+// Compromised for the ingest generation the compromised identity
+// certified (cascade, D93 addendum); Publish enforces it
+// (checkSuccessors) and reports a revoked ingest generation without
+// successor (PublishOptions.IngestGap).
+func IngestRotate(opts RotateOptions) (*RotateResult, error) {
+	return runRotate(opts, store.KeyRoleIngest)
+}
+
+// AdminRotate creates admin generation Gen (D93 (3), RUNBOOK 7.3.4) as
+// IngestRotate creates an ingest generation: shares asked, root checked
+// against IdentityPub, admin key Gen derived, certificate admin-<Gen>.cert
+// signed by identity IdentityGen with valid_from = ValidFrom (Now when
+// zero; a time before Now is ErrOptions, before any share is asked and
+// again after), files Out/platform/admin-<Gen>.pub, admin-<Gen>.cert and
+// KeyDir/admin-<Gen>.key. Admin generation Gen-1 assigns addresses
+// validly only before valid_from of admin-<Gen>.cert once that
+// certificate is in the log (translog: admin supersession); the new key
+// assigns from valid_from on. A gap or an existing generation is refused
+// by Publish as for IngestRotate. After Succeed with Compromised the
+// rotation under the new identity is mandatory (D93 (4)): it ends the
+// admin generations the compromised identity issued, a thief's as well.
+// AdminRotate alone does not end a leaked admin key: the old generation
+// keeps assigning validly with a valid_from before that of the new
+// certificate (backdated); Revoke revokes it (RUNBOOK 7.3.4).
+func AdminRotate(opts RotateOptions) (*RotateResult, error) {
+	return runRotate(opts, store.KeyRoleAdmin)
+}
 
 // ReshareOptions configures Reshare.
 type ReshareOptions struct {
@@ -393,9 +504,20 @@ type SucceedOptions struct {
 	UnlockOptions
 	Out string
 	// Compromised marks IdentityGen as compromised (2.3: the succession
-	// chain is useless then). Locked: Succeed refuses it with
-	// ErrCompromised before anything else (TODO(Q19), see Succeed).
+	// chain is useless then, D93 (4)): the new pin revokes IdentityGen in
+	// field 7 with HeadSize and HeadTime, and no succession is
+	// written (see Succeed).
 	Compromised bool
+	// HeadSize and HeadTime (milliseconds since 1970 UTC) are size and
+	// time of a witness-confirmed head of the log, read by the operator
+	// before the ceremony: the boundary of the revocation is
+	// revoked_at_size = HeadSize and revoked_at_time = HeadTime + 1 ms
+	// (D93 addendum: the confirmed head itself stays valid). Required
+	// with Compromised (both zero is ErrCompromised, an implausible value
+	// ErrRevocation, checked before any share is asked: checkBoundary);
+	// without Compromised they must be zero (ErrOptions).
+	HeadSize int64
+	HeadTime int64
 	// Pin is the pin of the current identity: generation and key equal to
 	// IdentityGen and IdentityPub (ErrIdentity otherwise), not a
 	// development pin. The new pin carries its identity list (field 8)
@@ -424,45 +546,29 @@ type SucceedOptions struct {
 //     Out/identity-<g>.pin; existing clients follow the succession from
 //     the log (translog.Log.CheckPlatform on identity-<g>.succ) and
 //     remember the new generation;
-//   - compromise (Compromised, gomail-ceremony succeed --compromised):
-//     LOCKED (task 15f point 1, Q19 stopping point 2): Succeed returns
-//     ErrCompromised before it checks or asks anything, and the command
-//     line refuses the flag as a usage error. TODO(Q19): the compromised
-//     generation stays in the identity list of the new pin (old
-//     certificates must stay verifiable), and nothing in the pin, the
-//     succession or the log marks it: its owner could go on issuing
-//     ingest-<n>.cert and admin-<n>.cert that Publish copies, the
-//     operator log takes as valid and clients with the new pin accept
-//     (the test TestVerifyCompromisedIdentityStillIssues documents it,
-//     skipped until Q19 is answered). The code below the lock stays as
-//     task 15b built it and is unreachable: no succession (the attacker
-//     could sign one himself); the pin Out/identity-<g>.pin for a client
-//     update and the public key Out/platform/identity-<g>.pub, which
-//     Publish copies into the data directory (no log entry: a public key
-//     is none). Generation g is valid by the pin alone (translog doc.go
-//     "Validity rules": generations of the list need no logged
-//     succession).
-//     TODO(Q19): task 15b asks for a succession that carries a mark
-//     "compromised", after whose log entry (not only after its
-//     valid_from) the predecessor is invalid, handled by clients and
-//     server as translog does it. Neither exists: the succession
-//     gomail/v1/rec/platform-succ (package keys, phase 0) has no such
-//     field, the pin has no field 7 (Q8 is open: (role, gen,
-//     revoked_at_size), translog doc.go "Pin"), Verifier.Revoked stays
-//     empty, and no rule of translog makes a generation invalid from a
-//     log entry on. A new field or record is not built here (strictest
-//     reading: the compromised generation stays valid for everything the
-//     log holds; only what the new generation signs is new). Until then
-//     the compromised ingest key is replaced by IngestRotate under the
-//     new identity: from valid_from of that certificate, once it is
-//     logged, the old ingest generation signs nothing validly (translog
-//     doc.go "Platform generations"; the server refuses it,
-//     ingest.ErrSuperseded).
-//     TODO(Q19): certificates of admin and ingest keys issued by the
-//     compromised generation must be reissued by the new one, which needs
-//     new admin and ingest generations (a certificate file per role and
-//     generation exists only once; there is no admin rotation, Q8 (d));
-//     the specification does not say so.
+//   - compromise (Compromised, gomail-ceremony succeed --compromised,
+//     D93 (4)): no succession (the thief could sign one himself); the
+//     pin Out/identity-<g>.pin for a client update, whose field 7
+//     revokes generation IdentityGen at (HeadSize, HeadTime + 1 ms)
+//     (store.PlatformRevoked, role store.KeyRoleIdentity), and the public
+//     key Out/platform/identity-<g>.pub, which Publish copies into the
+//     data directory (no log entry: a public key is none). Generation g
+//     is valid by the pin alone (translog doc.go "Validity rules":
+//     generations of the list need no logged succession), and Publish
+//     takes it without identity-<g>.succ because the pin revokes g-1.
+//     The compromised generation stays in the identity list (what it
+//     logged before revoked_at_size stays verifiable); what it issues or
+//     concerns from log index revoked_at_size on is invalid for the
+//     operator log, Publish, the server and every client with the new
+//     pin. Admin and ingest must be issued anew under generation g
+//     (AdminRotate, IngestRotate with the new pin; D93 (4), RUNBOOK
+//     7.3.5): only the supersession rules end the admin and ingest
+//     generations the compromised identity issued, a thief's ones logged
+//     before the boundary included. A client with the old pin knows
+//     nothing of it (no succession in the log): the new pin reaches
+//     clients by a client update only. A compromised root (or Threshold
+//     shares in wrong hands) is no case for Succeed: a new Init with a
+//     new origin (D93 (5)).
 //
 // The new pin carries the whole identity list (pin field 8): the list
 // of Pin (ending with IdentityGen and IdentityPub) plus
@@ -474,13 +580,61 @@ type SucceedOptions struct {
 // Options.Identities, task 03d finding 2) before Publish (Q10 point 5).
 // Publish requires the succession of the predecessor for a succession
 // of generation 3 or higher (task 15f point 3), so a chain without a gap
-// reaches the log; after a compromise (locked) generation IdentityGen+1
-// would have no succession and the next regular one would need a way
-// around that check (Q19).
+// reaches the log; the chain may start anew at a generation whose
+// predecessor the pin revokes (after a compromise). The new pin carries
+// field 7 of Pin over, plus the compromised generation with
+// Compromised.
 //
 // Every generation of the list must derive from the rebuilt root
 // (ErrIdentity otherwise). Result.Pin is the new pin.
 func Succeed(opts SucceedOptions) (*Result, error) { return runSucceed(opts) }
+
+// RevokeOptions configures Revoke.
+type RevokeOptions struct {
+	UnlockOptions
+	// Out is the export directory, new or empty; it receives only the new
+	// pin Out/identity-<g>.pin (g = IdentityGen, the same name as the
+	// current pin: the operator replaces the old pin everywhere).
+	Out string
+	// Pin is the pin of the current identity, as for Succeed: generation
+	// and key equal to IdentityGen and IdentityPub (ErrIdentity), not a
+	// development pin.
+	Pin *store.PlatformPin
+	// Role is store.KeyRoleAdmin or store.KeyRoleIngest (ErrRevocation
+	// otherwise: an identity generation is revoked by Succeed with
+	// Compromised), Gen the compromised generation (at least 1).
+	Role uint8
+	Gen  uint32
+	// HeadSize and HeadTime are the head of the boundary as in
+	// SucceedOptions (revoked_at_size = HeadSize, revoked_at_time =
+	// HeadTime + 1 ms), required (ErrRevocation).
+	HeadSize int64
+	HeadTime int64
+}
+
+// Revoke revokes admin or ingest generation Gen (D93 (4), RUNBOOK 7.3.3
+// and 7.3.4): the boundary is checked (checkBoundary), and Gen must not
+// be revoked by Pin already (ErrRevocation), before any share is asked;
+// then shares are asked with AskShare(0), the root is combined and
+// checked against IdentityPub and every generation of the identity list
+// of Pin (ErrIdentity; the holders confirm the revocation with their
+// shares, as for every other change of the trust anchor), and the new
+// pin is written to Out/identity-<IdentityGen>.pin: everything of Pin
+// (identity list, origin, witnesses, quorum, field 7) plus the element
+// (Role, Gen, HeadSize, HeadTime + 1) in field 7. Nothing is signed.
+//
+// The pin is not signed and is distributed like any new pin (server,
+// administrator, clients); a client or server with the old pin knows
+// nothing of the revocation. Revoke does not check that generation Gen
+// exists (it runs offline); Publish with the new pin refuses a pin that
+// revokes an admin or ingest generation without a certificate in the
+// data directory (a mistyped generation, ErrRevocation). A revoked
+// ingest generation that is the current one of the server needs a new
+// one first (IngestRotate; the server refuses to start with a revoked
+// own generation), a revoked admin generation a new one for further
+// address assignments (AdminRotate). Result.Pin is the new pin,
+// Result.KeyDir is empty.
+func Revoke(opts RevokeOptions) (*Result, error) { return runRevoke(opts) }
 
 // PublishOptions configures Publish.
 type PublishOptions struct {
@@ -498,7 +652,8 @@ type PublishOptions struct {
 	Pin *store.PlatformPin
 	// Log receives one AppendPlatform per certificate and succession. Nil
 	// (the command line) opens the operator log of Data against Pin as
-	// gomail-server does (OpenLog); tests pass their own.
+	// gomail-server does (OpenLog, with the identity list and field 7 of
+	// Pin); tests pass their own.
 	Log translog.Log
 	// ReplaceWitnesses (gomail-ceremony publish --replace-witnesses, task
 	// 15f point 2) replaces platform/witnesses.rec of Data, the server's
@@ -524,6 +679,33 @@ type PublishOptions struct {
 	// replaced, with the working copy before and after (for the message
 	// of the command line). It is not called when nothing was replaced.
 	WitnessesReplaced func(before, after *witness.Witnesses)
+	// IngestGap, when not nil, is called for every ingest generation gen
+	// that Pin revokes at time at (by its own element of field 7 or by
+	// the element of the identity generation that certified it) whose
+	// successor ingest-<gen+1>.cert in data/platform/ has a valid_from
+	// after at (logged before; a new one in the export is refused,
+	// checkSuccessors), or that has no successor yet (validFrom 0):
+	// from at on no ingest generation signs heads validly until
+	// validFrom, and clients stop 24 hours after the last head (task 21a
+	// review F4). Publish goes on; the command line warns.
+	IngestGap func(gen uint32, at, validFrom int64)
+	// RevocationsChecked, when not nil, is called when Pin has field 7
+	// and it passed the checks against the log, with the newest
+	// published head it was checked against (for the message of the
+	// command line).
+	RevocationsChecked func(head *translog.Head)
+	// RevokedHead, when not nil, is called when Pin has field 7 and the
+	// newest published head it was checked against (RevocationsChecked)
+	// carries the log signature of an ingest generation gen that Pin
+	// revokes at time at <= the head's time (by its own element or by the
+	// element of the identity generation that certified it): the operator
+	// log opens its newest head with every valid ingest certificate, but
+	// clients refuse this one, and "gomail-server log repair" moves it to
+	// log/heads-revoked/ (attack review 21c F3). If the boundary was read
+	// from it, or from a head of the same size it replaced, no head the
+	// boundary comes from stays in heads/. Publish goes on; the command
+	// line warns.
+	RevokedHead func(head *translog.Head, gen uint32, at int64)
 }
 
 // Publish copies Out/platform/ of a ceremony into the data directory and
@@ -553,13 +735,22 @@ type PublishOptions struct {
 //   - every certificate and succession against the identity list of Pin:
 //     a generation above it is translog.ErrMismatch, a succession of a
 //     listed generation must name the list's key (translog.ErrMismatch);
-//     files that already exist with the same content are skipped, with
-//     other content they are store.ErrExists (for a certificate or
-//     succession also translog.ErrDuplicate). A certificate
-//     <role>-<g>.cert with g > 1 whose predecessor <role>-<g-1>.cert is
-//     neither in the export nor in data/platform/ is
-//     translog.ErrPrerequisite, as Append would report it (translog
-//     doc.go "Validity rules"). The succession identity-<g>.succ of
+//     files that already exist with the same content are skipped. A
+//     certificate or succession of data/platform/ with other content is
+//     replaced by the export's when the log holds no valid entry of its
+//     name under Pin (the entry there is invalid, such as the thief's
+//     certificate that field 7 invalidates, or there is none): the name
+//     is free, and translog doc.go "Reading for the operator" reissues
+//     it under the same name (attack review 21c F1); the public key of
+//     an admin or ingest certificate is replaced together with it. Both
+//     are replaced atomically, under the server lock, after every other
+//     check. Any other file with other content is store.ErrExists (for
+//     a certificate or succession also translog.ErrDuplicate), naming
+//     both files. A certificate <role>-<g>.cert with g > 1 whose
+//     predecessor <role>-<g-1>.cert is neither in the export nor a
+//     valid entry of the log is translog.ErrPrerequisite, as Append
+//     would report it (translog doc.go "Validity rules"), before any
+//     file is written. The succession identity-<g>.succ of
 //     every generation g >= 2 that the export depends on (an
 //     identity-<g>.pub, the predecessor of identity-<g+1>.succ, the
 //     issuer of a certificate; tasks 15f point 3 and 15g points 1 and 2)
@@ -567,10 +758,45 @@ type PublishOptions struct {
 //     only in data/platform/ (a crash before its log entry) counts only
 //     if it verifies against the pin, and Publish then logs it first;
 //     otherwise translog.ErrPrerequisite (a client with an older pin
-//     could not follow the chain; there is no flag around it, the
-//     compromise case that would leave such a gap is locked, Q19); a
+//     could not follow the chain; there is no flag around it). The one
+//     exception is the compromise case (Succeed with Compromised, D93
+//     (4)): a generation g whose predecessor g-1 the pin revokes
+//     (field 7) needs no succession, the chain starts anew at g. A
 //     certificate or succession whose signature fails is
-//     translog.ErrOrder.
+//     translog.ErrOrder;
+//   - field 7 of the pin, when it has one (D93; ErrRevocation): the
+//     newest published head of the log must exist, carry the witness
+//     quorum of the pin (signatures of its witnesses, fields 5 and 6)
+//     and be at least as large as every revoked_at_size and not earlier
+//     than every revoked_at_time - 1 ms of the list (the boundaries come
+//     from a witness-confirmed head of this log; a larger size or a
+//     later time is a mistyped value or a head of another log, and
+//     would leave entries of a compromised generation valid);
+//     revoked_at_time - 1 ms must not lie before 2025-01-01 (a time in
+//     seconds); the certificate of every revoked admin or ingest
+//     generation must be a valid entry of the log below that element's
+//     revoked_at_size (a mistyped generation leaves the compromised one
+//     valid, and one without such a certificate locks the role for
+//     good: translog doc.go "Reading for the operator"), and the
+//     element's revoked_at_time must lie after valid_from of that
+//     certificate when the generation was valid at the head's time (else
+//     it would never have been valid). The newest published head is the
+//     one the operator log opens: with the log signature of any valid
+//     ingest certificate, also of a generation that field 7 revokes at
+//     the head's time; such a head is reported (RevokedHead);
+//   - a new certificate ingest-<g+1>.cert of the export whose
+//     predecessor ingest generation g is revoked at time A (by its own
+//     element, or by the element of the identity generation that
+//     certified ingest-<g>.cert, the cascade of D93) must have a
+//     valid_from not after A (D93 addendum: no time without an ingest
+//     generation that signs heads); ErrRevocation otherwise;
+//   - every certificate and succession that Publish would log and that
+//     is not a valid entry of the log yet, against field 7: one issued
+//     by a revoked identity generation, a succession to one, or the
+//     certificate of a revoked admin or ingest generation is
+//     translog.ErrRevoked (an ErrOrder), before anything is written; by
+//     the check above every log index it could get lies at or after the
+//     boundary, and Append would refuse it after the files are written.
 //
 // Order (translog doc.go "Who writes", later entries: record first, then
 // log entry, and the head last): all files are written first, then the

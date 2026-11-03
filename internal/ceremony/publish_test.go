@@ -508,18 +508,38 @@ func TestPublishExisting(t *testing.T) {
 	if err := st.WritePlatformFile("ingest-1.cert", other); err != nil {
 		t.Fatal(err)
 	}
+	// Logged as a valid entry: refused, naming both files, nothing
+	// written or logged.
+	log.logged = map[string][]byte{"ingest-1.cert": other}
 	err := Publish(PublishOptions{From: out, Data: st, Log: log, Pin: f.res.Pin})
-	if !errors.Is(err, store.ErrExists) || !errors.Is(err, translog.ErrDuplicate) {
+	if !errors.Is(err, store.ErrExists) || !errors.Is(err, translog.ErrDuplicate) ||
+		!strings.Contains(err.Error(), st.Path("platform", "ingest-1.cert")) || !strings.Contains(err.Error(), filepath.Join(out, "platform", "ingest-1.cert")) ||
+		!strings.Contains(err.Error(), "valid entry") {
 		t.Fatalf("existing certificate: %v", err)
 	}
 	if got := listDir(t, filepath.Join(st.Root, "platform")); fmt.Sprint(got) != "[ingest-1.cert]" || len(log.names) != 0 {
 		t.Fatalf("written %v", got)
 	}
-	// A public key with other content; an identity key that is not the
-	// pin's contradicts the pin (the start check of the server).
+	// Not a valid entry of the log (a file left by a crash before its
+	// log entry): the name is free, the file is replaced by the export's
+	// (attack review 21c F1).
+	log = newLog(t)
+	if err := Publish(PublishOptions{From: out, Data: st, Log: log, Pin: f.res.Pin}); err != nil {
+		t.Fatalf("unlogged certificate: %v", err)
+	}
+	if !bytes.Equal(mustReadFile(t, st.Path("platform", "ingest-1.cert")), mustReadFile(t, filepath.Join(out, "platform", "ingest-1.cert"))) ||
+		fmt.Sprint(log.names) != "[admin-1.cert ingest-1.cert]" {
+		t.Fatalf("not replaced: %v", log.names)
+	}
+	// A public key with other content whose certificate is not replaced
+	// (missing in the data directory) is refused, naming both files; an
+	// identity key that is not the pin's contradicts the pin (the start
+	// check of the server).
 	st2 := newData(t, filepath.Join(f.base, "data2"))
 	st2.WritePlatformFile("admin-1.pub", make([]byte, 32))
-	if err := Publish(PublishOptions{From: out, Data: st2, Log: log, Pin: f.res.Pin}); !errors.Is(err, store.ErrExists) || errors.Is(err, translog.ErrDuplicate) {
+	log = newLog(t)
+	if err := Publish(PublishOptions{From: out, Data: st2, Log: log, Pin: f.res.Pin}); !errors.Is(err, store.ErrExists) || errors.Is(err, translog.ErrDuplicate) ||
+		!strings.Contains(err.Error(), st2.Path("platform", "admin-1.pub")) || !strings.Contains(err.Error(), filepath.Join(out, "platform", "admin-1.pub")) {
 		t.Fatalf("existing key: %v", err)
 	}
 	st2b := newData(t, filepath.Join(f.base, "data2b"))
