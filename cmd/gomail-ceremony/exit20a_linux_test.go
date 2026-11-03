@@ -45,7 +45,7 @@ func outputStopped(t *testing.T, v *vt) bool {
 func TestPTYExitNotStopped(t *testing.T) {
 	w1 := witnessArg(t, "w1")
 	for _, layout := range []string{"AAA", "ABC"} {
-		t.Run(layout, func(t *testing.T) {
+		t.Run(layout, retryStalled(func(t *testing.T) {
 			c := start15n(t, w1, layout, hookEnv+"=stop-at-exit")
 			if !c.errw.waitFor(holder1, c.exited) {
 				t.Fatalf("exited early: stderr %q", c.errw.output())
@@ -64,7 +64,7 @@ func TestPTYExitNotStopped(t *testing.T) {
 				}
 			}
 			t.Logf("exit 130 %v after SIGINT", took.Round(time.Millisecond))
-		})
+		}))
 	}
 }
 
@@ -84,6 +84,10 @@ func TestPTYExitNotStopped(t *testing.T) {
 // before the write never makes it fail, with O_NONBLOCK or without.
 func TestPTYUnblockBrief(t *testing.T) {
 	w1 := witnessArg(t, "w1")
+	retryStalled(func(t *testing.T) { testUnblockBrief(t, w1) })(t)
+}
+
+func testUnblockBrief(t *testing.T, w1 string) {
 	c := start15n(t, w1, "ABA")
 	if !c.errw.waitFor(holder1, c.exited) {
 		t.Fatalf("exited early: stderr %q", c.errw.output())
@@ -94,22 +98,22 @@ func TestPTYUnblockBrief(t *testing.T) {
 	c.in.confirm()
 	time.Sleep(300 * time.Millisecond)
 	c.out.paused.Store(false)
-	if !c.errw.until(confirm1, from, stuckLimit) {
+	if !c.until(c.errw, confirm1, from, stuckLimit, "holder 1 confirmed") {
 		t.Fatalf("holder 1 not asked whether share 1 is noted: stderr %q", tail(c.errw.output()[from:]))
 	}
 	// The poller of stdout, paused until now, may show the share line a
 	// moment after the prompt on the other terminal.
-	if poll(2*time.Second, func() bool { return shareLine.Match(c.out.output()) }) < 0 {
+	if c.poll(2*time.Second, "prompt shown", func() bool { return shareLine.Match(c.out.output()) }) < 0 {
 		t.Fatalf("share 1 not shown: stdout %q", tail(c.out.output()))
 	}
 	from = len(c.errw.output())
 	c.in.confirm()
-	if !c.errw.until(regexp.MustCompile(`Inhaber von Anteil 2 von 2`), from, stuckLimit) {
+	if !c.until(c.errw, regexp.MustCompile(`Inhaber von Anteil 2 von 2`), from, stuckLimit, "share 1 noted") {
 		t.Fatalf("holder 2 not called: stderr %q", tail(c.errw.output()[from:]))
 	}
 	// The clear of stdout was written before holder 2 was called; the
 	// poller of the other terminal may show it a moment later.
-	if poll(2*time.Second, func() bool { return !shareLeft(c.out.output()) }) < 0 {
+	if c.poll(2*time.Second, "holder 2 called", func() bool { return !shareLeft(c.out.output()) }) < 0 {
 		t.Fatalf("share 1 left on stdout: %q", tail(c.out.output()))
 	}
 	if out := c.errw.output(); bytes.Contains(out, []byte("abgebrochen")) || bytes.Contains(out, []byte(errScreenLost.Error())) {

@@ -27,7 +27,9 @@ import (
 
 // stuckLimit is how long a share may stay on the screen with the program
 // stuck: outputGrace and the abort path (at most 2 s, task 15m), and a
-// margin for a loaded test machine.
+// margin for a loaded test machine. It holds in the time of the program:
+// a wait that runs out while the program or the test did not run is
+// repeated, not counted (poll, retryStalled; task 20m).
 const stuckLimit = outputGrace + 2*time.Second + 500*time.Millisecond
 
 // ceremony15n is init 2-of-2 on the terminals of layout (stdin, stdout
@@ -40,6 +42,11 @@ type ceremony15n struct {
 	exited        chan struct{}
 	werr          error
 	outDir, kd    string
+	// observeFor replaces observeAfter of diagnose (task 20m) if set.
+	observeFor time.Duration
+	// testStop is set while the test keeps the program stopped (task 20m,
+	// TestStallDetect); a stop seen without it is the program's own.
+	testStop atomic.Bool
 }
 
 func start15n(t *testing.T, w1, layout string, env ...string) *ceremony15n {
@@ -103,12 +110,12 @@ func (c *ceremony15n) toShare1() {
 	time.Sleep(50 * time.Millisecond)
 }
 
-// exitWithin waits at most d for the program to exit; it fails unless
-// the program ended with exit code 130 (not by a signal).
+// exitWithin waits at most d for the program to exit (poll); it fails
+// unless the program ended with exit code 130 (not by a signal).
 func (c *ceremony15n) exitWithin(d time.Duration, what string) time.Duration {
 	c.t.Helper()
 	start := time.Now()
-	if !c.ended(d) {
+	if c.poll(d, what+": exit", func() bool { return c.ended(0) }) < 0 {
 		c.t.Fatalf("%s: no exit within %v; stdout %q", what, d, tail(c.out.output()))
 	}
 	took := time.Since(start)
@@ -139,21 +146,6 @@ func (c *ceremony15n) ended(d time.Duration) bool {
 		return true
 	case <-time.After(d):
 		return false
-	}
-}
-
-// poll waits at most d until one of conds holds and returns its index,
-// or -1.
-func poll(d time.Duration, conds ...func() bool) int {
-	for deadline := time.Now().Add(d); ; time.Sleep(2 * time.Millisecond) {
-		for i, f := range conds {
-			if f() {
-				return i
-			}
-		}
-		if time.Now().After(deadline) {
-			return -1
-		}
 	}
 }
 
@@ -237,7 +229,7 @@ func TestPTYNonblockClear(t *testing.T) {
 	w1 := witnessArg(t, "w1")
 	for _, layout := range []string{"ABA", "AAA", "ABC"} {
 		for _, end := range []string{"SIGINT", "Enter"} {
-			t.Run(layout+"/"+end, func(t *testing.T) {
+			t.Run(layout+"/"+end, retryStalled(func(t *testing.T) {
 				c := start15n(t, w1, layout)
 				c.toShare1()
 				setNonblock(t, c.out.s, true)
@@ -255,7 +247,7 @@ func TestPTYNonblockClear(t *testing.T) {
 				c.release()
 				c.finalChecks(end, false)
 				t.Logf("exit 130 %v after %s", took.Round(time.Millisecond), end)
-			})
+			}))
 		}
 	}
 }
@@ -333,7 +325,7 @@ func (v *vt) leaveRoom(room int) {
 func TestPTYPartialShare(t *testing.T) {
 	w1 := witnessArg(t, "w1")
 	for _, mode := range []string{"blocked", "nonblock"} {
-		t.Run(mode, func(t *testing.T) {
+		t.Run(mode, retryStalled(func(t *testing.T) {
 			c := start15n(t, w1, "ABA")
 			if !c.errw.waitFor(holder1, c.exited) {
 				t.Fatalf("exited early: stderr %q", c.errw.output())
@@ -341,6 +333,13 @@ func TestPTYPartialShare(t *testing.T) {
 			c.out.leaveRoom(40)
 			var stop atomic.Bool
 			looped := make(chan struct{})
+			// halt ends the loop of O_NONBLOCK, also when an attempt ends
+			// in a stall (retryStalled).
+			halt := func() {
+				stop.Store(true)
+				<-looped
+			}
+			defer halt()
 			if mode == "nonblock" {
 				go func() {
 					defer close(looped)
@@ -354,15 +353,14 @@ func TestPTYPartialShare(t *testing.T) {
 			}
 			c.in.confirm()
 			took := c.exitWithin(stuckLimit, mode)
-			stop.Store(true)
-			<-looped
+			halt()
 			c.release()
 			c.finalChecks(mode, false)
 			if bytes.Contains(c.errw.output(), []byte("Anteil notiert")) {
 				t.Fatalf("holder 1 asked although the share line failed: %q", tail(c.errw.output()))
 			}
 			t.Logf("exit 130 %v after Enter; stdout %q", took.Round(time.Millisecond), tail(c.out.output()))
-		})
+		}))
 	}
 }
 
@@ -380,8 +378,18 @@ func (v *vt) stopLoop(d time.Duration) (stop func()) {
 		end := time.Now().Add(d)
 		for n := 0; !quit.Load(); n++ {
 			syscall.Syscall(syscall.SYS_IOCTL, fd, ioctlFlowCtl, flowOutOff)
-			if n%1024 == 0 && time.Now().After(end) {
-				return
+			if n%1024 == 0 {
+				if time.Now().After(end) {
+					return
+				}
+				// Every 1024 passes the loop gives its CPU to a thread
+				// that waits for it (task 20m point 3), and goes on at
+				// once if none does. A sleep of 1 µs (some 60 µs with the
+				// timer slack) let the prompt through after a median of
+				// 3 ms instead of 17 ms (40 runs each of
+				// TestPTYPromptBlocked/stopped): the attack lost effect;
+				// the yield keeps it (16 ms).
+				syscall.RawSyscall(syscall.SYS_SCHED_YIELD, 0, 0, 0)
 			}
 		}
 	}()
@@ -410,7 +418,7 @@ func TestPTYPromptBlocked(t *testing.T) {
 	w1 := witnessArg(t, "w1")
 	for _, layout := range []string{"ABA", "ABC"} {
 		for _, attack := range []string{"full", "stopped"} {
-			t.Run(layout+"/"+attack, func(t *testing.T) {
+			t.Run(layout+"/"+attack, retryStalled(func(t *testing.T) {
 				c := start15n(t, w1, layout)
 				if !c.errw.waitFor(holder1, c.exited) {
 					t.Fatalf("exited early: stderr %q", c.errw.output())
@@ -430,7 +438,7 @@ func TestPTYPromptBlocked(t *testing.T) {
 				shown := time.Now()
 				share := bytes.LastIndex(c.out.output(), []byte("Anteil 1/2"))
 				through := false
-				switch poll(stuckLimit, func() bool { return c.ended(0) }, func() bool { return confirm1.Match(c.errw.output()[from:]) }) {
+				switch c.poll(stuckLimit, "share 1 shown", func() bool { return c.ended(0) }, func() bool { return confirm1.Match(c.errw.output()[from:]) }) {
 				case 0:
 					c.exitWithin(0, attack)
 					t.Logf("exit 130 %v after share 1 appeared", time.Since(shown).Round(time.Millisecond))
@@ -442,7 +450,7 @@ func TestPTYPromptBlocked(t *testing.T) {
 					through = true
 					c.in.confirm()
 					confirmed := time.Now()
-					if poll(stuckLimit, func() bool { return c.ended(0) }, func() bool { return bytes.Contains(c.out.output()[share:], []byte(clearScreen)) }) < 0 {
+					if c.poll(stuckLimit, "confirmed", func() bool { return c.ended(0) }, func() bool { return bytes.Contains(c.out.output()[share:], []byte(clearScreen)) }) < 0 {
 						t.Fatalf("share 1 neither cleared nor the program ended within %v of the confirmation", stuckLimit)
 					}
 					t.Logf("share 1 cleared or program ended %v after the confirmation", time.Since(confirmed).Round(time.Millisecond))
@@ -456,7 +464,7 @@ func TestPTYPromptBlocked(t *testing.T) {
 				}
 				c.release()
 				c.finalChecks(attack, through)
-			})
+			}))
 		}
 	}
 }
@@ -477,7 +485,7 @@ func TestPTYStopLoop(t *testing.T) {
 	const loop = 2500 * time.Millisecond
 	var normal, aborted int
 	for i := 0; i < 20; i++ {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
+		t.Run(fmt.Sprint(i), retryStalled(func(t *testing.T) {
 			c := start15n(t, w1, "ABA")
 			c.toShare1()
 			from := bytes.LastIndex(c.out.output(), []byte("Anteil 1/2"))
@@ -487,22 +495,22 @@ func TestPTYStopLoop(t *testing.T) {
 			c.in.confirm()
 			confirmed := time.Now()
 			hasClear := func() bool { return bytes.Contains(c.out.output()[from:], []byte(clearScreen)) }
-			if poll(stuckLimit, hasClear, func() bool { return c.ended(0) }) < 0 {
+			if c.poll(stuckLimit, "confirmed", hasClear, func() bool { return c.ended(0) }) < 0 {
 				t.Fatalf("share 1 neither cleared nor the program ended within %v", stuckLimit)
 			}
 			visible := time.Since(confirmed)
 			cleared := hasClear()
 			stop()
+			viaAbort := false
 			select {
 			case <-c.exited:
-				aborted++
+				viaAbort = true
 			default:
 				// The clear got through: holder 2 is called; the test ends
 				// the program.
-				if !c.errw.until(regexp.MustCompile(`Inhaber von Anteil 2 von 2`), 0, 2*time.Second) {
+				if !c.until(c.errw, regexp.MustCompile(`Inhaber von Anteil 2 von 2`), 0, 2*time.Second, "cleared") {
 					t.Fatalf("holder 2 not called after the clear; stderr %q", tail(c.errw.output()))
 				}
-				normal++
 				c.cmd.Process.Signal(syscall.SIGINT)
 			}
 			c.exitWithin(stuckLimit, "end")
@@ -521,8 +529,14 @@ func TestPTYStopLoop(t *testing.T) {
 					t.Fatalf("%s written", d)
 				}
 			}
+			// Counted once the attempt is through (retryStalled).
+			if viaAbort {
+				aborted++
+			} else {
+				normal++
+			}
 			t.Logf("share 1 visible %v after the confirmation (cleared %v)", visible.Round(time.Millisecond), cleared)
-		})
+		}))
 	}
 	t.Logf("%d runs cleared in the normal path, %d through the abort path", normal, aborted)
 }

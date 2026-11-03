@@ -44,6 +44,20 @@ type vt struct {
 	buf []byte
 
 	stop, stopped chan struct{}
+
+	// born, lastPass and maxGap time the passes of the poller (task
+	// 20m): the time of the last pass since born, and the longest gap
+	// between two passes since a window reset it.
+	born     time.Time
+	lastPass atomic.Int64
+	maxGap   atomic.Int64
+}
+
+// gap returns the longest gap between two passes of the poller since a
+// window reset it, the time since its last pass included.
+func (v *vt) gap() time.Duration {
+	since := time.Since(v.born) - time.Duration(v.lastPass.Load())
+	return max(since, time.Duration(v.maxGap.Load()))
 }
 
 // newVT opens a pseudo terminal with IXON, IXOFF and IXANY set, as a
@@ -51,7 +65,7 @@ type vt struct {
 func newVT(t *testing.T) *vt {
 	t.Helper()
 	m, s, name := rawPTY(t)
-	v := &vt{t: t, m: m, s: s, name: name, stop: make(chan struct{}), stopped: make(chan struct{})}
+	v := &vt{t: t, m: m, s: s, name: name, stop: make(chan struct{}), stopped: make(chan struct{}), born: time.Now()}
 	var tio syscall.Termios
 	if err := sysIoctl(s.Fd(), syscall.TCGETS, unsafe.Pointer(&tio)); err != nil {
 		t.Fatal(err)
@@ -75,6 +89,10 @@ func newVT(t *testing.T) *vt {
 			case <-v.stop:
 				return
 			default:
+			}
+			now := int64(time.Since(v.born))
+			if g := now - v.lastPass.Swap(now); g > v.maxGap.Load() {
+				v.maxGap.Store(g)
 			}
 			if !v.paused.Load() {
 				for {
