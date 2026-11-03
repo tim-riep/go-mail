@@ -1,11 +1,12 @@
 # Übergabe nach M1 (Entwurf)
 
-Stand: 03.11.2026, Entwurf aus Auftrag 20c. Code bei Commit 3e06f23 auf dem Arbeitsbranch `claude/quirky-keller-hjsl5i` (alle Pakete der Wellen 1 bis 4, 13e/13f, 15i bis 15n, 19/19b, 20a und die Linie 09b bis 09g zusammengeführt). Grundlage ist `docs/PLAN.md` in Version 1.4. Auftrag 20b (kleine Nacharbeiten im Produktivcode) läuft parallel und ist nicht enthalten. Messungen, Fuzzing, Abdeckung und die Abnahme nach 10.2 laufen noch; ihre Stellen tragen den Platzhalter „wird mit Auftrag 20 eingetragen“.
+Stand: 03.11.2026, Stand vor der Abnahme aus Auftrag 20k (Entwurf aus 20c fortgeschrieben). Code bei Commit b14d798 (Branch `worktree-agent-a7b23152bafa90687`, Auftrag 20h auf dem Arbeitsbranch `claude/quirky-keller-hjsl5i` bei df2b0af): alle Pakete der Wellen 1 bis 4, 13e/13f, 15i bis 15n, 19/19b, 20a, die Linie 09b bis 09g, die Nacharbeiten 20b und 20e, die Tests aus 20f und 20g sowie 20h. Grundlage ist `docs/PLAN.md` in Version 1.4. Nicht enthalten sind die parallel laufenden Aufträge 20i (letzte Funde niedrig im Code: Kommentar an `lockClientDir`, Paketkommentar zur Nebenläufigkeit, `O_NOCTTY`, Abbildung auf `ErrExists`) und 20j (RUNBOOK, DECISIONS und SPEC-ISSUES nach 20b bis 20h); wo dieses Dokument auf deren Ergebnis verweist, steht das dabei. Fuzzing, Abdeckung und die Zuordnung der Pflichttests sind eingetragen. Offen sind die Messungen (Kriterium D, Platzhalter „wird mit Auftrag 17 eingetragen“) und der Abschluss-Volllauf der Abnahme nach 10.2 (Kriterium E, Platzhalter „wird mit Auftrag 20 eingetragen“).
 
 Dieses Dokument beschreibt Pakete, Invarianten, Build und Grenzen für die nächste Phase. Es verweist, statt zu wiederholen:
-- Entscheidungen: `docs/DECISIONS.md` (Phase 1 ab D47, Phase 2 und M1 ab D63, zuletzt D91).
-- Offene Punkte der Spezifikation: `docs/SPEC-ISSUES.md` (bis S94); Fragen an den Auftraggeber: `docs/QUESTIONS.md` (Q1 bis Q22).
-- Bekannte Grenzen und Restrisiken: `docs/AUDIT.md` Abschnitt 5 (R1 bis R44); Prüfpfade: AUDIT Abschnitt 6.
+- Entscheidungen: `docs/DECISIONS.md` (Phase 1 ab D47, Phase 2 und M1 ab D63, zuletzt D91; Nachträge 20b und 20e an D86 und D91, der Nachtrag 20h an D86 folgt mit Auftrag 20j).
+- Offene Punkte der Spezifikation: `docs/SPEC-ISSUES.md` (bis S98); Fragen an den Auftraggeber: `docs/QUESTIONS.md` (Q1 bis Q22).
+- Bekannte Grenzen und Restrisiken: `docs/AUDIT.md` Abschnitt 5 (R1 bis R45); Prüfpfade: AUDIT Abschnitt 6.
+- Zuordnung der Pflichttests aus 10.1 und Abdeckung je Paket im Einzelnen: `docs/tasks/20-mandatory-tests.md`; Fuzzing und Laufzeiten aus den Läufen des Orchestrators: `docs/tasks/20-notes.md`.
 - Betrieb von Hand: `docs/RUNBOOK.md`, nachgefahren von `TestRunbook`.
 - Entwurf des Transparenzlogs: `internal/translog/doc.go` (verbindlich).
 - Verlauf der Aufträge und Prüfungen: `docs/ORCHESTRATION.md` Abschnitt 4. Einordnung der gesammelten Hinweise: `docs/tasks/20-triage.md`.
@@ -18,12 +19,12 @@ Die Kriterien stehen in `docs/ORCHESTRATION.md` Abschnitt 1, „M1-Kriterien A�
 
 | Kriterium | Stand | Was fehlt |
 |---|---|---|
-| **A** Phase 2 vollständig (2.2, 2.4, 2.5, 6, 7, 9) | Gebaut: Generationen mit `device lost`, `restore`, `keygen --shares`; Prüfvermerke und Übernahme nach 2.2 Punkt 4 für alle Dateiarten außerhalb des Logs (D84, D91). Epochen mit Gründen, `discards`, sofortige und geplante Epochen, Vorrat (D63, D68, D71). `mailbox share`, `revoke`, Leser vergangener Zeiträume (D75, D86). Ordnerliste je Epoche; Flags mit Versionsregel (K4, D79); Index, Suche, Zusammenfassen (D79, D91). Sperren und Rechte nach 9.1 (D70, D81); Befehle nach 9.2 (D86, D87). | Befehle, die an offenen Fragen hängen: `mailbox rotate` (Q7), `--server-search` (Q3, nicht M1), `--delegate` (Q6; Art 3 nur in der API), `recovery …` (Q1; nur interne API). Q18: Ein alleiniges Mitglied ohne geprüfte Ordnerliste hat keinen Ausweg (AUDIT R21). |
-| **B** Transparenzlog, Zeuge, Vermerke, 24 h, kein `--insecure-no-log` | Gebaut: Log auf `tlog` (D78), Serverseite mit `loghttp` (D80), Prüfungen in `ingest` und Server (D81), Client am Log mit Vermerken und 24-Stunden-Regel (D88), `gomail-witness` (D74). `--insecure-no-log` ist überall ein Nutzungsfehler. Alle `TODO(phase3-translog)` im Produktivcode sind aufgelöst. | Im Produktivcode nichts. Die 11 Marken `TODO(phase3-translog)` im Testdouble `internal/translog/translogtest` (`Unverified`, nur für `testenv`) sind veraltet und sollten umbenannt werden. Mehrere Zeugen im Betrieb folgen erst vor echten Mails (2.7, AUDIT 1.3). |
-| **C** Zeremonie `init --shares 3-of-5`, `ingest-rotate`, `reshare`, Probe; `--dev` nur für Tests | Gebaut (D82, D85 mit Nachträgen): dazu `succeed` und `publish` über das Log; `--dev` nur im Build mit `gomail_dev`; Terminalregeln mit Abbruchpfad. | Kompromissfall: `succeed --compromised` ist gesperrt (Q19, Haltepunkt 2; AUDIT R17). Der Pflichttest aus 10.1 „Signatur einer kompromittierten … Identitätsgeneration“ liegt übersprungen vor (`TestVerifyCompromisedIdentityStillIssues`). |
-| **D** `docs/MEASUREMENTS.md`, reproduzierbar | Messumgebung gebaut: `internal/bench`, `scripts/bench.sh` (D77, 12d). | `docs/MEASUREMENTS.md` fehlt; Auftrag 17 misst auf ruhiger Maschine. Wird mit Auftrag 20 eingetragen. |
-| **E** Abnahme nach 10.2 | Volllauf des Orchestrators auf dem Stand der Linie 09g grün: gofmt, vet, `-race` mit und ohne Tags, 386, `internal/e2e` (ORCHESTRATION, Verlauf 09g). Zwei-Maschinen-Skript im lokalen Modus durchgelaufen (D83). | Zuordnung der Pflichttests aus 10.1, Läufe mit Protokoll, Fuzzing je Ziel 10 Minuten, Abdeckung je Paket: wird mit Auftrag 20 eingetragen. Zwei Maschinen über NFSv4: **bedingt**, weil es hier weder NFS noch eine zweite Maschine gibt (D83, AUDIT R36). Ob der übersprungene Pflichttest (Q19) Kriterium E berührt, entscheidet Auftrag 20. |
-| **F** HANDOFF, AUDIT, RUNBOOK mit `TestRunbook` | `docs/AUDIT.md` auf dem Stand nach D91 (Aufträge 18, 18b, 18c, 20c). `docs/RUNBOOK.md` mit `TestRunbook` (Zeremonie 3 aus 5, Zeuge, drei Benutzer; D89). Dieses Dokument als Entwurf. | Abschluss dieses Dokuments mit den Zahlen aus Auftrag 20. Redaktionelle Vorschläge für das RUNBOOK in `docs/tasks/20-triage.md` (R-1 bis R-3). |
+| **A** Phase 2 vollständig (2.2, 2.4, 2.5, 6, 7, 9) | Gebaut: Generationen mit `device lost`, `restore`, `keygen --shares`; Prüfvermerke und Übernahme nach 2.2 Punkt 4 für alle Dateiarten außerhalb des Logs (D84, D91; seit 20e legt ein Schreiber den Vermerk für sein eigenes Segment beim Schreiben an, D91 Nachtrag 20e). Epochen mit Gründen, `discards`, sofortige und geplante Epochen, Vorrat (D63, D68, D71). `mailbox share`, `revoke`, Leser vergangener Zeiträume (D75, D86). Ordnerliste je Epoche; Flags mit Versionsregel (K4, D79); Index, Suche, Zusammenfassen (D79, D91). Sperren und Rechte nach 9.1 (D70, D81); Befehle nach 9.2 (D86, D87). `keygen` und `restore` legen das Client-Verzeichnis in einem Schritt an (D86 Nachträge 20b und 20e; Marker `.incomplete` und geprüfte Sperrdatei seit 20h, `createClientDir`, `removeLeftovers`, `lockClientDir`). | Befehle, die an offenen Fragen hängen: `mailbox rotate` (Q7), `--server-search` (Q3, nicht M1), `--delegate` (Q6; Art 3 nur in der API), `recovery …` (Q1; nur interne API). Q18: Ein alleiniges Mitglied ohne geprüfte Ordnerliste hat keinen Ausweg (AUDIT R21). |
+| **B** Transparenzlog, Zeuge, Vermerke, 24 h, kein `--insecure-no-log` | Gebaut: Log auf `tlog` (D78), Serverseite mit `loghttp` (D80), Prüfungen in `ingest` und Server (D81), Client am Log mit Vermerken und 24-Stunden-Regel (D88), `gomail-witness` (D74). `--insecure-no-log` ist überall ein Nutzungsfehler. Alle `TODO(phase3-translog)` im Produktivcode sind aufgelöst. | Im Produktivcode nichts. Die 11 Marken `TODO(phase3-translog)` im Testdouble `internal/translog/translogtest` (`Unverified`, nur für `testenv`) stehen an b14d798 weiter dort, sind veraltet und sollten umbenannt werden. Mehrere Zeugen im Betrieb folgen erst vor echten Mails (2.7, AUDIT 1.3). |
+| **C** Zeremonie `init --shares 3-of-5`, `ingest-rotate`, `reshare`, Probe; `--dev` nur für Tests | Gebaut (D82, D85 mit Nachträgen): dazu `succeed` und `publish` über das Log; `--dev` nur im Build mit `gomail_dev`; Terminalregeln mit Abbruchpfad. | Kompromissfall: `succeed --compromised` ist gesperrt (Q19, Haltepunkt 2; AUDIT R17). Der Pflichttest aus 10.1 „Signatur einer kompromittierten … Identitätsgeneration“ liegt übersprungen vor (`TestVerifyCompromisedIdentityStillIssues`, Zeile S9 unter „Pflichttests aus 10.1“). |
+| **D** `docs/MEASUREMENTS.md`, reproduzierbar | Messumgebung gebaut: `internal/bench`, `scripts/bench.sh` (D77, 12d). | `docs/MEASUREMENTS.md` fehlt; Auftrag 17 misst auf ruhiger Maschine. Wird mit Auftrag 17 eingetragen. |
+| **E** Abnahme nach 10.2 | Pflichttests aus 10.1: 27 von 30 vollständig zugeordnet, alle zugeordneten Tests bestanden im gezielten Lauf (20f bis 20h, Abschnitt „Pflichttests aus 10.1“). Fuzzing: alle 25 Ziele je 10 Minuten ohne Fund (Abschnitt „Fuzzing“). Abdeckung: nach den letzten Messungen kein Paket unter `internal/` unter dem Soll (Abschnitt „Testabdeckung“). Volläufe des Orchestrators grün, je 67 Schritte (gofmt, vet, `-race` mit und ohne Tags und 386 je Paket, `internal/e2e`): auf 7ffed5c (09g), cb2344c (20b) und b2032d5 (20e; `TestPTYPromptBlocked` einmal wiederholt; das ist Teil des offenen Funds unter „Bekannte Flakes“) (ORCHESTRATION Abschnitte 5 und 6). Zwei-Maschinen-Skript im lokalen Modus durchgelaufen (D83). | Abschluss-Volllauf mit Protokoll auf dem endgültigen Stand: wird mit Auftrag 20 eingetragen. Der Volllauf auf dem Stand von 20h (302c6db, Code gleich b14d798) lief beim Schreiben dieses Stands und war nicht abgeschlossen. Offener Fund: die 4,5-s-Grenze der Abbruchtests in `cmd/gomail-ceremony` scheiterte in zwei Volläufen (`TestPTYPromptBlocked` auf b2032d5, `TestPTYStopLoop/6` auf 302c6db); Analyse läuft, Fix-Auftrag folgt (Abschnitt „Bekannte Flakes“). S9 (Signatur einer kompromittierten Identitäts- oder Ingest-Generation) bleibt offen, bis Q19 und Q8 entschieden sind; bis dahin ist E in diesem Punkt nicht erfüllt. S7 (Löschen von Epochen) und der Volltextteil von Z3 liegen außerhalb von M1 (ORCHESTRATION Abschnitt 1). Zwei Maschinen über NFSv4: **bedingt**, weil es hier weder NFS noch eine zweite Maschine gibt (D83, AUDIT R36). Abdeckung von `ceremony`, `store` und `translog` nach 20b/20e und von `testenv` nach 20h nicht neu gemessen. |
+| **F** HANDOFF, AUDIT, RUNBOOK mit `TestRunbook` | `docs/AUDIT.md` auf dem Stand b14d798 (Aufträge 18, 18b, 18c, 20c, 20k). `docs/RUNBOOK.md` mit `TestRunbook` (Zeremonie 3 aus 5, Zeuge, drei Benutzer; D89); von den Vorschlägen aus `docs/tasks/20-triage.md` hat 20d R-1 und R-2 übernommen, R-3 folgt mit 20j. Dieses Dokument mit Fuzzing, Abdeckung, Pflichttests, Laufzeiten und Flakes. | RUNBOOK zu `keygen`/`restore` (Temp-Verzeichnisse, Marker; RUNBOOK 3.2, Block „Client-Verzeichnis“), zur Abhilfe am Kopf (RUNBOOK 8.7 „Epoche widerspricht dem Log“) und zu `address add` bei nachgehender Uhr: Auftrag 20j (parallel, nicht in diesem Stand). In diesem Dokument offen: Messungen (Kriterium D) und Abschluss-Volllauf (Kriterium E) wie oben, die Zahlen der Prüfungen für den Abschlussbericht (Abschnitt „Unabhängige Prüfungen bis M1“). |
 
 Nicht in M1 (ORCHESTRATION Abschnitt 1): Löschen von Epochen, Volltextsuche, QR, TLS und Missbrauchsschutz, Padmé, Hardware-Schlüssel, IMAP, Oberflächen über die Kommandozeile hinaus.
 
@@ -86,19 +87,25 @@ scripts/two-host-test.sh --local …                                 # Test nach
 scripts/bench.sh                                                    # Messungen (D77)
 ```
 
-`-race` gibt es auf 386 nicht. Der Standard von `go test -timeout` ist 10 Minuten; `internal/client` braucht länger, daher `-timeout 60m` (mindestens 40 Minuten).
+`-race` gibt es auf 386 nicht. Der Standard von `go test -timeout` ist 10 Minuten; `internal/client` braucht länger, daher jeder Lauf über das ganze Modul oder über `internal/client` mit `-timeout 60m`. Unter fremder Last ist auch das knapp: `internal/client` brauchte unter `-race` mit Tags bei geteilten CPUs bis 3401 s, also etwa 57 Minuten (Lauf des Implementierers von 20e, `docs/tasks/20-notes.md` „Aus 20e“); im Volllauf auf cb2344c scheiterten beide `client`-Schritte an einer Grenze von 40 Minuten unter Last 10 und bestanden mit 60 Minuten (ORCHESTRATION Abschnitt 6). Abschlussläufe deshalb ohne parallele Last.
 
 ### Laufzeiten (Richtwerte, 4 Kerne)
 
 | Lauf | Dauer | Quelle |
 |---|---|---|
-| `internal/client` mit `-race` | 25 bis 35 Minuten (1489 s nach 14, 2003 s nach 09e) | `docs/tasks/20-notes.md` |
-| `internal/client` unter 386 | etwa 15 bis 30 Minuten (868 s nach 14, 1733 s nach 09e) | `docs/tasks/20-notes.md` |
-| `cmd/gomail-ceremony` mit `-race` | knapp unter 10 Minuten; `TestPTYSignalSalvo` allein 250 bis 470 s | `docs/tasks/20-notes.md` (15n) |
+| `internal/client` mit `-race` und Tags | ohne Last 25 bis 35 Minuten (1489 s nach 14, 2003 s nach 09e); in den Volläufen 1942 s (09g, 7ffed5c), 2449 s (20b, cb2344c), 2338 s (20e, b2032d5); unter fremder Last bis 44 Minuten (20b) und bis 3401 s, etwa 57 Minuten (20e) | `docs/tasks/20-notes.md`; Protokolle des Orchestrators (Scratchpad `orch/fr-09g`, `orch/fr-20b`, `orch/fr-20e`) |
+| `internal/client` unter 386 mit Tags | etwa 15 bis 30 Minuten (868 s nach 14, 1733 s nach 09e, 1452 s im Volllauf auf 7ffed5c) | `docs/tasks/20-notes.md`; Protokoll des Orchestrators (`orch/fr-09g`) |
+| `internal/client` mit `-cover` und Tags, ohne `-race` | 1334 s unter fremder Last (Lastmittel bis 15) | `docs/tasks/20-mandatory-tests.md` |
+| `cmd/gomail-ceremony` mit `-race` | etwa 400 bis 435 s in den Volläufen (09g, 20b, 20e); `TestPTYSignalSalvo` allein 250 bis 470 s | `docs/tasks/20-notes.md` (15n); Protokolle des Orchestrators |
+| `internal/e2e` mit `-race` | etwa 109 bis 135 s in den Volläufen | Protokolle des Orchestrators |
 | `TestRunbook` | etwa 35 s | D89 |
-| Volllauf aller Pakete | wird mit Auftrag 20 eingetragen | – |
+| Volllauf aller Pakete (Abschluss) | wird mit Auftrag 20 eingetragen | – |
 
-Unter Last sind `TestPTYQuitInCommit` (einmal 61 s) und `TestTwoHostScript` (einmal gescheitert) als Ausreißer aufgefallen; Auftrag 20 beobachtet sie (`docs/tasks/20-triage.md`, Nr. 138 und 152).
+### Bekannte Flakes und offener Fund
+
+- **Kein Flake, sondern ein offener Fund:** die 4,5-s-Grenze der Abbruchtests in `cmd/gomail-ceremony` (`stuckLimit`, `outputGrace` + 2,5 s, `cmd/gomail-ceremony/blocked15n_linux_test.go`). Sie scheiterte in zwei Volläufen: `TestPTYPromptBlocked` (`-race` ohne Tags) im Volllauf auf b2032d5 (20e) mit „no exit within 4.5s of share 1, prompt not shown“, die Wiederholung bestand (401,8 s); `TestPTYStopLoop/6` (`-race` mit Tags, Last 4 bis 5) im Volllauf auf dem Stand von 20h (302c6db, Code gleich b14d798) mit „share 1 neither cleared nor the program ended within 4.5s“ (19 Läufe im normalen Pfad gelöscht), der Lauf ohne Tags bestand. Der Code der Zeremonie ist seit 20b unverändert. Zwei Fehlschläge in zwei Läufen ordnet der Orchestrator als einen echten Fund ein; die Analyse (Testgrenze unter `-race` und Last oder echte Verzögerung des Abbruchpfads) läuft, ein Fix-Auftrag folgt (`docs/tasks/20-notes.md`, „Flake aus dem Volllauf 20e“ und Nachtrag zum Volllauf 20h; Protokolle des Orchestrators, Scratchpad `orch/fr-20e` und `orch/fr-20h`).
+- `internal/client` `TestWordErrorsNameNoInput`: behoben (09g). Der Test prüft über `leakedWord` nur noch ganze Seed-Wörter, die nicht schon in der festen Meldung stehen (`internal/client/generations_test.go`, `TestLeakedWord`; `docs/tasks/20-triage.md` Nr. 197).
+- Unter Last aufgefallen, seither nicht wieder als Fehler protokolliert: `TestPTYQuitInCommit` (einmal 61 s) und `TestTwoHostScript` (einmal gescheitert) (`docs/tasks/20-triage.md`, Nr. 138 und 152). In den Volläufen auf 7ffed5c, cb2344c und b2032d5 bestanden `cmd/gomail-ceremony` und `internal/e2e`.
 
 ### Testvektoren
 
@@ -353,7 +360,9 @@ Einstieg: `Keygen`, `Register`, `Restore`, `DeviceLost`, `Open`; am `Client`: `C
 - Wachstum von `state.json` ist begrenzt mit dokumentierter Rate; gelesen wird bis 64 MiB (`loadState`). Ohne Schlüssel bei Schreibzugriff: AUDIT R27 (a); im ehrlichen Betrieb: AUDIT R43.
 - `List` zeigt nur Mails, die alle Prüfungen bestanden haben, und warnt für jede andere; `Read` gibt bei jedem Fehler nichts heraus. Warnungen nennen nur IDs, Nummern und feste Ursachen (`warnCause`).
 - Erste Einträge nach „Who writes“: erst Log, dann Datei (`Register`, `CreateMailbox` über `new-mailboxes/`), Epochen und Generationen erst Datei, dann Log (D88 (3)).
-- Schreibfolgen sind absturzsicher: was nach einem Absturz übrig bleibt, übernimmt oder räumt der nächste Lauf (Vormerkungen `Reissue`, `ErrPartial`). Ausnahme bis 20b: `keygen` (AUDIT R33).
+- Schreibfolgen sind absturzsicher: was nach einem Absturz übrig bleibt, übernimmt oder räumt der nächste Lauf (Vormerkungen `Reissue`, `ErrPartial`). `keygen` (seit 20b) und `restore` (seit 20e) legen das Client-Verzeichnis in einem Temp-Verzeichnis `.<name>.keygen-*` bzw. `.<name>.restore-*` an und benennen es um (`createClientDir` in `internal/client/keygen.go`); Reste mit dem Marker `.incomplete` räumt der nächste erfolgreiche Lauf derselben Art (`removeLeftovers`, seit 20h nur mit Marker und nur bekannte Dateinamen). Restgrenzen: AUDIT R33.
+- Die Sperre des Client-Verzeichnisses nehmen `Open`, `openForDeviceLost`, `Register` und `lockOnlyDir` über `lockClientDir` (`internal/client/client.go`, seit 20h): Die Sperrdatei wird vor und nach `store.LockFile` über den Pfad verglichen (`os.SameFile`), bei Abweichung bis zu 8 Versuche (`lockAttempts`), dann `store.ErrLocked`. Restfall Wiederverwendung der Inode-Nummer: AUDIT R33.
+- **`Client` ist nicht goroutinesicher, `Close` eingeschlossen.** `Client.mu` schützt nur das Merkmal `closed` (`open`, `Close` in `internal/client/client.go`); `open()` prüft und handelt danach ohne Sperre. Nach `Close` liefert jede Methode mit Fehlerergebnis `client.ErrClosed`, statt zu paniken (seit 20h, `TestNoPanicAfterClose`, `TestClosedCallsCoverMethods`); `UserID` und `Mailboxes` liefern weiter die IDs im Speicher. Gleichzeitige Aufrufe aus mehreren Goroutinen, auch `Close` gegen eine laufende Methode, sind Datenrennen (Angreiferprüfung von 20h, `docs/tasks/20-notes.md`). Ein Aufrufer, der einen `Client` teilt, serialisiert selbst. An b14d798 steht das weder im Paketkommentar noch am Typ; Auftrag 20i trägt es dort nach. AUDIT R45.
 - Der lokale Zustand ist Teil der Sicherheit. Ohne ihn beginnt ein Gerät bei Vertrauen beim ersten Kontakt (2.7; AUDIT R20, R22).
 
 ## ceremony und Programme
@@ -389,7 +398,7 @@ Client-Verzeichnis (Standard `~/.config/gomailctl`, nie im Datenverzeichnis): `k
 
 ## Bekannte Grenzen
 
-Vollständig in `docs/AUDIT.md` Abschnitt 5 (R1 bis R44), jeweils mit Beleg. Für die Übergabe besonders:
+Vollständig in `docs/AUDIT.md` Abschnitt 5 (R1 bis R45), jeweils mit Beleg. Für die Übergabe besonders:
 
 - **Q19, kompromittierte Plattformidentität** (R17): kein Weg im Code; bei Kompromittierung neue Zeremonie mit neuem Origin und neuen Pins.
 - **Wachstum des Client-Zustands** (R27 (a), R43): ohne Schlüssel bei Schreibzugriff je nach Geräten und Größe der Epoche in Tagen bis Monaten bis 64 MiB; im ehrlichen Betrieb rund 70 000 Mails je Client-Verzeichnis. Abhilfe nach M1 (Q22 Variante B).
@@ -399,33 +408,97 @@ Vollständig in `docs/AUDIT.md` Abschnitt 5 (R1 bis R44), jeweils mit Beleg. Fü
 - **Terminal in `gomailctl`** (R6): Ein statisch per `mknod` angelegter Terminalknoten auf einem anderen Dateisystem (etwa in einem chroot) hat ein anderes `st_dev` und wird verweigert; das ist die sichere Richtung. Auf den BSDs ohne `/dev/tty` im Dateisystem entfällt die Unterscheidung der Sitzungen.
 - **Ohne S-Punkt, offen mit `TODO(ask)`:** Passphrase mit Echo und Löschen des Seeds vor der Abfrage der Kontrollwörter (D86, R31); Gruppenname bei `gomail-server init` nur Warnung (D87 (4), R34); neuer `init` statt Nachfolge bei kompromittiertem Root (Nachtrag zu Q19, R17).
 - **Aus Phase 1 weiter offen** (R38): Spool-Vervielfachung bei vielen Empfängerpostfächern, Mindestrate in festen 60-Sekunden-Fenstern, Doppelzustellung bei Verlust zwischen Commit und `250`.
+- **`Client` nicht goroutinesicher** (R45): siehe „client“, Invarianten. `gomailctl` öffnet je Befehl einen `Client` (`client.Open` in `cmd/gomailctl/main.go` und `commands.go`) und teilt ihn nicht zwischen Goroutinen; die einzige Goroutine außerhalb der Tests ist der Signalwächter des Bildschirms (`screen.watch`, `cmd/gomailctl/screen.go`), der den `Client` nicht berührt; wer `internal/client` in eigene Werkzeuge einbaut, serialisiert die Aufrufe selbst.
 - **Kein Klartext, aber Metadaten sichtbar** (R37): Root während des Empfangs liest neue Mails; Größen, Zeiten, Mitgliedschaften und Trefferzahlen bleiben sichtbar.
 
 ## Offene Fragen
 
-Alle Fragen mit Stand stehen in `docs/QUESTIONS.md` und AUDIT 7.1. Die drei, die das Verhalten nach M1 am stärksten bestimmen:
+Alle Fragen mit Stand stehen in `docs/QUESTIONS.md` und AUDIT 7.1. Die drei, die das Verhalten nach M1 am stärksten bestimmen, sind am Stand b14d798 unverändert offen; die Aufträge 20b bis 20h haben an ihrem gebauten Verhalten nichts geändert:
 
 | Frage | Gegenstand | Stand | Gebaut bis zur Antwort |
 |---|---|---|---|
 | Q18 | alleiniges Mitglied nach einem Widerruf ohne geprüfte `folders.gml` | offen (Haltepunkt 1) | Ablehnung ohne Ausweg: `List`, `Rename`, `SetFolders` scheitern, `Read` geht; `sync` und `device lost` enden mit Exit 3 und fester Ursache (D84 (3), D88 (7), `TODO(Q18)` in `internal/client/devicelost.go`). Vorbeugung: Postfächer mit mindestens zwei Benutzer-Mitgliedern führen (RUNBOOK 8.4). AUDIT R21. |
-| Q19 | Nachfolge nach Kompromittierung der Plattformidentität | offen, **Haltepunkt 2** | `succeed --compromised` gesperrt (Nutzungsfehler, `ErrCompromised`, `TODO(Q19)`); Pflichttest aus 10.1 übersprungen. Vorschlag in Q19: Logeintrag `revocation-<g>.rec` der neuen Identität. Zusätzlich offen: wann ein neuer `init` statt einer Nachfolge nötig ist. AUDIT R17, S76. |
+| Q19 | Nachfolge nach Kompromittierung der Plattformidentität | offen, **Haltepunkt 2** | `succeed --compromised` gesperrt (Nutzungsfehler, `ErrCompromised`, `TODO(Q19)`); Pflichttest aus 10.1 übersprungen (S9, hält Kriterium E in diesem Punkt offen; mit Q8 für den Ingest-Teil). Vorschlag in Q19: Logeintrag `revocation-<g>.rec` der neuen Identität. Zusätzlich offen: wann ein neuer `init` statt einer Nachfolge nötig ist. AUDIT R17, S76. |
 | Q20 | Markierung „noch kein bestätigter Zustand“ nach Wiederherstellung | offen (Haltepunkt 1) | strengste Lesart: `Unconfirmed` bleibt bis zum Vergleich mit dem Vermerk eines **anderen** Benutzer-Mitglieds; ein eigenes zweites Gerät zählt nicht; ein alleiniges Mitglied bleibt dauerhaft markiert (nur Warnung; D88 (6), `TODO(Q20)` in `internal/client`). AUDIT R22. |
 
-Weiter offen und für den Betrieb mit echten Mails wichtig: Q8 (Widerruf von Ingest- und Admin-Generationen, kein Pin-Feld 7), Q9 (zeitliche Bindung von Adresszuordnungen), Q4 (Logschlüssel ist der Ingest-Schlüssel). Entschieden in dieser Phase: Q22 (Variante A, D91).
+Weiter offen und für den Betrieb mit echten Mails wichtig: Q8 (Widerruf von Ingest- und Admin-Generationen, kein Pin-Feld 7), Q9 (zeitliche Bindung von Adresszuordnungen), Q4 (Logschlüssel ist der Ingest-Schlüssel). Erledigt in dieser Phase: Q22 (Variante A, D91; mit 09g zusammengeführt, Wachstum bei Schreibzugriff als bekannte Grenze, AUDIT R27).
+
+## Pflichttests aus 10.1
+
+Vollständig in `docs/tasks/20-mandatory-tests.md` (Auftrag 20f, nachgeführt mit 20g und 20h): je Spiegelstrich aus 10.1 die Testfunktionen, Paket, Tags, Ergebnis eines gezielten Laufs und Stand, geprüft am Code des Tests. Gezählt sind 30 Pflichttests (T1 bis T3, K1, K2, G1 bis G9, S1 bis S9, F1 bis F3 je Fuzz-Ziel, Z1 bis Z4).
+
+| Stand | Zahl | Pflichttests |
+|---|---|---|
+| vollständig | 27 | T1 bis T3, K1, K2, G1 bis G9, S1 bis S6, S8, F1 bis F3, Z1, Z2, Z4 |
+| teilweise | 2 | S9: Identität übersprungen (`TestVerifyCompromisedIdentityStillIssues`, Q19, Haltepunkt 2); Ingest nur als Ablösung durch eine neue Generation geprüft, ein Widerruf als kompromittiert ist nicht spezifiziert (Q8). Wartet auf Q19 und Q8 (Folgeauftrag F-2). Z3: Suchmarken-Index vollständig (`TestDeviceChangeTakesOverSegments`, `TestDeviceChangeThenDeviceLost` in `internal/client/devicechange_test.go`, 20h); der Volltextindex (6.4) ist nicht Teil von M1 und nicht gebaut. |
+| fehlt | 1 | S7 (Löschen von Epochen, 2.6): nicht Teil von M1 und nicht gebaut (Folgeauftrag F-3). |
+
+Alle zugeordneten Tests bestanden im gezielten Lauf; übersprungen ist nur `TestVerifyCompromisedIdentityStillIssues`. Neu gebaut für die Zuordnung: `TestAllSchemasListed` und `TestAllSchemasRoundTrip` (`internal/rec/allschemas_test.go`, K1, alle 40 Datensatzschemata; 20f, `go/parser` und Build-Tags seit 20g) und die Tests zum Gerätewechsel (Z3, 20h). Für Kriterium E bleibt S9 offen; S7 und der Volltextteil von Z3 liegen außerhalb von M1.
 
 ## Testabdeckung
 
-Wird mit Auftrag 20 eingetragen: `go test -cover` je Paket unter `internal/` (mit `-tags gomail_dev,gomail_test`, wo nötig), Mindestwerte 85 % je Paket und 90 % für `rec`, `keys`, `shamir`, `envelope`, `translog` (M1-Kriterium E).
+`go test -count=1 -cover -timeout 60m` je Paket unter `internal/`, ohne `-race`; „mit Tags“ heißt `-tags gomail_dev,gomail_test`. Soll nach M1-Kriterium E: 85 % je Paket, 90 % für `rec`, `keys`, `shamir`, `envelope`, `translog`. Quelle: `docs/tasks/20-mandatory-tests.md`, Abschnitt „Abdeckung je Paket“ (gemessen am Code von 3e06f23 mit den Tests aus 20f, unter fremder Last; `testenv` und `translogtest` mit 20g), `internal/client` nach 20h aus dem Bericht des Implementierers (`docs/tasks/20-notes.md`, „Aus 20h“). Die Spalte „Code gemessen“ nennt, ob sich der Produktivcode des Pakets seit der Messung geändert hat.
 
-Letzter bekannter Wert: `internal/client` 87,9 % (09g, ORCHESTRATION Verlauf). Die Werte aus Phase 1 stehen unter „Verlauf“.
+| Paket | Soll | mit Tags | ohne Tags | Code gemessen |
+|---|---|---|---|---|
+| `internal/bench` | 85 % | 92,8 % | – | unverändert bis b14d798 |
+| `internal/ceremony` | 85 % | 88,7 % | 89,9 % | vor 20b; 20b änderte `files.go`, `publish.go` (R41), Abdeckung laut Bericht von 20b unverändert |
+| `internal/client` | 85 % | 88,3 % | – | b14d798 (20h); vorher 87,9 % (20f), 88,1 % (20e) |
+| `internal/e2e` | – | keine Anweisungen | – | nur Testcode und `doc.go` |
+| `internal/envelope` | 90 % | 94,0 % | 94,0 % | unverändert bis b14d798 |
+| `internal/ingest` | 85 % | 90,3 % | – | unverändert bis b14d798 |
+| `internal/keys` | 90 % | 93,9 % | 93,9 % | unverändert bis b14d798 |
+| `internal/loghttp` | 85 % | 93,9 % | 93,9 % | unverändert bis b14d798 |
+| `internal/rec` | 90 % | 99,6 % | 99,6 % | unverändert bis b14d798 |
+| `internal/shamir` | 90 % | 100,0 % | 100,0 % | unverändert bis b14d798 |
+| `internal/smtpd` | 85 % | 92,5 % | 91,9 % | unverändert bis b14d798 |
+| `internal/store` | 85 % | 89,4 % | 89,3 % | vor 20b; 20b änderte `fs.go`, `index.go`, `dir_*.go` (laut Bericht unverändert), 20e nur Kommentare; nicht neu gemessen |
+| `internal/terms` | 85 % | 100,0 % | 100,0 % | unverändert bis b14d798 |
+| `internal/testenv` | 85 % | 96,3 % | 15,1 % | 20g; 20h änderte nur `dev_test.go`; nicht neu gemessen |
+| `internal/translog` | 90 % | 93,3 % | 93,3 % | vor 20b; 20b änderte `operator.go`, `translog.go`, 20e `files.go`; nicht neu gemessen |
+| `internal/translog/translogtest` | 85 % | 100,0 % | 100,0 % | 20g, unverändert bis b14d798 |
+| `internal/witness` | 85 % | 95,2 % | 95,2 % | unverändert bis b14d798 |
+| `internal/words` | 85 % | 100,0 % | 100,0 % | unverändert bis b14d798 |
+
+Kein Paket liegt unter dem Soll. `internal/testenv` lag bei 0,0 % (Testhilfe ohne eigene Tests); der Orchestrator hat entschieden, dass Kriterium E für jedes Paket unter `internal/` gilt, und 20g hat eigene Tests gebaut. Ohne Tags überspringen sich in `testenv` die Tests von `New` und `NewLogged`; daher die 15,1 %. Die Werte für `ceremony`, `store` und `translog` gelten für den Code vor 20b, der für `testenv` für die Tests vor 20h; eine Messung am endgültigen Stand gehört zum Abschluss-Volllauf (wird mit Auftrag 20 eingetragen). Die Programme unter `cmd/` haben keinen Mindestwert. Die Werte aus Phase 1 stehen unter „Verlauf“.
 
 ## Fuzzing
 
-Wird mit Auftrag 20 eingetragen: jedes Ziel 10 Minuten, Protokolle unter `docs/acceptance/<datum>/fuzz-*.log`.
+Alle 25 Ziele liefen je 10 Minuten (`go test -run '^$' -fuzz '^FuzzX$' -fuzztime 10m -parallel 1`, ein Worker je Ziel, zwei Bahnen gleichzeitig) ohne Fund; kein neuer Fall unter `testdata/fuzz/` (zwischen bf427c2 und b14d798 unverändert). Die Protokolle liegen im Scratchpad des Orchestrators (`orch/fz/`, `orch/fz2/`, `orch/fz3/`), nicht im Repository; die Zahlen stehen in `docs/tasks/20-notes.md` („Fuzzing für 10.2“, „Fuzzing, zweiter Teil“, „Fuzzing, dritter Teil“). Code je Teil:
 
-25 Ziele (AUDIT 6.4): `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`, `store.FuzzDecodeRecords`, `smtpd.FuzzCommands`, `smtpd.FuzzData`, `ingest.FuzzTerms`, `words.FuzzNormalize`, `translog.FuzzParseHeadText`, `translog.FuzzDecodeEntry`, `translog.FuzzOpenHead`, `translog.FuzzProofs`, `translog.FuzzAuditIndex`, `witness.FuzzParseProof`, `witness.FuzzDecodeWitnesses`, `witness.FuzzCosign`, `witness.FuzzPoll`, `loghttp.FuzzServer`.
+- Erster Teil, 19 Ziele: auf bf427c2 (Code gleich 3e06f23). Die Pakete dieser Ziele (`envelope`, `ingest`, `keys`, `loghttp`, `rec`, `shamir`, `smtpd`, `witness`, `words`) sind bis b14d798 im Produktivcode unverändert.
+- Zweiter Teil, `store.FuzzDecodeRecords`: auf 84ca174 (WIP von 20b; `store` gleich cb2344c, dem Ergebnis von 20b). `store` hat sich danach nur in Kommentaren geändert (20e).
+- Dritter Teil, 5 Ziele in `translog`: auf d85da00 (nach 20e, `translog/files.go` geändert); wiederholt, weil 20e `translog` änderte. Die Läufe des zweiten Teils auf 84ca174 für diese 5 Ziele waren ebenfalls ohne Fund. `translog` ist zwischen d85da00 und b14d798 unverändert.
 
-10.1 verlangt Fuzzing für den `.gml`-Parser, den SMTP-Parser und das Einlesen von Shamir-Anteilen; alle drei sind abgedeckt. Kein eigenes Ziel haben die Prüfpfade des Clients (Kette, Vermerke, `state.json`) und die Zeremonie; `internal/terms` deckt `ingest.FuzzTerms` über `ingest.Terms`.
+| Paket | Ziel | Ausführungen in 10 min | Code |
+|---|---|---|---|
+| `internal/envelope` | `FuzzParseAndOpen` | 829.752 | bf427c2 |
+| `internal/ingest` | `FuzzTerms` | 1.465.639 | bf427c2 |
+| `internal/keys` | `FuzzDecodeGenerationCert` | 9.322.292 | bf427c2 |
+| `internal/keys` | `FuzzOpenKeystore` | 10.126.628 | bf427c2 |
+| `internal/keys` | `FuzzParseWordlist` | 526.897 | bf427c2 |
+| `internal/keys` | `FuzzSeedFromWords` | 8.829.700 | bf427c2 |
+| `internal/loghttp` | `FuzzServer` | 3.093.479 | bf427c2 |
+| `internal/rec` | `FuzzDecode` | 10.877.835 | bf427c2 |
+| `internal/rec` | `FuzzIsNFC` | 9.876.698 | bf427c2 |
+| `internal/shamir` | `FuzzCombine` | 4.165.047 | bf427c2 |
+| `internal/shamir` | `FuzzShareFromBytes` | 12.377.691 | bf427c2 |
+| `internal/shamir` | `FuzzShareFromWords` | 9.791.607 | bf427c2 |
+| `internal/smtpd` | `FuzzCommands` | 3.568.702 | bf427c2 |
+| `internal/smtpd` | `FuzzData` | 3.901.203 | bf427c2 |
+| `internal/witness` | `FuzzCosign` | 3.365.961 | bf427c2 |
+| `internal/witness` | `FuzzDecodeWitnesses` | 4.052.309 | bf427c2 |
+| `internal/witness` | `FuzzParseProof` | 4.227.219 | bf427c2 |
+| `internal/witness` | `FuzzPoll` | 1.327.905 | bf427c2 |
+| `internal/words` | `FuzzNormalize` | 2.960.008 | bf427c2 |
+| `internal/store` | `FuzzDecodeRecords` | 9.012.891 | 84ca174 (`store` wie cb2344c) |
+| `internal/translog` | `FuzzAuditIndex` | 1.656.812 | d85da00 |
+| `internal/translog` | `FuzzDecodeEntry` | 6.272.210 | d85da00 |
+| `internal/translog` | `FuzzOpenHead` | 6.272.278 | d85da00 |
+| `internal/translog` | `FuzzParseHeadText` | 6.436.659 | d85da00 |
+| `internal/translog` | `FuzzProofs` | 4.849.422 | d85da00 |
+
+10.1 verlangt Fuzzing für den `.gml`-Parser, den SMTP-Parser und das Einlesen von Shamir-Anteilen (F1 bis F3); alle drei sind abgedeckt. Kein eigenes Ziel haben die Prüfpfade des Clients (Kette, Vermerke, `state.json`) und die Zeremonie; `internal/terms` deckt `ingest.FuzzTerms` über `ingest.Terms`.
 
 ## Unabhängige Prüfungen bis M1
 
@@ -433,7 +506,7 @@ Jedes Paket hatte nach `docs/ORCHESTRATION.md` Abschnitt 2 einen oder zwei Prüf
 
 ## TODO-Inventar
 
-Vorkommen in `cmd` und `internal` am Stand 3e06f23, einschließlich Tests (`grep -rhoE 'TODO\([^)]*\)' cmd internal --include=*.go`):
+Vorkommen in `cmd` und `internal` am Stand b14d798, einschließlich Tests (`grep -rhoE 'TODO\([^)]*\)' cmd internal --include=*.go` im Baum dieses Commits). Gegenüber 3e06f23 ist nur `TODO(task-13)` entfallen (20b Punkt 2); die Erwähnung `TODO(phase3-...)` in einem Kommentar von `internal/translog/doc.go` ist nicht gezählt:
 
 | Marke | Zahl | Bedeutung |
 |---|---|---|
@@ -445,7 +518,6 @@ Vorkommen in `cmd` und `internal` am Stand 3e06f23, einschließlich Tests (`grep
 | `TODO(Q9)`, `TODO(Q6)` | je 3 | Adresszuordnung, Vertretung |
 | `TODO(Q13)`, `TODO(Q18)` | je 2 | `checkSignerGen`, alleiniges Mitglied |
 | `TODO(Q3)`, `TODO(Q4)`, `TODO(Q7)` | je 1 | Serversuche, Logschlüssel, `mailbox rotate` |
-| `TODO(task-13)` | 1 | `ShowShares` in `internal/client/keygen.go`; Auftrag 20b Punkt 2 |
 
 Außerhalb von Go: `scripts/two-host-test.sh` trägt noch `TODO(task-15b)` (Pin und Zeuge einer echten Zeremonie); der Produktionsweg steht im Kommentar darunter und in RUNBOOK 1.
 
