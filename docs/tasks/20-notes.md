@@ -299,3 +299,9 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - `lockClientDir` (`internal/client/client.go`): Kommentar behauptet zu viel; der Vergleich der Pfad-Datei vor und nach `store.LockFile` hat eine theoretische Lücke bei Wiederverwendung der Inode-Nummer (ext4 vergibt sie sofort neu), wenn drei weitere Prozesse desselben Benutzers in ein Fenster von etwa 6 Systemaufrufen fallen. Abhilfe: Kommentar berichtigen und Restfall als bekannte Grenze (AUDIT R33/F2) nennen; später `store`-Variante, die den gesperrten Deskriptor prüft.
 - `TestDeviceChangeThenDeviceLost` könnte den Übernahme-Hinweis (`index.go:913`) positiv prüfen (optional).
 - Hinweis: `open()` ist Prüfen-dann-Handeln gegen ein gleichzeitiges `Close`; `Client` ist nicht als goroutinesicher dokumentiert (vorbestehend).
+
+## Aus der Angreiferprüfung von 20h (keine Funde über niedrig)
+- Marker-Aufräumen hält (Symlinks, harte Links, Marker als Verzeichnis/FIFO): kein Fund.
+- Niedrig: `ErrExists`-Abbildung für ein verschwundenes Temp-Verzeichnis gilt für jedes ENOENT; wer nur das Elternverzeichnis beschreiben kann und das Temp-Verzeichnis verschiebt, erzeugt die irreführende Meldung „in use by another client“. Abhilfe optional: nur abbilden, wenn Sperre/Umbenennen ein belegtes Ziel sah.
+- Niedrig: `Close` gegen gleichzeitige Methodenaufrufe aus anderen Goroutinen meldet Datenrennen (vorbestehend, auch Methode gegen Methode). → HANDOFF/Paketkommentar: `Client` ist nicht goroutinesicher, `Close` eingeschlossen.
+- Angriffstests: Scratchpad `verify20h-attack/internal/client/attack20h_test.go`.

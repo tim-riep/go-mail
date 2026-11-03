@@ -220,3 +220,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - **20e zusammengeführt** (Volllauf auf b2032d5: 67 Schritte grün; `TestPTYPromptBlocked` scheiterte einmal unter race an seiner 4,5-s-Grenze, Code unverändert seit 20b, Wiederholung grün; notiert für 20). D86 und D91 Nachtrag 20e, AUDIT R33/R41.
 - Fuzzing `translog` auf d85da00 (nach 20e) wiederholt: 5 Ziele je 10 Minuten ohne Fund. 20h läuft.
 - 20h fertig (b14d798): Gerätewechsel-Test (F-1, Z3 ohne Volltext), `ErrClosed` statt Panik in 14 Methoden, Aufräumen nur mit Marker, Sperrdatei-Prüfung, `ErrExists` bei verlorenem Temp-Verzeichnis, genauere testenv-Prüfungen. Läufe des Implementierers grün. Spezifikations- und Angreiferprüfung laufen.
+- 20h: Spezifikations- und Angreiferprüfung ohne Funde über niedrig (Niedrige in `docs/tasks/20-notes.md` für 20). Volllauf folgt.
