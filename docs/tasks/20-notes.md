@@ -364,3 +364,15 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus der Nachprüfung (Angriff) von 21c (keine Funde über niedrig)
 - R-low: `publish` heilt `data/platform/` nicht, wenn nach geloggter Neuausstellung ein Dieb die Datei überschreibt (Name mit gültigem Eintrag wird nie ersetzt, auch wenn die Exportdatei genau dieser Eintrag ist); ebenso einzelne fremde `.pub`. Abhilfe: Name gilt als frei, wenn die Exportdatei gleich dem gültigen Eintrag ist; `.pub` ersetzen, wenn das Zertifikat der gültige Eintrag ist. Tests im Scratchpad `verify21c-attack/internal/ceremony/replace21c_attack_test.go`.
 - Nachprüfung (Spezifikation) von 21c, niedrig: die Prüfung „wäre nie gültig gewesen“ (`revoked_at_time ≤ valid_from`) in `checkRevocations` greift auch für Admin-Elemente, für die `revoked_at_time` keine Bedeutung hat; kann eine gewollte F3-Reparatur mit älterem Kopf verweigern (fail closed). Abhilfe: nur für Ingest, für Admin nur die Untergrenze 2025.
+
+### Fuzzing, vierter Teil (auf 56464da, nach 21a; `translog` und `store` geändert, 21b/21c ändern sie nicht)
+- 6 Ziele je 10 Minuten, zwei Bahnen: alle ohne Fund. Protokolle: Scratchpad `orch/fz4/`.
+
+| Paket | Ziel | Ausführungen in 10 min |
+|---|---|---|
+| `internal/store` | `FuzzDecodeRecords` | 9.146.068 |
+| `internal/translog` | `FuzzAuditIndex` | 3.137.084 |
+| `internal/translog` | `FuzzDecodeEntry` | 6.929.298 |
+| `internal/translog` | `FuzzOpenHead` | 6.936.251 |
+| `internal/translog` | `FuzzParseHeadText` | 7.142.506 |
+| `internal/translog` | `FuzzProofs` | 4.665.887 |
