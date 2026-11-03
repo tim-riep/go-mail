@@ -310,3 +310,9 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus der Prüfung von 20j (für den nächsten Code-Auftrag)
 - Code-Kommentar an `maxReadSegments` (`internal/client/index.go:104`) nennt `rec.MaxRecordSize` „4 MiB“; richtig ist 1 MiB (`rec.go:37`). Ein Segment kodiert knapp 1 MiB (`segmentBudget`).
 - Vorschlag nach M1: Befehl, der für Postfach und Epoche den Logeintrag findet und dessen `content` ausgibt (RUNBOOK 8.7 hat dafür kein Werkzeug).
+
+## Aus der Angreiferprüfung von 20i (nichts über niedrig im Diff; vorbestehend → 20l)
+- F1 (niedrig): Wer das Elternverzeichnis beschreiben kann und das fertige Temp-Verzeichnis auf das Ziel umbenennt, bekommt „in use by another client“ für den eigenen Inhalt; kein Verlust.
+- F2 (vorbestehend; mittel, falls ein anderer Benutzer mit Schreibrecht auf ein nicht-sticky Elternverzeichnis im Modell liegt): Tausch des Temp-Verzeichnisses gegen ein anderes vollständiges Client-Verzeichnis → `keygen`/`restore` überschreibt es oder löscht es im Fehlerpfad (`RemoveAll(tmp)`), oder meldet Erfolg mit fremdem Inhalt. Entscheidung des Orchestrators: beheben in 20l (Deskriptor, Identitätsprüfung vor Umbenennen und Entfernen) und in AUDIT nennen, dass das Elternverzeichnis eines Client-Verzeichnisses nicht für andere Benutzer beschreibbar sein soll.
+- F3 (niedrig, vorbestehend): ohne `O_NOCTTY` öffnen noch `keys.ReadKeystoreFile` (auch ohne `O_NONBLOCK`, R41) und die Sperrdateien in `store/lock_unix.go` (Rückfall nach `O_EXCL`, `probeLock`) → 20l.
+- Angriffstests: Scratchpad `verify20i-attack/internal/client/attack20i_test.go`.
