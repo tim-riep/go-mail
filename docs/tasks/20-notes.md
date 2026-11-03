@@ -344,3 +344,9 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus 20o und seiner Prüfung (für die Doku-Abstimmung nach Auftrag 21)
 - Doku: AUDIT R33 und DECISIONS (um Z. 560) nennen noch `writeClientDir`, jetzt `writeClientDirOutside`; RUNBOOK 8.6 braucht die Meldungen von `errIncompleteDir`, `errNotDurable` und die ErrLocked-Form von „not empty or in use by another client“; R33: ein Rest mit fremdem Eintrag bleibt jetzt ganz; Prüfung „nicht im Datenverzeichnis“ jetzt auch über Symlinks (D86-Nachtrag 20o).
 - Prüfung (niedrig): `resolveExisting` hält an einem hängenden Symlink an; Meldung dann `mkdir …: file exists` statt `ErrInsideDataDir` (sicher, nichts angelegt).
+
+## Aus der Nachprüfung (Angriff) von 21a (keine Funde über niedrig)
+- doc.go („Platform generations“, um Z. 835/847) sagt noch `revoked_at_time` = Zeit des bestätigten Kopfes und dass dieser Kopf verschoben wird; Entscheidung ist T + 1 ms → angleichen.
+- 21c muss `valid_from` der neu ausgestellten Ingest-Generation = `revoked_at_time` erzwingen und das Zertifikat loggen, bevor der Server den neuen Pin lädt; gilt auch beim nachträglichen Widerruf einer älteren Identitätsgeneration.
+- Client: nur `Verifier.RevokedCertAtTime` mit `identity_gen` des Zertifikats nutzen; `IsRevoked`/`RevokedAtTime` kennen die Kaskade ohne `LogKeys` nicht → Kommentarwarnung.
+- RUNBOOK: Zuordnungen, die eine kaskadenhaft widerrufene Admin-Generation zwischen N und dem Pinwechsel geloggt hat, neu vornehmen; F2/F3 als Betriebsregeln.
