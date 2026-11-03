@@ -213,7 +213,8 @@ var errDirNotEmpty = errors.New("client: client directory not empty")
 // errInUse is the error of a keygen or restore that lost the client
 // directory dir to another client: the rename found it not empty, or a
 // concurrent run of the same kind removed the temporary directory of
-// this one (removeLeftovers, task 20h point 6).
+// this one (removeLeftovers, task 20h point 6) and dir is taken (task
+// 20i point 2).
 func errInUse(dir string) error {
 	return fmt.Errorf("%w: the client directory %s is not empty or in use by another client", store.ErrExists, dir)
 }
@@ -250,7 +251,12 @@ const incompleteMarker = ".incomplete"
 // task 20b): the rename is tried once more, and a directory that is still
 // not empty is refused as "not empty or in use by another client"
 // (errInUse), as is a run whose temporary directory a concurrent run of
-// the same kind removed (task 20h point 6). A symbolic link as dir is
+// the same kind removed (task 20h point 6), if a rename of this run
+// found dir not empty or dir is taken once the temporary directory is
+// found missing (dirTaken, task 20i point 2); otherwise a missing
+// temporary directory fails the run with the error of its step, which
+// errors.Is matches with fs.ErrNotExist (someone moved or removed it,
+// but dir is not taken). A symbolic link as dir is
 // followed, as before: the directory it names is created or replaced. A
 // mount point as dir cannot be replaced: the rename fails with EBUSY or
 // EXDEV and the run with it.
@@ -269,18 +275,27 @@ func createClientDir(dir, kind string, write func(tmp string) error) (err error)
 	if err != nil {
 		return err
 	}
-	renamed := false
+	// renamed is set once tmp is dir; notEmpty once a rename found dir
+	// not empty.
+	renamed, notEmpty := false, false
 	defer func() {
 		// A simulated crash leaves everything as a killed process would;
 		// after the rename tmp is the client directory.
 		if err == nil || errors.Is(err, errCrashed) || renamed {
 			return
 		}
-		// A temporary directory that is gone was removed by a run of the
-		// same kind that succeeded meanwhile (removeLeftovers): dir is
-		// taken, whatever step failed on the missing directory.
+		// A temporary directory that is gone may have been removed by a
+		// run of the same kind that succeeded meanwhile (removeLeftovers):
+		// whatever step failed on the missing directory, dir is reported
+		// as taken (errInUse) only if the rename found it not empty or
+		// the look of lockOnlyDir at it finds it taken now (task 20i
+		// point 2). Otherwise the error of the step stays, which
+		// errors.Is matches with fs.ErrNotExist: the temporary directory
+		// was moved or removed by someone else and dir is not taken.
 		if _, lerr := os.Lstat(tmp); errors.Is(lerr, os.ErrNotExist) {
-			err = errInUse(dir)
+			if notEmpty || dirTaken(dir) {
+				err = errInUse(dir)
+			}
 			return
 		}
 		os.RemoveAll(tmp)
@@ -306,6 +321,7 @@ func createClientDir(dir, kind string, write func(tmp string) error) (err error)
 	}
 	err = replaceDir(tmp, dir, kind)
 	if errors.Is(err, errDirNotEmpty) {
+		notEmpty = true
 		err = replaceDir(tmp, dir, kind)
 	}
 	if errors.Is(err, errDirNotEmpty) {
@@ -380,17 +396,9 @@ func replaceDir(tmp, dir, kind string) error {
 // which allows removing it anyway.
 func lockOnlyDir(dir string) (release func(), err error) {
 	release = func() {}
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
-		return release, nil
-	}
-	d, err := store.OpenDir(dir)
-	if err != nil {
+	ents, ok, err := lookAtDir(dir)
+	if err != nil || !ok || !onlyLock(ents) {
 		return release, err
-	}
-	ents, _ := d.ReadDir(2)
-	d.Close()
-	if len(ents) != 1 || ents[0].Name() != "lock" || !ents[0].Type().IsRegular() {
-		return release, nil
 	}
 	lock := filepath.Join(dir, "lock")
 	unlock, err := lockClientDir(lock)
@@ -402,6 +410,37 @@ func lockOnlyDir(dir string) (release func(), err error) {
 		return release, err
 	}
 	return unlock, nil
+}
+
+// lookAtDir reads up to two entries of dir for lockOnlyDir and
+// dirTaken; ok is false, and err nil, if dir is missing or not a
+// directory (os.Lstat).
+func lookAtDir(dir string) (ents []os.DirEntry, ok bool, err error) {
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return nil, false, nil
+	}
+	d, err := store.OpenDir(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	ents, _ = d.ReadDir(2)
+	d.Close()
+	return ents, true, nil
+}
+
+// onlyLock reports whether ents is the regular file lock alone.
+func onlyLock(ents []os.DirEntry) bool {
+	return len(ents) == 1 && ents[0].Name() == "lock" && ents[0].Type().IsRegular()
+}
+
+// dirTaken reports whether dir is a directory that the rename of
+// createClientDir would refuse as not empty, as lockOnlyDir sees it: one
+// with an entry other than the regular file lock alone. A directory that
+// cannot be read counts as not taken (createClientDir then keeps the
+// error of its own step).
+func dirTaken(dir string) bool {
+	ents, ok, err := lookAtDir(dir)
+	return err == nil && ok && len(ents) > 0 && !onlyLock(ents)
 }
 
 // leftoverBatch is the number of names read from a directory at a time
@@ -423,7 +462,7 @@ const leftoverBatch = 256
 // no marker and stays whole. A run of the same kind that is still under
 // way and loses its temporary directory this way fails with
 // store.ErrExists, "not empty or in use by another client" (errInUse;
-// its client directory is taken by now in any case). Errors are ignored:
+// its client directory is taken by now, unless it was removed again). Errors are ignored:
 // this run has succeeded, and what is left is removed by a later one.
 func removeLeftovers(parent, prefix string, start time.Time) {
 	d, err := store.OpenDir(parent)

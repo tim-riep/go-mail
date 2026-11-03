@@ -27,6 +27,17 @@
 // file in place checks, writes version n+2 with any flag change: a higher
 // version is accepted (TestAttack09bMetaChangedNoRecovery). This is the
 // way out; a client never accepts the other version n+1.
+//
+// Concurrency. A Client is not safe for concurrent use by several
+// goroutines, Close included (task 20i point 3): its methods read and
+// change its state, its key stores and its caches without a common lock,
+// and Close wipes the keys while another method may still use them. The
+// caller runs one method at a time per Client, Close after the last one
+// has returned; the check for a closed client at the start of every
+// method (ErrClosed) does not make a concurrent Close safe. Several
+// processes or machines on the same data directory are coordinated by
+// the locks of the client directory and of each mailbox, not by this
+// package.
 package client
 
 import (
@@ -368,7 +379,10 @@ func saveState(path string, s *state) error {
 	return store.WritePrivateFileAtomic(path, data)
 }
 
-// Client is an unlocked client.
+// Client is an unlocked client. It is not safe for concurrent use: one
+// method at a time, Close included (see the package comment, task 20i
+// point 3). Its mutex guards only the closed mark and the caches of
+// epoch keys and ingest keys, not a method as a whole.
 type Client struct {
 	cfg   Config
 	st    *store.Store
@@ -694,26 +708,51 @@ const lockAttempts = 8
 var dirLockHook func(attempt int)
 
 // lockClientDir takes the lock of the client directory (store.LockFile
-// on path, the lock file in it) and makes sure that the file locked is
-// the one path names once the lock is held (task 20h point 5, F2 of the
-// attack review of task 20e). A concurrent keygen or restore removes the
-// lock file of a directory that holds nothing else, under its lock, and
-// replaces the directory (lockOnlyDir); a run that opened that file
-// before and gets the lock after it was released would hold a lock on a
-// file no other run sees, and a third run would make a new lock file and
-// lock it as well. store.LockFile does not hand out its descriptor, so
-// the file is compared through the path: path must name the same file
-// right before store.LockFile and right after it. A lock file is removed
-// only under its lock, so the file locked stays at path while this run
-// holds it; a file removed between the open and the lock is still open
-// here, so its inode number is not used again, and whatever path names
-// afterwards differs from it and from what path named before the open.
-// If path is missing before or after, or names another file, the lock is
-// released and taken again, at most lockAttempts times (the first lock
-// of a new directory creates the file and takes two); then
-// store.ErrLocked. A symbolic link is followed, as by the open of the
-// lock file. Open, openForDeviceLost, Register and lockOnlyDir take the
-// lock of a client directory this way.
+// on path, the lock file in it) and checks, as far as it can without the
+// descriptor, that the file locked is the one path names once the lock
+// is held (task 20h point 5, F2 of the attack review of task 20e). A
+// concurrent keygen or restore removes the lock file of a directory that
+// holds nothing else, under its lock, and replaces the directory
+// (lockOnlyDir); a run that opened that file before and gets the lock
+// after it was released would hold a lock on a file no other run sees,
+// and a third run would make a new lock file and lock it as well.
+//
+// store.LockFile does not hand out its descriptor, so the file locked is
+// not compared itself: path is looked up with os.Stat right before
+// store.LockFile and right after it, and the lock is kept only if both
+// lookups succeed and name the same file (os.SameFile: device and inode
+// number). What this rules out: the file locked, F, is open from the
+// open inside store.LockFile until the unlock, so no other file gets its
+// inode number meanwhile. If F is still at path after the lock, the
+// second lookup names F. If F was removed (or replaced) before the lock
+// was granted, the second lookup names another file B or nothing; this
+// run then keeps the lock only if the first lookup named a file with
+// the same device and inode number as B. A lock file is removed only
+// under its lock, so while this run holds a lock on the file path
+// names, that file stays at path.
+//
+// Known limit (task 20i point 1; AUDIT R33, F2 of the attack review of
+// task 20e): the first lookup reads only an inode number, it holds no
+// file open. If the file it named, A, is removed and closed by everyone
+// after the first lookup, its inode number may be given again at once
+// (ext4 does so) to a file created later. The comparison is then fooled
+// if, between the two lookups (some six system calls apart), A is
+// removed, F is opened (or created) here, then locked and removed by
+// another run, and a new lock file B created at path gets the inode
+// number of A: this run holds a lock on F, which no other run sees, and
+// keeps it. That takes three further runs of the same user on the same
+// client directory (keygen or restore, which remove a lock file, and
+// Open, which creates one) falling into that window; the consequence is
+// what the lock exists to prevent, two processes working on the client
+// directory at once. A check of the locked descriptor itself would close
+// the gap (a store function that returns it; not built).
+//
+// If a lookup fails or the two differ, the lock is released and taken
+// again, at most lockAttempts times (the first lock of a new directory
+// creates the file and takes two); then store.ErrLocked. A symbolic link
+// is followed, as by the open of the lock file. Open, openForDeviceLost,
+// Register and lockOnlyDir take the lock of a client directory this
+// way.
 func lockClientDir(path string) (func(), error) {
 	for attempt := 1; attempt <= lockAttempts; attempt++ {
 		before, berr := os.Stat(path)

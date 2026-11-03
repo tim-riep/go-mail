@@ -529,8 +529,12 @@ func (e *Env) Mailbox(u *User, name string, addrs ...string) store.ID {
 // reason is written into epoch.rec as given and changes nothing else, so
 // the member list is always u alone, whatever the reason says about the
 // members. The reason regular is planned and discards nothing (2.4 rule
-// 2): if discards would not be empty, the epoch record is refused and the
-// test fails; otherwise the result is a planned epoch beginning at begin.
+// 2): discards are computed for an immediate reason only, so with
+// regular the result is a planned epoch beginning at begin with an empty
+// discard list, whatever begin and the chain are (an epoch with regular
+// and discards cannot come out of it). Whether the chain rules accept
+// such an epoch is left to the reader under test; as in ForgeEpoch, one
+// the log refuses stays a file without a log entry.
 // Clients do not create epochs with immediate effect yet;
 // tests use it to check how client and server treat them.
 func (e *Env) ImmediateEpoch(u *User, mbx store.ID, begin time.Time, reason store.Reason, name string) *store.Epoch {

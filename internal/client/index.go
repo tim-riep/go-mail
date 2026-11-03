@@ -58,13 +58,15 @@ import (
 //     writer and on every member that reads it; 224,000 rounds, 777
 //     days, per epoch attacked.
 //   - Forced merges: an attacker keeps every segment that ever appears
-//     and shows each device the latest merge results of the others (and
-//     no result of its own). A device merges again when that saves
-//     MergeThreshold-1 segments (mergeSegments), and each merge is a new
-//     content for every other device. With results of one segment that
-//     takes 17 devices that index the mailbox: 1 and 9 devices merge in
-//     the first round only (+0 afterwards); 17 devices +4,471 bytes per
-//     round on each device (263 per device), 15,000 rounds, 52 days.
+//     and shows each device the latest merge results of the others and
+//     its own latest result less one segment (none with results of one
+//     segment; TestAttack09fForcedMergesDevices). A device merges again
+//     by the rule of mergeSegments (see the formula below), and each
+//     merge is a new content for every other device. With results of
+//     one segment that takes 17 devices that index the mailbox in this
+//     measurement: 1, 9 and 16 devices merge in the first round only
+//     (+0 afterwards); 17 devices +4,471 bytes per round on each device
+//     (263 per device), 15,000 rounds, 52 days.
 //     With results of two segments (more than store.MaxPostingIDs mails
 //     of one term in the epoch, such as month:): 9 devices +4,842 bytes
 //     per round (48 days), 17 devices +9,050 bytes (26 days). The growth
@@ -77,14 +79,25 @@ import (
 //
 // The rate as a formula (DECISIONS D91, "Bekannte Grenze"): per Sync and
 // attacked epoch about 270 bytes times D times k, where D is the number
-// of devices that merge and k the number of segments of a merge result
-// (k is about the mails of the epoch divided by store.MaxPostingIDs),
-// once (D - 1) * k >= 16, that is once the results of the other devices
-// save MergeThreshold-1 segments; below that +0. With one device only
-// the pending files put back after their segment was removed make it
-// grow: about 300 bytes times k per round and epoch. Several attacked
-// epochs add up. The attacker needs write access to the data directory,
-// and the effect is visible (Open refuses a state.json above 64 MiB).
+// of devices that merge and k the number of segments of a merge result.
+// k follows from the limits of a segment (store.MaxPostingIDs mail IDs
+// per mark, store.MaxPostings marks and segmentBudget bytes per
+// segment), not from the mails alone: an epoch of 4146 mails gave k = 3
+// (task 20j). Merges go on in every round as long as mergeSegments
+// merges: counted >= MergeThreshold and counted - len(result) >=
+// MergeThreshold-1, where counted is the number of segments of the run
+// that count and len(result) = k. With the latest results of the other
+// D-1 devices and j segments of its own latest result shown (0 <= j <=
+// k), counted = (D-1)*k + j. In the worst case the attacker shows the
+// own result whole (j = k): merges from (D - 1) * k >= 15 on; with k = 1
+// already 16 devices merge in every round (+4,208 bytes per round,
+// measured in task 20j). With j = k-1, as in the measurement above,
+// from (D - 1) * k >= 16 on (task 20i point 7). Below that +0. With one
+// device only the pending files put back after their segment was
+// removed make it grow: about 300 bytes times k per round and epoch.
+// Several attacked epochs add up. The attacker needs write access to the
+// data directory, and the effect is visible (Open refuses a state.json
+// above 64 MiB).
 
 // MergeThreshold is the number of segments of one epoch from which a
 // client merges them (6.2, K5 point 4).

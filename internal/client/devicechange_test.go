@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -120,7 +121,9 @@ func TestDeviceChangeTakesOverSegments(t *testing.T) {
 // directory right after the restore issues the segment of the old device
 // again, signed by generation 2; Search still finds all three mails, and
 // no warning names a revoked generation (device lost itself only notes
-// what it took over and signed again).
+// what it took over and signed again: the note of index.go for the
+// segment of the old device is checked by its full text, task 20i
+// point 5).
 func TestDeviceChangeThenDeviceLost(t *testing.T) {
 	f := newFixture(t)
 	dir, n, refs := devicechange(t, f)
@@ -129,12 +132,17 @@ func TestDeviceChangeThenDeviceLost(t *testing.T) {
 	if err != nil || gen != 2 {
 		t.Fatalf("device lost: generation %d, %v (%q)", gen, err, f.env.Warnings.Take())
 	}
-	// The run itself notes what it took over and signed again; none of
-	// it is a warning.
-	for _, w := range f.env.Warnings.Take() {
+	// The run itself notes what it took over and signed again, the
+	// segment of the old device among it; none of it is a warning.
+	note := fmt.Sprintf("Hinweis: Indexsegment %s-%d der Epoche %d von %s war von einer widerrufenen Generation signiert; es wurde übernommen und neu signiert.", refs[0].Device, refs[0].Seq, n, f.mbx)
+	ws := f.env.Warnings.Take()
+	for _, w := range ws {
 		if strings.Contains(w, "widerrufenen") && !strings.HasPrefix(w, "Hinweis: ") {
 			t.Fatalf("warning of device lost: %s", w)
 		}
+	}
+	if !slices.Contains(ws, note) {
+		t.Fatalf("no note of the segment taken over, want %q in %q", note, ws)
 	}
 	after, err := f.env.Store.ListIndexSegments(f.mbx, n)
 	if err != nil || len(after) != 1 || after[0] == refs[0] {

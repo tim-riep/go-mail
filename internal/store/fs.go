@@ -44,10 +44,13 @@ func OpenDir(dir string) (*os.File, error) { return openDir(dir) }
 // (task 20a point 2, task 20b point 5). A FIFO, or a device, put in
 // place of a file is refused as not regular (ErrNotRegular), and the
 // open, which waits for a writer on a FIFO without O_NONBLOCK, returns
-// at once. On a regular file O_NONBLOCK changes nothing. A missing file
+// at once. On Unix the open also has O_NOCTTY (task 20i point 4), so a
+// terminal device in place of a file does not become the controlling
+// terminal of a process that has none before it is refused. On a
+// regular file O_NONBLOCK and O_NOCTTY change nothing. A missing file
 // is ErrNotFound.
 func OpenRegular(path string) (*os.File, fs.FileInfo, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|openNoCTTY, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(path))
@@ -266,7 +269,8 @@ func RemoveDurable(path string) error {
 // device, put in place of a file of the data directory (or given as a
 // pin or key file) is refused as not regular (ErrNotRegular), and the
 // open returns at once; no reader (server, client, ceremony) hangs at
-// it.
+// it. A terminal device does not become the controlling terminal
+// (O_NOCTTY of OpenRegular, task 20i point 4).
 func ReadFileLimited(path string, max int64) ([]byte, error) {
 	f, fi, err := OpenRegular(path)
 	if err != nil {

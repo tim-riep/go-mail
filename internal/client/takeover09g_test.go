@@ -505,13 +505,23 @@ func TestHeldCopiesRemoved(t *testing.T) {
 // access to the data directory and no key keeps every segment that ever
 // appears and, before device d of D runs Index, leaves in index/<n>/
 // every content that d has not merged, but one segment of d's latest
-// result. Each device is a client directory of alice of its own. A
-// device merges the latest results of the other devices once they save
-// MergeThreshold-1 segments: (D-1)*k - k >= MergeThreshold-1 for results
-// of k segments. Then every round makes every device merge again, and
+// result. Each device is a client directory of alice of its own.
+//
+// The rule of the code (mergeSegments, task 20i point 7): a merge takes
+// place if counted >= MergeThreshold and counted - len(result) >=
+// MergeThreshold-1, where counted is the number of segments of the run
+// that count. With results of k segments, device d is shown the latest
+// results of the other D-1 devices and its own latest result less the
+// one segment withheld: counted = (D-1)*k + (k-1), and len(result) = k.
+// Both conditions then hold once (D-1)*k >= MergeThreshold (16) (with
+// k = 1: 17 devices merge in every round, 16 only in the first). This is
+// not the worst case: an attacker who shows d its own latest result
+// whole (counted = D*k) forces merges from (D-1)*k >= 15 on, with k = 1
+// from 16 devices (the comment at the top of index.go, measured in task
+// 20j). Above the bound every round makes every device merge again, and
 // state.json of every device grows by the records of the (D-1)*k new
 // contents it reads and the k it writes, about D*k*300 bytes per round;
-// below that the merges stop after the first round.
+// below it the merges stop after the first round.
 //
 // The test measures the growth per round of device 0 and the days until
 // 64 MiB at one Sync every five minutes, and checks it: at most
