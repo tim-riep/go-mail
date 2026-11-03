@@ -852,10 +852,15 @@ var errOwnFileGone = errors.New("client: an own file checked before the revocati
 // issued again there, and one that stays gone leaves nothing signed by
 // the revoked generation, which clears the mark (after one Sync). An own
 // segment that was hidden for the whole run, step 2 included, is not
-// found: its record cannot tell it from a segment another client merged
-// and removed, which is normal. It is taken over and signed again by the
-// next Search of this client once it is back (its record is from before
-// the revocation); a known limit, availability only.
+// found here: its record cannot tell it from a segment another client
+// merged and removed, which is normal. Once it is back, the next Search
+// of this client takes it over and signs it again, through its record
+// from before the revocation: a segment this client directory wrote has
+// that record from the write on (writeSegmentList, noteWritten, task
+// 20e), whether this client read it or not; a segment of another client
+// directory of this user has it only if this client read it before the
+// revocation. A known limit, availability only: the hits are back with
+// the next Search.
 func (c *Client) missingOwnFiles(ch *chain, where map[store.ID]store.ID, present map[string]bool, reported map[store.ID]bool) error {
 	mbx := ch.mailbox.ID
 	ms := c.mailboxState(mbx)

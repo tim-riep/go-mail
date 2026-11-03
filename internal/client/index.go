@@ -34,7 +34,14 @@ import (
 // Growth of state.json (task 09g, Q22 variant A). A reader keeps one
 // check record per segment content it accepts (segmentMemo, about 300
 // bytes), never removes one (D84 (2)) and only changes one in place
-// (supersede, noteResult). Nobody without a key makes a client write a
+// (supersede, noteResult). A writer makes the record of each segment it
+// writes when it writes it (noteWritten, task 20e), the one its first
+// read would make: about 300 bytes per segment written, also for a
+// segment it never reads, which the rates below already count (the
+// segments a device writes). Measured: an Index run that writes one
+// segment adds 300 bytes at the write and none at the Search after it
+// (before task 20e: none and 300 bytes); the measurements below are the
+// same. Nobody without a key makes a client write a
 // record for a copy of a content (one record per content), for a pending
 // file put back while a segment holds its postings, or for a content
 // this client merged or issued again before (spent, or used without
@@ -442,6 +449,19 @@ func (c *Client) writeSegments(ch *chain, e *store.Epoch, dev store.ID, p postin
 
 // writeSegmentList writes segs (postings.segments) as new segments of
 // epoch e with fresh sequence numbers of device dev (writeSegments).
+//
+// Each segment written gets its check record right away, before the
+// state is saved (noteWritten, task 20e, P-2 of task 20c): the record
+// that the first check of the segment by this client would make. So an
+// own segment that this client never read, and that is hidden during
+// step 2 of a DeviceLost run, is still taken over once it is back (its
+// record is from before the revocation), and its hits are not lost. A
+// record that is there is kept as it is; no record is removed (D84 (2),
+// D91 (6)). The growth is one record per segment written (about 300
+// bytes), the one that the first read would make anyway; it only adds to
+// state.json for a segment this client does not read before it is gone
+// (merged by another device, or removed), see the comment at the top of
+// this file.
 func (c *Client) writeSegmentList(ch *chain, e *store.Epoch, dev store.ID, segs []*store.IndexSegment) ([]segmentFile, error) {
 	if len(segs) == 0 {
 		return nil, nil
@@ -488,7 +508,9 @@ func (c *Client) writeSegmentList(ch *chain, e *store.Epoch, dev store.ID, segs 
 		if err != nil {
 			return written, err
 		}
-		written = append(written, segmentFile{store.IndexSegmentRef{Device: dev, Seq: seq}, sha256.Sum256(data)})
+		w := segmentFile{store.IndexSegmentRef{Device: dev, Seq: seq}, sha256.Sum256(data)}
+		written = append(written, w)
+		c.noteWritten(mbx, e.Number, dev, w.sum)
 		seq++
 		ms.IndexSeq[key] = seq
 	}
@@ -1135,19 +1157,32 @@ func (c *Client) noteResult(mbx store.ID, n uint32, dev store.ID, written []segm
 	if len(written) < 2 || c.ks == nil {
 		return id
 	}
+	for _, w := range written {
+		c.noteWritten(mbx, n, dev, w.sum).Part = id
+	}
+	c.dirty = true
+	return id
+}
+
+// noteWritten returns the check record of the content sum of device dev
+// in epoch n of mailbox mbx, a segment this client just wrote, and makes
+// it if there is none (writeSegmentList, noteResult): the record that the
+// first check of the segment would make, since this client sealed it with
+// the current generation of its key store, with the tree size of the
+// reference head (recordChecked). A record that is there is returned as
+// it is. The caller holds a key store (it sealed the segment) and saves
+// the state.
+func (c *Client) noteWritten(mbx store.ID, n uint32, dev store.ID, sum [32]byte) *checkMemo {
 	ms := c.mailboxState(mbx)
 	if ms.Checked == nil {
 		ms.Checked = map[string]*checkMemo{}
 	}
-	for _, w := range written {
-		key := segmentMemoSum(n, dev, w.sum)
-		m := ms.Checked[key]
-		if m == nil {
-			m = &checkMemo{Hash: hex.EncodeToString(w.sum[:]), Signer: c.me.String(), Gen: c.ks.Generation, Tree: c.treeSize()}
-			ms.Checked[key] = m
-		}
-		m.Part = id
+	key := segmentMemoSum(n, dev, sum)
+	m := ms.Checked[key]
+	if m == nil {
+		m = &checkMemo{Hash: hex.EncodeToString(sum[:]), Signer: c.me.String(), Gen: c.ks.Generation, Tree: c.treeSize()}
+		ms.Checked[key] = m
+		c.dirty = true
 	}
-	c.dirty = true
-	return id
+	return m
 }

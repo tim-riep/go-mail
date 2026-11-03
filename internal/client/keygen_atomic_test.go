@@ -14,8 +14,9 @@ import (
 // Tests of task 20b point 1: keygen creates the client directory in one
 // step (temporary directory, fsync, rename, fsync of the parent).
 
-// keygenSteps are the write steps of Keygen in their order (keygenStep).
-var keygenSteps = []string{"dir", "user", "keystore", "state", "renamed"}
+// keygenSteps are the write steps of Keygen and Restore in their order
+// (dirStep).
+var keygenSteps = []string{"dir", "user", "keystore", "state", "locked", "renamed"}
 
 // clientFiles are the files of a complete client directory after keygen.
 var clientFiles = []string{"keystore", "user.rec", "state.json"}
@@ -52,11 +53,12 @@ func keygenTemps(t *testing.T, dir string) []string {
 }
 
 // TestKeygenAtomic: keygen interrupted after every write step, by a
-// failed write (keygenFault, cleaned up) or by a kill (crash hook, no
+// failed write (clientDirFault, cleaned up) or by a kill (crash hook, no
 // cleanup), leaves either no client directory or a complete one. After
 // a failed write nothing is left, not even the temporary directory; a
 // kill before the rename leaves at most the temporary directory, which
-// no client reads. A second keygen then succeeds, or, after the rename,
+// no client reads and the next successful keygen removes (task 20e
+// point 3). A second keygen then succeeds, or, after the rename,
 // refuses the complete directory (ErrRegistered), which registers and
 // opens.
 func TestKeygenAtomic(t *testing.T) {
@@ -74,8 +76,8 @@ func TestKeygenAtomic(t *testing.T) {
 				if kill {
 					client.SetCrashHook(t, func(p string) bool { return p == "keygen-"+step })
 				} else {
-					client.SetKeygenFault(t, func(s string) error {
-						if s == step {
+					client.SetClientDirFault(t, func(s string) error {
+						if s == "keygen-"+step {
 							return fault
 						}
 						return nil
@@ -83,7 +85,7 @@ func TestKeygenAtomic(t *testing.T) {
 				}
 				_, err := client.Keygen(cfg, testenv.Passphrase, &testenv.Echo{})
 				client.SetCrashHook(t, nil)
-				client.SetKeygenFault(t, nil)
+				client.SetClientDirFault(t, nil)
 				want := fault
 				if kill {
 					want = client.ErrCrashed
@@ -97,8 +99,17 @@ func TestKeygenAtomic(t *testing.T) {
 				if kill && !complete {
 					wantTemps = 1
 				}
-				if temps := keygenTemps(t, dir); len(temps) != wantTemps {
+				temps := keygenTemps(t, dir)
+				if len(temps) != wantTemps {
 					t.Fatalf("temporary directories after %s: %v", name, temps)
+				}
+				// The leftover of the killed run is older than the next
+				// run (task 20e point 3), also on a file system with
+				// coarse times.
+				for _, p := range temps {
+					if err := os.Chtimes(p, past, past); err != nil {
+						t.Fatal(err)
+					}
 				}
 				id, err := client.Keygen(cfg, testenv.Passphrase, &testenv.Echo{})
 				if complete {
@@ -109,6 +120,9 @@ func TestKeygenAtomic(t *testing.T) {
 					t.Fatalf("second keygen after %s: %v", name, err)
 				}
 				checkClientDir(t, dir, true)
+				if temps := keygenTemps(t, dir); len(temps) != 0 {
+					t.Fatalf("temporary directories after the second keygen: %v", temps)
+				}
 				code, err := env.Store.CreateInvite(0)
 				if err != nil {
 					t.Fatal(err)

@@ -273,3 +273,6 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - F3 (Hinweis): Verlierer zweier gleichzeitiger `keygen` meldet `ENOENT` statt `ErrExists`.
 - Angriffstests: Scratchpad `verify20e-attack/internal/client/attack20e_test.go`.
 - Nach Merge 20b: RUNBOOK braucht die Abhilfe am Kopf („Datei durch den geprüften Logeintrag ersetzen“) und die Regeln zu `keygen`/`restore` (leeres oder nur-`lock`-Verzeichnis, Temp-Präfixe, Aufräumen) → Auftrag 20.
+
+## Flake aus dem Volllauf 20e
+- `cmd/gomail-ceremony` `TestPTYPromptBlocked` (race, ohne Tags): „no exit within 4.5s of share 1, prompt not shown“ (Fall vermutlich `ABA`/`ABC` mit voll/angehaltenem stderr). Code der Zeremonie seit 20b unverändert, dort grün; Wiederholung einmal grün (401,8 s). Protokoll: Scratchpad `orch/fr-20e/flake1/`. → 20: `stuckLimit` unter race prüfen (Zeitgrenze des Tests oder echte Verzögerung des Abbruchpfads unter Last); bei erneutem Auftreten als Fund behandeln.

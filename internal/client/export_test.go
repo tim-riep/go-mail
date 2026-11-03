@@ -65,9 +65,9 @@ func (c *Client) CommitHeadAt(mbx store.ID, n uint32) error {
 	return c.commitHead(ch, ch.epochs[n-1], ch.data[n-1])
 }
 
-// SetKeygenFault sets the fault hook of Keygen (see keygenFault) until
-// the test ends.
-func SetKeygenFault(t interface{ Cleanup(func()) }, f func(step string) error) {
-	keygenFault = f
-	t.Cleanup(func() { keygenFault = nil })
+// SetClientDirFault sets the fault hook of Keygen and Restore (see
+// clientDirFault) until the test ends.
+func SetClientDirFault(t interface{ Cleanup(func()) }, f func(step string) error) {
+	clientDirFault = f
+	t.Cleanup(func() { clientDirFault = nil })
 }

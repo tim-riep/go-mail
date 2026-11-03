@@ -186,6 +186,15 @@ const listIndexChunk = 256
 // it, which of them are returned follows the order of the directory. The
 // directory is opened with OpenDir: a FIFO in its place is an error at
 // once.
+//
+// Above the limit the result is a subset in the order of the directory,
+// not the lowest names (task 20e point 6). A caller that takes the next
+// sequence number of its device from the list (client writeSegmentList)
+// may miss its highest one: the write of a name that exists then fails
+// with ErrExists, and the caller tries the next number up to its bound of
+// attempts and then fails; nothing is overwritten (fail closed). Names
+// that are not segments do not count for the limit; they cost only the
+// time to read them.
 func (s *Store) ListIndexSegments(id ID, n uint32) ([]IndexSegmentRef, error) {
 	d, err := OpenDir(s.IndexDir(id, n))
 	if err != nil {

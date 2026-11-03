@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/shamir"
@@ -55,7 +54,11 @@ type RestoreOptions struct {
 // Nothing is written unless the seed matches: wrong shares, a share of
 // another split or words of another seed leave cfg.Dir as it was. A
 // client directory that already holds a key store, user.rec or state.json
-// is ErrRegistered.
+// is ErrRegistered. The client directory is created in one step, like
+// the one of Keygen (createClientDir, task 20e point 2): an interrupted
+// Restore leaves no client directory or a complete one, and cfg.Dir may
+// exist only as an empty directory or one that holds only the lock file
+// of Open (store.ErrExists otherwise).
 func Restore(cfg Config, opts RestoreOptions, passphrase []byte) (store.ID, error) {
 	if err := cfg.check(); err != nil {
 		return store.ID{}, err
@@ -131,28 +134,12 @@ func Restore(cfg Config, opts RestoreOptions, passphrase []byte) (store.ID, erro
 	if err != nil {
 		return store.ID{}, err
 	}
-	// Everything checked: now the client directory.
-	if err := mkdirClient(cfg.Dir); err != nil {
-		return store.ID{}, err
-	}
-	unlock, err := store.LockFile(filepath.Join(cfg.Dir, "lock"))
-	if err != nil {
-		return store.ID{}, err
-	}
-	defer unlock()
-	if err := emptyClientDir(cfg); err != nil {
-		return store.ID{}, err
-	}
 	for _, id := range boxes {
 		st.Mailboxes[id.String()] = &mailboxState{Versions: map[string]uint32{}, Epochs: map[string]*epochMemo{}}
 	}
-	if err := store.WritePrivateFileAtomic(cfg.userPath(), raw); err != nil {
-		return store.ID{}, err
-	}
-	if err := keys.WriteKeystoreFile(cfg.keystorePath(), ksData); err != nil {
-		return store.ID{}, err
-	}
-	if err := saveState(cfg.statePath(), st); err != nil {
+	// Everything checked: now the client directory, in one step (task 20e
+	// point 2, as Keygen).
+	if err := writeClientDir(cfg.Dir, "restore", raw, ksData, st); err != nil {
 		return store.ID{}, err
 	}
 	cfg.Warn(warnUnconfirmedState)

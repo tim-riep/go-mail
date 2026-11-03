@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/shamir"
@@ -150,69 +152,90 @@ func KeygenWithOptions(cfg Config, passphrase []byte, p Prompter, opts KeygenOpt
 	if err != nil {
 		return store.ID{}, err
 	}
-	err = createClientDir(cfg.Dir, func(tmp string) error {
-		t := Config{Dir: tmp}
-		if err := store.WritePrivateFileAtomic(t.userPath(), userData); err != nil {
-			return err
-		}
-		if err := keygenStep("user"); err != nil {
-			return err
-		}
-		if err := keys.WriteKeystoreFile(t.keystorePath(), ksData); err != nil {
-			return err
-		}
-		if err := keygenStep("keystore"); err != nil {
-			return err
-		}
-		if err := saveState(t.statePath(), &state{UserID: id.String(), Mailboxes: map[string]*mailboxState{}}); err != nil {
-			return err
-		}
-		return keygenStep("state")
-	})
+	err = writeClientDir(cfg.Dir, "keygen", userData, ksData, &state{UserID: id.String(), Mailboxes: map[string]*mailboxState{}})
 	if err != nil {
 		return store.ID{}, err
 	}
 	return id, nil
 }
 
-// keygenFault, if set, is called after every write step of Keygen with
-// the name of the step ("dir", "user", "keystore", "state", "renamed");
-// an error it returns is handled like a failed write of that step. It is
-// nil in production and set only by tests of this package.
-var keygenFault func(step string) error
+// clientDirFault, if set, is called after every write step of Keygen and
+// Restore with the name of the step, prefixed with the kind of the run
+// ("keygen-" or "restore-" and "dir", "user", "keystore", "state",
+// "locked", "renamed"); an error it returns is handled like a failed
+// write of that step. It is nil in production and set only by tests of
+// this package.
+var clientDirFault func(step string) error
 
-// keygenStep ends a write step of Keygen: a simulated crash (crashHook,
-// point "keygen-<step>") stops without cleanup as a killed process
-// would; an injected fault (keygenFault) fails the step.
-func keygenStep(step string) error {
-	if crash("keygen-" + step) {
+// dirStep ends write step step of a run of kind (keygen, restore) that
+// creates a client directory: a simulated crash (crashHook, point
+// "<kind>-<step>") stops without cleanup as a killed process would; an
+// injected fault (clientDirFault) fails the step.
+func dirStep(kind, step string) error {
+	if crash(kind + "-" + step) {
 		return errCrashed
 	}
-	if keygenFault != nil {
-		return keygenFault(step)
+	if clientDirFault != nil {
+		return clientDirFault(kind + "-" + step)
 	}
 	return nil
 }
 
-// createClientDir creates the client directory dir of a new user in one
-// step (task 20b point 1): write fills a new temporary directory next to
-// dir (each file synced on its own), the temporary directory is synced,
-// renamed to dir and the parent of dir is synced. A signal or a failed
-// write at any point leaves either no client directory or a complete one
-// with key store, user.rec and state.json, so a second keygen succeeds
-// after an interrupted one, and a complete directory is never half
-// overwritten. Before the rename a failure removes the temporary
-// directory; a killed process may leave it behind as .<name>.keygen-*
-// next to dir, holding only the sealed key store and the public user.rec,
-// and no client reads it.
+// writeClientDir creates the client directory dir of a user with
+// user.rec userData, the sealed key store ksData and the state st, in
+// one step (createClientDir); kind names the run (keygen, restore).
+func writeClientDir(dir, kind string, userData, ksData []byte, st *state) error {
+	return createClientDir(dir, kind, func(tmp string) error {
+		t := Config{Dir: tmp}
+		if err := store.WritePrivateFileAtomic(t.userPath(), userData); err != nil {
+			return err
+		}
+		if err := dirStep(kind, "user"); err != nil {
+			return err
+		}
+		if err := keys.WriteKeystoreFile(t.keystorePath(), ksData); err != nil {
+			return err
+		}
+		if err := dirStep(kind, "keystore"); err != nil {
+			return err
+		}
+		if err := saveState(t.statePath(), st); err != nil {
+			return err
+		}
+		return dirStep(kind, "state")
+	})
+}
+
+// errDirNotEmpty is the cause of a rename of createClientDir that found
+// the client directory not empty.
+var errDirNotEmpty = errors.New("client: client directory not empty")
+
+// createClientDir creates the client directory dir of a user in one step
+// (task 20b point 1; Restore since task 20e point 2): write fills a new
+// temporary directory .<name>.<kind>-* next to dir (each file synced on
+// its own), the temporary directory is synced, renamed to dir and the
+// parent of dir is synced. kind is the run, keygen or restore. A signal
+// or a failed write at any point leaves either no client directory or a
+// complete one with key store, user.rec and state.json, so a second run
+// succeeds after an interrupted one, and a complete directory is never
+// half overwritten. Before the rename a failure removes the temporary
+// directory; a killed process may leave it behind next to dir, holding
+// only the sealed key store, the public user.rec and state.json, and no
+// client reads it. The next run of the same kind for dir that succeeds
+// removes it (removeLeftovers, task 20e point 3).
 //
 // dir may exist as an empty directory, which the rename replaces, or as
 // one that holds only the lock file (lockOnlyDir); a directory with
-// other entries is kept and refused (store.ErrExists; Keygen itself
-// refuses a directory with a key store before, ErrRegistered). A
+// other entries is kept and refused (store.ErrExists; Keygen and Restore
+// themselves refuse a directory with a key store, user.rec or state.json
+// before, ErrRegistered). An Open of the same directory may create its
+// lock file again between lockOnlyDir and the rename (L1 of the review of
+// task 20b): the rename is tried once more, and a directory that is still
+// not empty is refused as "not empty or in use by another client". A
 // symbolic link as dir is followed, as before: the directory it names is
-// created or replaced.
-func createClientDir(dir string, write func(tmp string) error) (err error) {
+// created or replaced. A mount point as dir cannot be replaced: the
+// rename fails with EBUSY or EXDEV and the run with it.
+func createClientDir(dir, kind string, write func(tmp string) error) (err error) {
 	if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if dir, err = filepath.EvalSymlinks(dir); err != nil {
 			return err
@@ -222,7 +245,8 @@ func createClientDir(dir string, write func(tmp string) error) (err error) {
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.MkdirTemp(parent, "."+name+".keygen-")
+	prefix := "." + name + "." + kind + "-"
+	tmp, err := os.MkdirTemp(parent, prefix)
 	if err != nil {
 		return err
 	}
@@ -236,7 +260,13 @@ func createClientDir(dir string, write func(tmp string) error) (err error) {
 	if err := os.Chmod(tmp, 0o700); err != nil {
 		return err
 	}
-	if err := keygenStep("dir"); err != nil {
+	// The time of the file system at the start of this run: a temporary
+	// directory last changed before it is a leftover of an earlier run.
+	start, err := os.Lstat(tmp)
+	if err != nil {
+		return err
+	}
+	if err := dirStep(kind, "dir"); err != nil {
 		return err
 	}
 	if err := write(tmp); err != nil {
@@ -245,23 +275,46 @@ func createClientDir(dir string, write func(tmp string) error) (err error) {
 	if err := store.SyncDir(tmp); err != nil {
 		return err
 	}
+	err = replaceDir(tmp, dir, kind)
+	if errors.Is(err, errDirNotEmpty) {
+		err = replaceDir(tmp, dir, kind)
+	}
+	if errors.Is(err, errDirNotEmpty) {
+		return fmt.Errorf("%w: the client directory %s is not empty or in use by another client", store.ErrExists, dir)
+	}
+	if err != nil {
+		return err
+	}
+	if err := dirStep(kind, "renamed"); err != nil {
+		return err
+	}
+	if err := store.SyncDir(parent); err != nil {
+		return err
+	}
+	removeLeftovers(parent, prefix, start.ModTime())
+	return nil
+}
+
+// replaceDir renames tmp to dir under lockOnlyDir; errDirNotEmpty if
+// dir is a directory that is not empty.
+func replaceDir(tmp, dir, kind string) error {
 	release, err := lockOnlyDir(dir)
 	if err != nil {
 		return err
 	}
 	defer release()
+	if err := dirStep(kind, "locked"); err != nil {
+		return err
+	}
 	// syscall.Rename, because os.Rename refuses every existing directory
 	// as target; rename(2) replaces an empty one and refuses any other.
 	if err := syscall.Rename(tmp, dir); err != nil {
 		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
-			return fmt.Errorf("%w: the client directory %s is not empty", store.ErrExists, dir)
+			return errDirNotEmpty
 		}
 		return &os.LinkError{Op: "rename", Old: tmp, New: dir, Err: err}
 	}
-	if err := keygenStep("renamed"); err != nil {
-		return err
-	}
-	return store.SyncDir(parent)
+	return nil
 }
 
 // lockOnlyDir prepares an existing directory dir for the rename of
@@ -270,13 +323,18 @@ func createClientDir(dir string, write func(tmp string) error) (err error) {
 // directory that holds only the regular file lock counts as empty: under
 // that lock the file is removed and the rename replaces the then empty
 // directory; release ends the lock. A directory with any other entry is
-// left alone, and the rename refuses it.
+// left alone, and the rename refuses it. The directory is opened with
+// store.OpenDir (task 20e point 4). The content of lock is not checked
+// (L2 of the review of task 20b): any regular file of that name is taken
+// for the lock file of Open and removed while nobody holds a lock on it;
+// that takes write access to the directory, which allows removing it
+// anyway.
 func lockOnlyDir(dir string) (release func(), err error) {
 	release = func() {}
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
 		return release, nil
 	}
-	d, err := os.Open(dir)
+	d, err := store.OpenDir(dir)
 	if err != nil {
 		return release, err
 	}
@@ -295,6 +353,45 @@ func lockOnlyDir(dir string) (release func(), err error) {
 		return release, err
 	}
 	return unlock, nil
+}
+
+// leftoverBatch is the number of names read from the parent of a client
+// directory at a time (removeLeftovers).
+const leftoverBatch = 256
+
+// removeLeftovers removes the temporary directories prefix* in parent
+// that a run of the same kind for the same client directory left behind
+// when it was killed before its rename (createClientDir; task 20e point
+// 3): only directories (a symbolic link is neither followed nor
+// removed), owned by the user of this process (ownedByMe), and last
+// changed before start, the time of the file system when this run made
+// its own. A run of the same kind that is still under way and loses its
+// temporary directory this way fails (its client directory is taken by
+// now in any case, store.ErrExists). Errors are ignored: this run has
+// succeeded, and what is left is removed by a later one.
+func removeLeftovers(parent, prefix string, start time.Time) {
+	d, err := store.OpenDir(parent)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	for {
+		names, err := d.Readdirnames(leftoverBatch)
+		for _, n := range names {
+			if !strings.HasPrefix(n, prefix) {
+				continue
+			}
+			p := filepath.Join(parent, n)
+			fi, err := os.Lstat(p)
+			if err != nil || !fi.IsDir() || !ownedByMe(fi) || !fi.ModTime().Before(start) {
+				continue
+			}
+			os.RemoveAll(p)
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // showAndConfirm shows the 24 words of seed through p and asks three

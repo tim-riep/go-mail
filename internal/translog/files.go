@@ -179,8 +179,11 @@ func (f *files) createOrSame(rel string, data []byte, max int64) error {
 // maximum is ever needed (refuse, newestHead), so the directory is
 // scanned once in batches, without sorting (task 07b finding 7: the
 // insertion sort of task 07 took half a second for 40,000 heads).
+// heads/ is opened with store.OpenDir (task 20e, as eachHead): a FIFO or
+// another file in its place is an error at once instead of an open that
+// waits for a writer; a missing heads/ is no head, as before.
 func (f *files) newestHeadSize() (int64, error) {
-	d, err := os.Open(f.path(HeadsDir))
+	d, err := store.OpenDir(f.path(HeadsDir))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return 0, nil
