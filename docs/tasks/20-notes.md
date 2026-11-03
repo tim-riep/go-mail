@@ -287,3 +287,10 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 | `internal/translog` | `FuzzOpenHead` | 6.272.278 |
 | `internal/translog` | `FuzzParseHeadText` | 6.436.659 |
 | `internal/translog` | `FuzzProofs` | 4.849.422 |
+
+## Aus 20h (Implementierer, für den Merge)
+- Commit b14d798 im Worktree agent-a7b23152bafa90687 (Basis df2b0af). Läufe grün (race/386 `client` und `testenv`, gomailctl, e2e); `client` 88,3 %.
+- Vor 20h panikten 14 Methoden nach `Close` (CreateMailbox, Folders, Index, List, MailboxName, OpenPending, Read, Rename, Search, SetFlags, SetFolders, SetRecovery, Share, Sync); ClearRecovery, Revoke, ConfirmRecovery lieferten falsche Ergebnisse. Jetzt `client.ErrClosed`; `UserID`/`Mailboxes` ohne Fehlerergebnis liefern weiter die IDs im Speicher.
+- D86 Nachtrag 20h: Marker `.incomplete`; Reste nur mit Marker und nur bekannte Namen; Sperrdatei vor und nach dem Sperren per `os.SameFile` verglichen (bis 8 Versuche, dann `ErrLocked`; Abweichung: `store.LockFile` gibt den Deskriptor nicht heraus); `ErrExists` für ein verlorenes Temp-Verzeichnis.
+- RUNBOOK: ein Temp-Verzeichnis ohne Marker (Abbruch zwischen Entfernen des Markers und Umbenennen) von Hand löschen.
+- Nachfolge möglich: `store`-Sperrfunktion, die den Deskriptor liefert, dann Inode direkt vergleichen.
