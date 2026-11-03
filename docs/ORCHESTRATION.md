@@ -211,3 +211,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   3. Auftrag 17 MEASUREMENTS auf ruhiger Maschine (M1-Kriterium D).
   4. Auftrag 20 Abnahme: Pflichttests 10.1, Abdeckung je Paket, Volllauf, HANDOFF endgültig (Fuzzing-Tabellen aus `docs/tasks/20-notes.md`), AUDIT endgültig, Abschlussbericht nach §7.
 - **Offene Fragen:** Q18, Q20 (strengste Lesart gebaut), Q19 (Haltepunkt 2, `succeed --compromised` gesperrt). Q22 erledigt (D91).
+- 03.11., 09:00 UTC: Fortsetzung auf Anweisung des Auftraggebers („Deine Entscheidung. weiter bis morgen 6 Uhr“), Stopp am 04.11. um 05:00 UTC. Volllauf 20b fortgesetzt; 20e startet auf dem Stand von 20b.

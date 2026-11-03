@@ -1,7 +1,7 @@
 # Auftrag 20e: Letzte kleine Nacharbeiten im Produktivcode vor der Abnahme (Funde niedrig aus 20b, 20c)
 
 Welle 5. Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich.
-- Basis: Arbeitsbranch `claude/quirky-keller-hjsl5i` nach dem Merge von 20b (der Orchestrator nennt den Commit), in einem eigenen Worktree.
+- Basis: Arbeitsbranch `claude/quirky-keller-hjsl5i` bei ce24857 oder später, dazu der geprüfte Stand von 20b: `git merge worktree-agent-a1eb92777f183eed4` (Commit cb2344c) in den eigenen Worktree. 20b wird parallel zusammengeführt; der Code ist derselbe.
 - Darf ändern: `internal/client/**`, `internal/store/**` (nicht `records.go`-Schemata), `internal/translog/files.go` und dessen Tests.
 - Nicht ändern: Dateiformate, signierte Datensätze, Signaturdomänen, Prüfregeln der Clients, Phase-0-Vektoren.
 - Quelle: `docs/tasks/20-notes.md`, Abschnitte „Aus 20b (Implementierer, außerhalb des Auftrags)“, „Aus der Spezifikationsprüfung von 20b“, „Aus der Angreiferprüfung von 20b“; `docs/tasks/20-triage.md` P-2.
