@@ -14,7 +14,8 @@ Welle 5. Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich
 4. **Aufräumen nur mit Marker (20e-Angreiferprüfung F1):** `createClientDir` schreibt zuerst einen Marker `.incomplete` in das Temp-Verzeichnis und entfernt ihn unmittelbar vor dem Umbenennen; `removeLeftovers` entfernt nur Verzeichnisse mit Marker und darin nur die bekannten Namen (Marker, `keystore`, `user.rec`, `state.json`, Temp-Namen der atomaren Schreiber), danach `rmdir`; alles andere bleibt. Tests: umbenanntes echtes Client-Verzeichnis bleibt erhalten; Rest eines abgebrochenen Laufs wird entfernt.
 5. **Sperre nach `lockOnlyDir` (F2):** Nach dem Erwerb der Sperre vergleicht `Open` den Inode des Deskriptors mit dem des Pfads `lock` und wiederholt bei Abweichung oder fehlendem Pfad (begrenzt); Test mit zwei Prozessen, soweit machbar, sonst Einheitstest der Prüfung.
 6. **Meldung (F3):** Verliert ein `keygen`/`restore` sein Temp-Verzeichnis an einen gleichzeitigen Lauf, meldet es `store.ErrExists` mit der Meldung aus 20e statt `ENOENT`.
-7. **Kommentar an `testenv.ImmediateEpoch`** ist Produktivcode von `testenv`; nicht ändern, sondern im Bericht nennen, ob der beschriebene Fall erreichbar ist.
+7. **Präfix beim Aufräumen (20e-Spezifikationsprüfung 1):** `removeLeftovers` verlangt, dass nach dem Präfix `.<name>.<kind>-` nur die Ziffern von `MkdirTemp` folgen. Kommentar an `removeLeftovers`: ein laufender Lauf derselben Art, dessen Temp-Verzeichnis entfernt wurde, scheitert „mit `ErrExists` oder dem Fehler seines Umbenennens“ (bzw. nach Punkt 6 einheitlich mit `ErrExists`).
+8. **Kommentar an `testenv.ImmediateEpoch`** ist Produktivcode von `testenv`; nicht ändern, sondern im Bericht nennen, ob der beschriebene Fall erreichbar ist.
 
 ## Fertig
 
