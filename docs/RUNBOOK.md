@@ -2,11 +2,11 @@
 
 Dieses Dokument beschreibt den Betrieb des PoC mit den tatsächlichen Befehlen der Programme `gomail-ceremony`, `gomail-server`, `gomail-witness` und `gomailctl`: Erstinstallation mit Zeremonie, Zeuge und Server, Benutzer und Postfächer, Geräteverlust, Ingest-Rotation, Nachfolge der Plattformidentität, Störungen, den Test auf zwei Maschinen und die Zeitquellen. Maßgeblich sind die Usage-Texte der Programme (Aufruf ohne Argumente); dieses Dokument folgt ihnen.
 
-Der Test `TestRunbook` in `internal/e2e` geht die Abschnitte 1 bis 8 mit Programmen eines Produktionsbuilds Schritt für Schritt durch und nennt in seiner Ausgabe (`go test -v`) zu jedem Schritt den Abschnitt (`RUNBOOK 4.7: ...`). Die Zuordnung steht am Ende („Abgleich mit TestRunbook“).
+Der Test `TestRunbook` in `internal/e2e` geht die Hauptschritte der Abschnitte 1 bis 8 mit Programmen eines Produktionsbuilds durch und nennt in seiner Ausgabe (`go test -v`) zu jedem Schritt den Abschnitt (`RUNBOOK 4.7: ...`). Nicht jeder Schritt und nicht jede Verweigerung ist darin enthalten; die Zuordnung und die Liste dessen, was er nicht abdeckt, stehen am Ende („Abgleich mit TestRunbook“). Ohne jeden Test sind unter anderem der SSH-Tunnel zum Zeugen (1.7), Sicherung und Wiederherstellung (8.8) und das Vorgehen bei einem Fork des Zeugen (8.9).
 
 **Schreibweise.** Platzhalter stehen in spitzen Klammern (`<datenverzeichnis>`, `<pin>`). Es gibt keine Beispielwerte für Seeds, Anteile, Passphrasen oder Einladungscodes; nie Werte aus einem Test oder einer Anleitung übernehmen.
 
-**Grenzen des PoC.** Nicht mit echten Mails verwenden. Vor einem solchen Betrieb verlangt der Plan TLS, Ratenbegrenzung und Missbrauchsschutz beim Empfang, unabhängige Prüfungen (10.2), mindestens zwei von drei Zeugen und die Kopplung neuer Geräte (2.7). Der PoC hat einen Zeugen; offen sind unter anderem Q18 und Q19 (Abschnitte 7.3 und 8.4).
+**Grenzen des PoC.** Nicht mit echten Mails verwenden. Vor einem solchen Betrieb verlangt der Plan TLS, Ratenbegrenzung und Missbrauchsschutz beim Empfang, unabhängige Prüfungen (10.2), mindestens zwei von drei Zeugen und die Kopplung neuer Geräte (2.7). Der PoC hat einen Zeugen; offen ist unter anderem Q18 (Abschnitt 8.4). Q19 und Q8 (Widerruf kompromittierter Plattformgenerationen) sind mit D93 entschieden; gebaut wird das mit Auftrag 21, bis dahin ist `succeed --compromised` gesperrt (Abschnitt 7.3).
 
 ## 0. Überblick
 
@@ -16,7 +16,7 @@ Der Test `TestRunbook` in `internal/e2e` geht die Abschnitte 1 bis 8 mit Program
 |---|---|---|
 | Zeremonierechner (offline, Live-System, ohne Netzwerk) | `gomail-ceremony` (`init`, `ingest-rotate`, `reshare`, `succeed`) | nur während der Zeremonie: Plattform-Root im Speicher; danach ausschalten |
 | Server-Host | `gomail-server`, `gomail-ceremony publish` | Datenverzeichnis (Gruppe `gomail`, 2770/0660), Pin, Ingest-Schlüssel (0600, außerhalb des Datenverzeichnisses) |
-| Zeugenhost (andere Maschine, anderer Betreiber oder zu Hause) | `gomail-witness` | Zeugenschlüssel (0600), Zustandsverzeichnis (0700) |
+| Zeugenhost (andere Maschine, anderer Betreiber oder zu Hause; erreicht das Log nur über einen Tunnel, 1.7) | `gomail-witness` | Zeugenschlüssel (0600), Zustandsverzeichnis (0700) |
 | Administrator | `gomail-server address add` | Admin-Schlüssel (0600), getrennt vom Server |
 | Client-Rechner je Benutzer | `gomailctl` | Schlüsselspeicher und Client-Zustand (0600/0700), Pin |
 
@@ -30,7 +30,7 @@ Go 1.26 (getestet mit 1.26.10); ist lokal eine ältere Version installiert, läd
 go build -o <bin>/ ./cmd/...
 ```
 
-Das ist der **Produktionsbuild**: ohne Build-Tags. Er enthält weder die Entwicklungszeremonie (`gomail-ceremony init --dev`) noch einen Testschalter (`GOMAIL_TEST_MIN_FREE`, `GOMAIL_TEST_HEAD_GAP`, `GOMAIL_TEST_DEV_IDENTITY`, `GOMAILCTL_TEST_KEYGEN_PIPE`); ein Entwicklungs-Pin wird von allen Serverbefehlen mit Exit 2 abgelehnt. Die Tags `gomail_dev` und `gomail_test` sind nur für Tests (Abschnitt 9, `docs/AUDIT.md` R35). Ausgeliefert werden nur Produktionsbuilds.
+Das ist der **Produktionsbuild**: ohne Build-Tags. Er enthält weder die Entwicklungszeremonie (`gomail-ceremony init --dev`) noch einen Testschalter (`GOMAIL_TEST_MIN_FREE`, `GOMAIL_TEST_HEAD_GAP`, `GOMAIL_TEST_DEV_IDENTITY`, `GOMAILCTL_TEST_KEYGEN_PIPE`); ein Entwicklungs-Pin wird von `gomail-server init`, `serve`, `address add` und `log repair` mit Exit 2 abgelehnt, von `gomail-ceremony` mit Exit 1 (`invite create` liest keinen Pin). Die Tags `gomail_dev` und `gomail_test` sind nur für Tests (Abschnitt 9, `docs/AUDIT.md` R35). Ausgeliefert werden nur Produktionsbuilds.
 
 **Eigene Werkzeuge:** Wer im Modul ein eigenes Programm auf `internal/client` baut, ruft die Methoden eines `client.Client` nie aus mehreren Goroutinen zugleich auf, `Close` eingeschlossen: das Paket ist nicht goroutinesicher (die Sperre im `Client` schützt nur das Merkmal `closed` und die Schlüssel-Caches (`ingest`, `epochKeys`), keine Methode als Ganzes; nach `Close` liefert jede Methode mit Fehlerergebnis `client.ErrClosed`).
 
@@ -41,11 +41,13 @@ Das ist der **Produktionsbuild**: ohne Build-Tags. Er enthält weder die Entwick
 | `<datenverzeichnis>` | Abschnitt 4 des Plans: verschlüsselte Dateien, öffentliche Schlüssel, signierte Datensätze, `log/` | keine privaten Schlüssel, kein Klartext |
 | `<export>` | Ergebnis einer Zeremonie: `platform/` (öffentliche Schlüssel, Zertifikate, `witnesses.rec`, Nachfolgen) und `identity-<gen>.pin` | nur öffentliche Dateien |
 | `<schlüssel>` | private Plattformschlüssel `admin-<gen>.key`, `ingest-<gen>.key` | 0600, außerhalb des Datenverzeichnisses und des Exports |
-| `<client>` | Schlüsselspeicher, `user.rec`-Kopie, `state.json`, Audit-Index des Logs | ein Verzeichnis je Benutzer und Gerät, Standard `~/.config/gomailctl`; sein Elternverzeichnis nur für den eigenen Benutzer beschreibbar oder mit Sticky-Bit (Eigentümer der Benutzer oder `root`) (unten, D92) |
+| `<client>` | Schlüsselspeicher, `user.rec`-Kopie, `state.json`, Audit-Index des Logs | ein Verzeichnis je Benutzer und Gerät, Standard `<UserConfigDir>/gomailctl` (unten); sein Elternverzeichnis nur für den eigenen Benutzer beschreibbar oder mit Sticky-Bit (Eigentümer der Benutzer oder `root`) (unten, D92) |
 
 Pin, Ingest-Schlüssel und Admin-Schlüssel müssen außerhalb des Datenverzeichnisses liegen, auch über symbolische Links gesehen; sonst verweigern die Serverbefehle (Exit 2 für Pin und Admin-Schlüssel).
 
-**Voraussetzung für `<client>` (D92):** Das Verzeichnis über dem Client-Verzeichnis (`<eltern>`, beim Standard `~/.config`) darf nur der Benutzer selbst beschreiben können, oder es trägt das Sticky-Bit und gehört dem Benutzer selbst oder `root` wie `/tmp`. Ist `--dir` ein symbolischer Link, gilt das für das Verzeichnis, das den Link enthält, und für das Elternverzeichnis des Linkziels. Grund: Ein geöffneter Client schreibt nach dem Sperren über den Pfad in `<client>` und folgt dabei einem Link jedes Mal neu, etwa `state.json` nach jedem Befehl, die Kopien neuer Postfächer unter `new-mailboxes/`, den Audit-Index `log-index.json` und bei `device lost` `user.rec` und den Schlüsselspeicher. Wer `<eltern>` beschreiben kann, könnte `<client>` dazwischen gegen ein anderes Client-Verzeichnis tauschen und dessen Schlüsselspeicher überschreiben (AUDIT R46). `gomailctl` prüft das nicht; der Benutzer prüft es, bevor er `keygen` oder `restore` ausführt:
+**Standard für `<client>`:** Ohne `--dir` nimmt `gomailctl` das Verzeichnis `gomailctl` im Konfigurationsverzeichnis des Benutzers (`os.UserConfigDir`, `cmd/gomailctl/main.go`): unter Linux und den BSDs `$XDG_CONFIG_HOME/gomailctl`, ist die Variable nicht gesetzt `~/.config/gomailctl`; unter macOS `~/Library/Application Support/gomailctl`. `<eltern>` ist dann entsprechend `$XDG_CONFIG_HOME`, `~/.config` oder `~/Library/Application Support`.
+
+**Voraussetzung für `<client>` (D92):** Das Verzeichnis über dem Client-Verzeichnis (`<eltern>`, beim Standard das Konfigurationsverzeichnis von oben) darf nur der Benutzer selbst beschreiben können, oder es trägt das Sticky-Bit und gehört dem Benutzer selbst oder `root` wie `/tmp`. Ist `--dir` ein symbolischer Link, gilt das für das Verzeichnis, das den Link enthält, und für das Elternverzeichnis des Linkziels. Grund: Ein geöffneter Client schreibt nach dem Sperren über den Pfad in `<client>` und folgt dabei einem Link jedes Mal neu, etwa `state.json` nach jedem Befehl, die Kopien neuer Postfächer unter `new-mailboxes/`, den Audit-Index `log-index.json` und bei `device lost` `user.rec` und den Schlüsselspeicher. Wer `<eltern>` beschreiben kann, könnte `<client>` dazwischen gegen ein anderes Client-Verzeichnis tauschen und dessen Schlüsselspeicher überschreiben (AUDIT R46). `gomailctl` prüft das nicht (kein Test). Der Benutzer prüft es, bevor er `keygen` oder `restore` ausführt; die Voraussetzung gilt aber, solange ein Befehl das Client-Verzeichnis öffnet, besonders für `device lost` (5.1), das Schlüsselspeicher und `user.rec` neu schreibt:
 
 ```
 stat -c '%U %a' <eltern>
@@ -71,7 +73,7 @@ Auf dem Zeugenhost, vor der Zeremonie, je Zeuge:
 gomail-witness keygen --name <zeuge> --key <zeugenschlüssel>
 ```
 
-Der Name ist druckbares ASCII ohne Leerzeichen und `+`. Die Schlüsseldatei entsteht mit 0600 und wird nie ersetzt. Die ausgegebene Verifier-Zeile `<zeuge>+<hash>+<schlüssel>` ist öffentlich und geht zur Zeremonie. Quorum: `2·<k> > <n>` (bei einem Zeugen 1 von 1).
+Der Name ist druckbares ASCII ohne Leerzeichen, `+` und `=` und nicht `gomail-log` (der Name des Log-Schlüssels). Ein `=` verbietet `keygen` nicht, aber die Zeremonie trennt `--witness <zeuge>=<verifier-zeile>` am ersten `=`; ein solcher Name ist dort nicht verwendbar. Die Schlüsseldatei entsteht mit 0600 und wird nie ersetzt. Die ausgegebene Verifier-Zeile `<zeuge>+<hash>+<schlüssel>` ist öffentlich und geht zur Zeremonie. Quorum: `2·<k> > <n>` (bei einem Zeugen 1 von 1).
 
 ### 1.2 Zeremonie offline
 
@@ -85,6 +87,8 @@ gomail-ceremony init --shares 3-of-5 --out <export> --keys <schlüssel> --origin
 - Standardeingabe und Standardausgabe müssen ein Terminal sein (Abschnitt 2). `init` zeigt zuerst die Uhr des Rechners; geht sie falsch, mit Strg-C abbrechen, die Uhr stellen und neu beginnen.
 - Das Programm erzeugt den Plattform-Root, leitet Identität, Admin- und Ingest-Schlüssel der Generation 1 ab und teilt den Root in fünf Anteile zu je 30 Wörtern. Jeder Inhaber wird einzeln an den Bildschirm gerufen, sein Anteil erscheint, nach seiner Bestätigung wird der Bildschirm gelöscht. Danach geben drei zufällig gewählte Inhaber ihren Anteil ohne Anzeige ein (Probe-Rekonstruktion); erst wenn sie gelingt, werden die Dateien geschrieben.
 - Ergebnis: `<export>/platform/` (öffentliche Schlüssel, Zertifikate, `witnesses.rec`), `<export>/identity-1.pin` und in `<schlüssel>` die privaten Schlüssel `admin-1.key` und `ingest-1.key` (0600). Anteile stehen in keiner Datei.
+- **`--out` und `--keys`:** `--out` muss fehlen oder ein leeres Verzeichnis sein (sonst `ceremony: unusable export directory: … is not empty`). `--keys` muss fehlen oder ein Verzeichnis mit Rechten 0700 sein, das dem ausführenden Benutzer gehört und kein symbolischer Link ist (sonst `ceremony: unusable key directory: …`, etwa `… has mode 0755, not 0700`); vorhandene Schlüsseldateien darin werden nie ersetzt. Beide sind getrennt, keins liegt im anderen. Geprüft wird das, bevor ein Anteil erscheint.
+- **Schlüssel vom Live-System holen:** Da der Rechner ohne Netzwerk läuft, `--out` und `--keys` auf getrennte Wechselmedien legen, deren Dateisystem Unix-Rechte speichert (nicht FAT oder exFAT: dort zeigen Verzeichnisse 0755 oder 0777, und `--keys` wird verweigert), möglichst verschlüsselt. `--keys` dort vorher mit `mkdir -m 700 <schlüssel>` anlegen oder fehlen lassen.
 - Danach den Rechner ausschalten (2.3 Schritt 5).
 
 ### 1.3 Pin und Schlüssel verteilen
@@ -93,18 +97,30 @@ gomail-ceremony init --shares 3-of-5 --out <export> --keys <schlüssel> --origin
 - `ingest-1.key` auf den Server-Host (0600, außerhalb des Datenverzeichnisses); `admin-1.key` zum Administrator.
 - `identity-1.pin` auf getrenntem Weg zu jedem Client (`gomailctl --pin`). Der Pin ist der Vertrauensanker: Identität, Origin des Logs, Zeugen und Quorum. Er ist nicht signiert; wer ihn austauscht, bestimmt, wem Server und Clients trauen.
 - Die Zeugen behalten ihre privaten Schlüssel. Sie bekommen den Origin und, nach 1.5, den Prüfschlüssel des Logs (1.7).
+- `gomail-server` prüft die Rechte der Schlüsseldateien nicht (`ceremony.ReadKey`): `ingest-1.key` und `admin-1.key` mit `chmod 600`, Eigentümer der Benutzer, der sie verwendet.
+- Nach dem Verteilen und nach der Sicherung (8.8) die Schlüsseldateien auf dem Transportmedium sicher löschen; der Server-Host bekommt nur `ingest-<g>.key`, der Administrator nur `admin-<g>.key`.
 
 Im Datenverzeichnis liegt danach und zu jeder Zeit kein privater Schlüssel.
 
 ### 1.4 Datenverzeichnis anlegen
 
-Auf dem Server-Host, als Benutzer der Gruppe `gomail`:
+Auf dem Server-Host, als Benutzer der Gruppe `gomail`.
+
+**Voraussetzungen (Benutzer und Gruppe):** Server und Clients laufen unter verschiedenen Betriebssystembenutzern, die beide der Gruppe `gomail` angehören (9.1 des Plans, D70). Gruppe und Datenverzeichnis vorher anlegen, etwa:
+
+```
+getent group gomail || sudo groupadd gomail
+sudo usermod -aG gomail <server-benutzer>     # danach neu anmelden; `id -nG` muss gomail zeigen
+sudo install -d -o <server-benutzer> -g gomail -m 2770 <datenverzeichnis>
+```
+
+Jeder Client-Benutzer (Abschnitt 3) ist ebenfalls in `gomail` und erreicht das Datenverzeichnis; ebenso der Administrator, wenn er `address add` (4.2) auf seinem Rechner gegen das Datenverzeichnis ausführt.
 
 ```
 gomail-server init --data <datenverzeichnis> --pin <pin> [--witnesses <export>/platform/witnesses.rec]
 ```
 
-`init` legt ein leeres Datenverzeichnis nach Abschnitt 4 an (`platform/`, `users/`, `invites/`, `mailboxes/`, `spool/`, `work/`, `locks/`, leeres `log/`; Rechte 2770) und schreibt nur `platform/witnesses.rec` (0660): ohne `--witnesses` aus dem Pin, mit `--witnesses` die Bytes der Datei, die genau Zeugen und Quorum des Pins enthalten muss (die Ausgabe nennt die Quelle). Die Gruppe wählt der Betreiber: ein leeres Verzeichnis mit der Gruppe `gomail` vorher anlegen oder ein Elternverzeichnis mit setgid und Gruppe `gomail`. Heißt die Gruppe anders, warnt `init` nur.
+`init` legt ein leeres Datenverzeichnis nach Abschnitt 4 an (`platform/`, `users/`, `invites/`, `mailboxes/`, `spool/`, `work/`, `locks/`, leeres `log/`; Rechte 2770) und schreibt nur `platform/witnesses.rec` (0660): ohne `--witnesses` aus dem Pin, mit `--witnesses` die Bytes der Datei, die genau Zeugen und Quorum des Pins enthalten muss (die Ausgabe nennt die Quelle). Die Gruppe wählt der Betreiber: ein leeres Verzeichnis mit der Gruppe `gomail` vorher anlegen (oben) oder ein Elternverzeichnis mit setgid und Gruppe `gomail`. Heißt die Gruppe anders, warnt `init` nur („WARNUNG: Gruppe des Datenverzeichnisses ist …“) und endet trotzdem mit Exit 0; die Clients scheitern dann an den Rechten. In diesem Fall das eben angelegte Datenverzeichnis (nur `platform/witnesses.rec` und leere Verzeichnisse) entfernen und mit der Gruppe `gomail` neu anlegen.
 
 `init` verweigert: ein vorhandenes, nicht leeres Verzeichnis (Exit 2); ein fehlendes Elternverzeichnis (nur die letzte Stufe wird angelegt); `--data` als symbolischen Link und ein Elternverzeichnis, dessen letzte Stufe ein Link ist (den Pfad ohne Link angeben); einen nicht lesbaren oder ungültigen Pin; `--pin` oder `--witnesses`, die keine reguläre Datei sind (etwa eine FIFO); einen Entwicklungs-Pin (Exit 2); Rechte oder eine Gruppe, die nicht passen (der Prozess muss der Gruppe des Verzeichnisses angehören). Was es bis zu einem Fehler oder Signal angelegt hat, entfernt es wieder, und nur das. Wird der Pfad während `init` ersetzt, bricht es ab, ohne Fremdes zu ändern.
 
@@ -142,27 +158,39 @@ gomail-server serve --data <datenverzeichnis> --listen 127.0.0.1:2525 --ingest-k
 - Ein **zweiter Serverprozess** auf demselben Datenverzeichnis bräuchte eine Kopie des Ingest-Schlüssels; der verlässt den Server-Host nicht. Er verweigert ohnehin an der Serversperre. Wer die Sperre von einem anderen Host prüfen will, nimmt `gomail-server log repair` (Abschnitt 9).
 - Beim Start räumt der Server `spool/` und `work/` (5.2, 5.3). Das Server-Log enthält nur IDs, Größen, Hash-Präfixe und Statuscodes, nie Adressen oder Inhalte. Beenden mit SIGINT oder SIGTERM.
 - Kann die Plattform den freien Platz nicht ermitteln (NetBSD, Windows), startet der Server, nimmt aber keine Mail an (451). Unter 10 % freiem Platz antwortet er mit `452 4.3.1`.
-- Köpfe: der Server signiert spätestens nach `--head-interval` (Standard 1 h) einen Kopf, während das Log wächst höchstens einen je Minute.
+- Köpfe: der Server signiert spätestens nach `--head-interval` (Standard 1 h) einen Kopf, während das Log wächst höchstens einen je Minute. `--head-interval` liegt zwischen 1 min und 1 h (Standard und Höchstwert 1 h); ein anderer Wert scheitert beim Start, nach dem Lesen des Schlüssels (`loghttp: invalid configuration: head interval at most 1h0m0s, at least the minimum gap`).
 
 ### 1.7 Zeuge starten
 
-Der Zeuge braucht den Prüfschlüssel des Logs. Er wird aus `platform/ingest-<gen>.pub` des Datenverzeichnisses gebildet (note-Format `gomail-log+<hash>+<schlüssel>`; der Log-Schlüssel ist der Ingest-Schlüssel, Q4):
+Der Zeuge braucht den Prüfschlüssel des Logs. Er wird aus `platform/ingest-<gen>.pub` des Exports der Zeremonie gebildet (note-Format `gomail-log+<hash>+<schlüssel>`; der Log-Schlüssel ist der Ingest-Schlüssel, Q4). Den Export nehmen, nicht das Datenverzeichnis: Dort darf jedes Mitglied der Gruppe `gomail` `platform/ingest-<gen>.pub` schreiben, und `publish` prüft diese Datei nicht; ein falscher Schlüssel hielte den Zeugen nur auf (die Clients prüfen Köpfe gegen das Zertifikat), wäre aber schwer zu finden.
 
 ```
-pub=<datenverzeichnis>/platform/ingest-1.pub
+pub=<export>/platform/ingest-1.pub
 h=$({ printf 'gomail-log\n\001'; cat "$pub"; } | sha256sum | cut -c1-8)
 k=$({ printf '\001'; cat "$pub"; } | base64 | tr -d '\n')
 echo "gomail-log+$h+$k"
 ```
 
-Die Zeile geht auf getrenntem Weg zum Zeugenhost. Dort:
+Die Zeile geht auf getrenntem Weg zum Zeugenhost.
+
+**Erreichbarkeit (nicht getestet):** Der Log-Port lauscht nur auf Loopback (1.6), und der Zeuge holt Köpfe nur ab, er öffnet keinen Port. Ein Zeuge auf einer anderen Maschine (0.1) erreicht das Log deshalb nur über einen Tunnel, etwa einen SSH-Tunnel, den der Zeugenhost zum Server-Host aufbaut:
+
+```
+ssh -N -L 127.0.0.1:<lokaler-port>:<log-adresse> <server-host>
+```
+
+`<log-adresse>` ist die Adresse aus `--log-listen`, wie der Server-Host sie sieht (etwa `127.0.0.1:<port>`); `--log` des Zeugen ist dann `http://127.0.0.1:<lokaler-port>`. Köpfe und Gegensignaturen sind signiert; der Tunnel stellt nur die Erreichbarkeit her. Dieser Weg ist in keinem Test nachgefahren (AUDIT R47); `TestRunbook` und das Skript nach 9 starten den Zeugen auf dem Server-Host. Ein Zeuge auf dem Server-Host braucht keinen Tunnel, ist aber nicht unabhängig (0.1, AUDIT R15). `--isolated-test-network` öffnet auch SMTP und ist nur für ein isoliertes Testnetz.
+
+Auf dem Zeugenhost:
 
 ```
 gomail-witness serve --log http://<log-adresse> --log-key <prüfschlüssel> --origin <origin> \
     --key <zeugenschlüssel> --state <zustandsverzeichnis> [--interval 10s]
 ```
 
-Der Zeuge fragt das Log in Abständen ab (Standard 10 s, mindestens 1 s), wartet, bis der Server erreichbar ist, signiert jeden Kopf mit, der den zuletzt mitsignierten konsistent fortsetzt, und schickt die Gegensignatur zurück; er öffnet keinen Port. Zeigt das Log zwei verschiedene Köpfe gleicher Größe, hört er für immer auf zu signieren und endet mit Exit 3 (der Beweis liegt im Zustandsverzeichnis). Das Zustandsverzeichnis bleibt über jeden Neustart erhalten; nie löschen.
+`--state` muss fehlen (es wird mit 0700 angelegt) oder darf Gruppe und anderen keine Rechte geben; `--key` muss nur für den Eigentümer lesbar sein (0600) und außerhalb von `--state` liegen. Sonst verweigert der Zeuge den Start.
+
+Der Zeuge fragt das Log in Abständen ab (Standard 10 s, mindestens 1 s), wartet, bis der Server erreichbar ist, signiert jeden Kopf mit, der den zuletzt mitsignierten konsistent fortsetzt, und schickt die Gegensignatur zurück; er öffnet keinen Port. Zeigt das Log zwei verschiedene Köpfe gleicher Größe, hört er für immer auf zu signieren und endet mit Exit 3 (der Beweis liegt im Zustandsverzeichnis); Vorgehen dann: 8.9. Das Zustandsverzeichnis bleibt über jeden Neustart erhalten; nie löschen, nie durch ein leeres oder älteres ersetzen (8.8).
 
 Erst mit dem Quorum der Zeugen veröffentlicht der Server einen Kopf (`log/heads/<n>.sig`), und erst mit einem solchen Kopf arbeiten die Clients.
 
@@ -171,20 +199,21 @@ Erst mit dem Quorum der Zeugen veröffentlicht der Server einen Kopf (`log/heads
 `init`, `ingest-rotate`, `reshare` und `succeed` zeigen oder lesen Anteile. Für sie gilt:
 
 - **Terminal:** Standardeingabe und Standardausgabe müssen ein Terminal sein, dessen Echo sich abschalten lässt; keine Umleitung, keine Pipe, keine Datei. Sonst verweigert das Programm, bevor es etwas anzeigt, liest oder schreibt. Einen Schalter darum gibt es nicht. Auf Systemen ohne Terminalsteuerung (nicht Linux, macOS oder BSD) verweigern alle vier Befehle.
-- **stderr:** Die Aufforderungen stehen auf der Standardfehlerausgabe. Sie muss zum Schreiben geöffnet sein, sonst endet die Zeremonie mit Exit 2, bevor ein Anteil erscheint. Liegt sie auf einem anderen Terminal, wird auch dort gelöscht.
+- **stderr:** Die Aufforderungen stehen auf der Standardfehlerausgabe. Sie muss ein Terminal, eine Pipe oder eine reguläre Datei sein und zum Schreiben geöffnet, nicht `/dev/null`, kein Socket und kein anderes Gerät; sonst endet die Zeremonie mit Exit 2, bevor ein Anteil erscheint. Liegt sie auf einem anderen Terminal, wird auch dort gelöscht.
 - **Anzeige:** Jeder Inhaber wird einzeln aufgerufen („Inhaber von Anteil i von n an den Bildschirm, dann Eingabetaste“); vorausgetippte Eingabe wird vorher verworfen. Nach „Anteil notiert?“ löscht die Eingabetaste den Bildschirm samt Verlauf. Die Software-Flusssteuerung (Strg-S/Strg-Q) ist während der ganzen Zeremonie aus.
 - **Eingabe:** Anteile werden ohne Anzeige eingegeben, 30 Wörter, auch über mehrere Zeilen; die Eingabe wird normalisiert (Kleinschreibung, beliebiger Leerraum), Abkürzungen gelten nicht. Meldungen nennen Wortpositionen, nie Wörter. Ein Anteil wird bis zu dreimal abgefragt.
 - **Abbruch:** Strg-C, Strg-\ oder Strg-Z, SIGTERM und SIGHUP stellen das Terminal wieder her, löschen den Bildschirm und beenden mit Exit 130. Während ein Anteil eingegeben wird, ist ISIG aus: Strg-C wirkt dann erst mit der Eingabetaste. Ein Abbruch endet nach höchstens etwa 2 s, auch wenn das Terminal keine Ausgabe mehr annimmt. Eine Zeremonie wird nie angehalten (Strg-Z bricht ab).
+- **Geltung der Zeiten:** Die Zeiten in diesem Abschnitt gelten, solange das Programm Rechenzeit bekommt. Auf einer überlasteten oder angehaltenen Maschine (oder wenn der Prozess nicht eingeplant wird) steht ein Anteil entsprechend länger auf dem Bildschirm (D85 Nachtrag 20n).
 - **Commit:** Kommt ein Signal, während die Dateien geschrieben werden, aber vor dem Umbenennen des Exports, wird alles zurückgebaut (Exit 130, nichts geschrieben). Danach wird es ignoriert: die Zeremonie meldet ihr Ergebnis, den Hinweis auf das Signal und Exit 0. Exit 0 heißt immer „Export vollständig“, Exit 130 „nichts geschrieben“.
 - **SIGKILL und SIGSTOP** lassen sich nicht abfangen: Echo und Flusssteuerung bleiben aus, ein gezeigter Anteil bleibt stehen. Das Terminal mit `stty sane` zurücksetzen und den Bildschirm samt Verlauf von Hand löschen.
 - **Restgrenze:** Ein Terminal, das nie wieder liest (angehalten, voll, getrennt), zeigt das Löschen nicht; ein Anteil kann dann auf ihm stehen bleiben. Verlauf und Scrollback eines Terminal-Emulators liegen außerhalb des Programms: für die Zeremonie ein Terminal ohne Verlauf verwenden.
 
 - **Bestätigungen:** Jede Bestätigung mit der Eingabetaste („Inhaber an den Bildschirm“, „Anteil notiert?“) zählt erst, wenn die Aufforderung mindestens eine Sekunde vollständig zu sehen ist. Eine frühere oder doppelte Eingabe wird verworfen, und die Zeremonie fragt mit „Eingabe zu früh, bitte erneut bestätigen“ noch einmal. Dann einmal ruhig warten und erneut die Eingabetaste drücken. Ein Doppel-Enter bestätigt nie für den nächsten Inhaber.
-- **Angehaltene Ausgabe:** Ist die Bildschirmausgabe länger als 2 s angehalten oder voll, endet die Zeremonie mit Exit 130 und löscht den Bildschirm vorher. Ursachen sind Scroll Lock, Strg-S oder ein anderes Programm am Terminal. Terminal prüfen und die Zeremonie neu beginnen; es ist nichts geschrieben.
+- **Angehaltene Ausgabe:** Ist die Bildschirmausgabe länger als 2 s angehalten oder voll, endet die Zeremonie mit Exit 130 und löscht den Bildschirm vorher (Zeiten wie oben: in der Rechenzeit des Programms). Ursachen sind Scroll Lock, Strg-S oder ein anderes Programm am Terminal. Terminal prüfen und die Zeremonie neu beginnen; es ist nichts geschrieben.
 
 ## 3. Benutzer anlegen
 
-Alle Befehle von `gomailctl` außer `inspect` brauchen `--data <datenverzeichnis>` und `--pin <pin>` (älterer Name `--platform`), optional `--dir <client>` (Standard `~/.config/gomailctl`). Sie arbeiten nur neben einem laufenden Server, dessen Sperre `locks/server` auf diesem Rechner wirkt (Testsperre, 9.1); ohne ihn verweigern sie mit „Testsperre“. Jeder Befehl öffnet das Transparenzlog selbst mit dem Pin; ohne einen von den Zeugen bestätigten Kopf, der höchstens 24 Stunden alt ist, verarbeitet der Client nichts (Abschnitt 10).
+Alle Befehle von `gomailctl` außer `inspect` brauchen `--data <datenverzeichnis>` und `--pin <pin>` (älterer Name `--platform`), optional `--dir <client>` (Standard `<UserConfigDir>/gomailctl`, 0.3). Der Benutzer ist Mitglied der Gruppe `gomail` und ein anderer Betriebssystembenutzer als der Server (1.4). Die Befehle arbeiten nur neben einem laufenden Server, dessen Sperre `locks/server` auf diesem Rechner wirkt (Testsperre, 9.1); ohne ihn verweigern sie mit „Testsperre“. Jeder Befehl öffnet das Transparenzlog selbst mit dem Pin; ohne einen von den Zeugen bestätigten Kopf, der höchstens 24 Stunden alt ist, verarbeitet der Client nichts (Abschnitt 10).
 
 Die Passphrase des Schlüsselspeichers kommt aus `GOMAILCTL_PASSPHRASE`, aus `--passphrase-file <datei>` oder wird auf der Standardeingabe gelesen (höchstens 4096 Byte). Vom Terminal gelesen, ist sie sichtbar (offen, R31); für echte Passphrasen die Datei verwenden.
 
@@ -224,8 +253,13 @@ gomailctl keygen --data <datenverzeichnis> --dir <client> --pin <pin>
 - **Ziel:** `--dir` darf fehlen, leer sein oder nur die Datei `lock` enthalten (die legt jeder Befehl an, der das Client-Verzeichnis öffnet, etwa `sync` oder `mailbox create`, auch wenn er mangels registriertem Benutzer abbricht). Ein Verzeichnis mit Schlüsselspeicher wird abgelehnt (`client: this client directory already has a user`; bei `restore` auch eines mit `user.rec` oder `state.json`), eines mit anderen Einträgen ebenso (`store: file exists: the client directory <client> is not empty or in use by another client`); beides endet mit Exit 1. Diese Meldung kommt auch, wenn gleichzeitig ein anderer Befehl dasselbe Verzeichnis belegt; dann einmal wiederholen. Ein symbolischer Link als `--dir` wird verfolgt; Temp-Verzeichnis und Reste liegen dann neben dem Ziel des Links.
 - **Temp-Verzeichnis verschwunden oder ausgetauscht:** Verschwindet das Temp-Verzeichnis während des Laufs, gibt es zwei Fälle. Ist `--dir` dann belegt, kommt die Meldung „not empty or in use by another client“ wie oben. Ist es nicht belegt, endet der Befehl mit dem Fehler des Schritts zum Temp-Verzeichnis, `no such file or directory`; jemand hat es verschoben oder gelöscht. Steht am Namen des Temp-Verzeichnisses (oder nach dem Umbenennen an `--dir`) ein anderes Verzeichnis als das, das der Lauf angelegt hat, endet er mit `client: the temporary directory of the client directory was replaced by another directory; its parent must not be writable by other users`. Vor dem Umbenennen benennt der Befehl dann nichts um und entfernt nichts; nach dem Umbenennen steht an `--dir` möglicherweise ein fremdes Verzeichnis. Die Dateien des Laufs liegen in dem Verzeichnis, das er angelegt hat, wohin auch immer es verschoben wurde. In allen drei Fällen ist Exit 1. Abhilfe bei dieser Meldung: das Elternverzeichnis prüfen (oben); das Verzeichnis am Temp-Namen und an `--dir` ansehen, nicht ungesehen löschen, denn es kann ein fremdes Client-Verzeichnis sein; erst danach wiederholen.
 - **In einem Schritt:** Der Befehl schreibt zuerst in ein Temp-Verzeichnis neben dem Ziel, `.<name>.keygen-<ziffern>` bzw. `.<name>.restore-<ziffern>` (`<name>` ist der letzte Teil von `--dir`, ist `--dir` ein symbolischer Link: des Ziels des Links; Rechte 0700), legt darin als Erstes die leere Markierung `.incomplete` an, entfernt sie unmittelbar vor dem Umbenennen und benennt es dann in `--dir` um. `<client>` ist also entweder nicht da oder vollständig. Ein Fehler vor dem Umbenennen entfernt das Temp-Verzeichnis selbst; ein Abbruch während des Schreibens (ein Signal, nachdem die Wörter abgefragt sind, SIGKILL, Absturz, Stromausfall) lässt es liegen. Es enthält den versiegelten Schlüsselspeicher, das öffentliche `user.rec` und `state.json`, nie den Seed.
-- **Aufräumen:** Der nächste erfolgreiche Lauf derselben Art für dasselbe `--dir` (`keygen` räumt nur `.<name>.keygen-*`, `restore` nur `.<name>.restore-*`) entfernt Reste, die die Markierung `.incomplete` enthalten, dem eigenen Benutzer gehören und zuletzt vor dem Anlegen seines eigenen Temp-Verzeichnisses geändert wurden (Zeit des Dateisystems), und darin nur die Dateien, die ein Lauf dort schreibt; ein Rest mit anderen Einträgen bleibt stehen. Einen Rest der anderen Art oder einen, der nicht mehr gebraucht wird, löscht der Benutzer von Hand.
-- **Rest ohne Markierung:** Bricht der Lauf genau zwischen dem Entfernen von `.incomplete` und dem Umbenennen ab, bleibt ein Temp-Verzeichnis ohne Markierung, das kein Lauf entfernt. Es von Hand löschen: `ls -la <eltern>` zeigt es, `rm -r -- <eltern>/.<name>.keygen-<ziffern>` (bzw. `.restore-`) löscht es; `<eltern>` ist das Verzeichnis über `--dir` (ist `--dir` ein symbolischer Link: über dem Ziel des Links). Nie das Verzeichnis `<client>` selbst löschen.
+- **Aufräumen:** Der nächste erfolgreiche Lauf derselben Art für dasselbe `--dir` (`keygen` räumt nur `.<name>.keygen-*`, `restore` nur `.<name>.restore-*`) entfernt Reste, die die Markierung `.incomplete` enthalten, dem eigenen Benutzer gehören und zuletzt geändert wurden, bevor er in seinem eigenen Temp-Verzeichnis die Markierung anlegte (Zeit des Dateisystems), und darin nur die Dateien, die ein Lauf dort schreibt; ein Rest mit anderen Einträgen bleibt stehen. Einen Rest der anderen Art oder einen, der nicht mehr gebraucht wird, löscht der Benutzer von Hand.
+- **Rest ohne Markierung:** Bricht der Lauf genau zwischen dem Entfernen von `.incomplete` und dem Umbenennen ab, bleibt ein Temp-Verzeichnis ohne Markierung, das kein Lauf entfernt. Es ist dann das vollständige Ergebnis dieses Laufs (versiegelter Schlüsselspeicher, `user.rec`, `state.json`). `<eltern>` ist das Verzeichnis über `--dir` (ist `--dir` ein symbolischer Link: über dem Ziel des Links); `ls -la <eltern>` zeigt den Rest. Vorgehen (kein Test):
+  1. Erst ansehen: `ls -la <eltern>/.<name>.keygen-<ziffern>` (bzw. `.restore-`) muss dem eigenen Benutzer gehören und genau `keystore`, `user.rec` und `state.json` enthalten. Sonst nicht anfassen und das Elternverzeichnis prüfen (0.3): Es kann ein fremdes Verzeichnis sein.
+  2. Ist `--dir` ein symbolischer Link, in diesem Schritt statt `<client>` das Ziel des Links nehmen. Fehlt `<client>` oder enthält es nichts außer der Datei `lock` (`ls -la <client>`), kann der Rest an seinen Platz: ein vorhandenes `<client>` mit `rm -f -- <client>/lock` leeren, dann `rmdir -- <client> && mv -T -- <eltern>/.<name>.keygen-<ziffern> <client>` (`rmdir` entfernt nur ein leeres Verzeichnis; `-T`: nie in ein vorhandenes Verzeichnis hinein); fehlt `<client>`, nur `mv -T -- <eltern>/.<name>.keygen-<ziffern> <client>`. Für einen Rest von `restore` ebenso mit `.<name>.restore-<ziffern>`. Danach weiter wie nach einem erfolgreichen Lauf: nach `keygen` mit 3.4, nach `restore` mit `gomailctl sync` (4.8).
+  3. Sonst, oder wenn der Lauf ohnehin wiederholt wurde: den Rest zuerst außerhalb von `<eltern>` aufbewahren (`mv -- <eltern>/.<name>.keygen-<ziffern> <aufbewahrung>/`) und erst löschen (`rm -r`), wenn ein Befehl mit `<client>` gelingt. Bei `keygen` gilt nur der Seed des Laufs, dessen Ergebnis in `<client>` steht.
+
+  Nie das Verzeichnis `<client>` selbst löschen, wenn es einen Schlüsselspeicher enthält.
 - **Einhängepunkt:** Ist `--dir` selbst ein Einhängepunkt, lässt es sich nicht ersetzen: das Umbenennen scheitert mit `device or resource busy` (EBUSY) oder `invalid cross-device link` (EXDEV), der Befehl endet mit Exit 1 und entfernt sein Temp-Verzeichnis. Abhilfe: ein Unterverzeichnis des Einhängepunkts als `--dir` nehmen.
 
 Nur ein Testbuild (`-tags gomail_test`) beantwortet `keygen` ohne `--shares` mit `GOMAILCTL_TEST_KEYGEN_PIPE=1` über Pipes (Seed auf der Standardausgabe); das nutzen `TestRunbook` und das Zwei-Maschinen-Skript. Der Produktionsbuild kennt den Schalter nicht.
@@ -266,7 +300,7 @@ Ausgabe: die Postfach-ID. Der Client erzeugt Epoche 1 (Beginn jetzt) und den Vor
 
 ### 4.2 Adresse zuordnen
 
-Der Administrator:
+Der Administrator. **Vorher** die Postfach-ID beim Eigentümer des Postfachs auf getrenntem Weg bestätigen lassen (Ausgabe von `gomailctl mailbox create`, 4.1): Eine Zuordnung lässt sich im PoC weder ändern noch entfernen (R39). Mails an diese Adresse gehen dauerhaft an die Mitglieder des genannten Postfachs, auch bei einem Tippfehler in `--mailbox`.
 
 ```
 gomail-server address add <adresse> --mailbox <postfach-id> --data <datenverzeichnis> --admin-key <admin-1.key> --pin <pin>
@@ -344,8 +378,8 @@ gomailctl inspect <datei>
 | Code | Bedeutung |
 |---|---|
 | 0 | Erfolg |
-| 1 | Fehler (auch Testsperre, Log, Prüfung, unbekannter Flag-Name) |
-| 2 | Aufruffehler: unbekannter Befehl oder Schalter, falsche Zahl von Argumenten, ungültige ID, Epoche, Aufteilung oder ungültiger Monat |
+| 1 | Fehler (auch Testsperre, Log, Prüfung, unbekannter Flag-Name, fehlendes `--data` oder `--pin`, ungültige ID bei `list`, `read` und `register --invite`) |
+| 2 | Aufruffehler: unbekannter Befehl oder Schalter, falsche Zahl von Argumenten, ungültige ID bei `mailbox share`, `mailbox revoke`, `search` und `flag`, ungültige Epoche, Aufteilung oder ungültiger Monat |
 | 3 | teilweiser Erfolg (`share`, `device lost`, auch `sync`): was erledigt ist, steht in der Ausgabe, die Meldung nennt die Abhilfe (meist: denselben Befehl später wiederholen) |
 | 130 | Abbruch durch ein Signal, während Seed, Anteil oder getippte Wörter auf dem Bildschirm stehen konnten; der Bildschirm ist gelöscht |
 
@@ -355,7 +389,7 @@ Seed- und Anteilswörter werden von einem Terminal ohne Anzeige gelesen und dana
 
 ### 5.1 Gerät verloren
 
-Auf einem verbliebenen oder neu eingerichteten Gerät des Benutzers (mit Schlüsselspeicher und Passphrase):
+Auf einem verbliebenen oder neu eingerichteten Gerät des Benutzers (mit Schlüsselspeicher und Passphrase). Vorher das Elternverzeichnis des Client-Verzeichnisses prüfen (0.3, D92): `device lost` schreibt Schlüsselspeicher und `user.rec` neu, über den Pfad.
 
 ```
 gomailctl device lost $C
@@ -364,7 +398,7 @@ gomailctl device lost $C
 - Der Client fragt Passphrase und die 24 Seed-Wörter ab, leitet die nächste Generation ab, signiert `user.rec` neu (die bisherige Generation ist widerrufen) und trägt sie ins Log ein. Ausgabe: `Neue Generation <g>; die vorherige ist widerrufen.`
 - **Jeder Aufruf erzeugt eine neue Generation** (D88 (7)). Postfächer, deren Neuausstellung ein früherer Aufruf nicht beendet hat, setzt er nebenbei fort.
 - Eigene Dateien außerhalb des Logs (Verpackungen, `folders.gml`, Vermerke) stellt er mit der neuen Generation neu aus. Die anderen Mitglieder verpacken die gemeinsamen Postfächer beim nächsten `sync` für die neue Generation; bis dahin liest der Benutzer dort nur, was er selbst neu ausstellen konnte.
-- Exit 3: nicht alle Postfächer sind fertig; die Meldung nennt sie. Später `device lost` oder `sync` wiederholen. Ein alleiniges Mitglied ohne geprüfte Ordnerliste bleibt dabei hängen (Abschnitt 8.4, Q18).
+- Exit 3: nicht alle Postfächer sind fertig; die Meldung nennt sie. Später `sync` wiederholen; es setzt die Neuausstellung fort. `device lost` nur erneut ausführen, wenn wieder ein Gerät verloren ist, denn jeder Aufruf erzeugt eine neue Generation. Ein alleiniges Mitglied ohne geprüfte Ordnerliste bleibt dabei hängen (Abschnitt 8.4, Q18); bleibt Exit 3 aus einem anderen Grund dauerhaft, siehe 8.10 (AUDIT R44).
 
 ### 5.2 Wiederherstellen aus den Seed-Wörtern
 
@@ -380,6 +414,8 @@ Für `--dir` gelten dieselben Regeln wie bei `keygen` (3.2, Client-Verzeichnis):
 
 `restore` erzeugt keine neue Generation. War das alte Gerät verloren, danach `device lost` ausführen (5.1).
 
+**Passphrase vergessen:** Ohne Passphrase öffnet sich der Schlüsselspeicher nicht (`keys: key store authentication failed …`). Dann mit `restore` aus den Seed-Wörtern in ein **neues** `--dir` wiederherstellen und das alte Client-Verzeichnis behalten, bis das neue arbeitet.
+
 ### 5.3 Wiederherstellen aus Anteilen
 
 ```
@@ -390,7 +426,7 @@ Wie 5.2, aber mit `<k>` Anteilen aus `keygen --shares` (3.3), je 30 Wörter, ein
 
 ## 6. Ingest-Rotation
 
-Ein neuer Ingest-Schlüssel (und damit ein neuer Log-Schlüssel, Q4) braucht drei Anteilsinhaber auf dem Zeremonierechner. Den Umschaltzeitpunkt `<valid-from>` so wählen, dass Veröffentlichen und Zeugen vorher erledigt sind; die Uhr des Zeremonierechners vorher stellen (Abschnitt 10).
+Ein neuer Ingest-Schlüssel (und damit ein neuer Log-Schlüssel, Q4) braucht `<k>` Anteilsinhaber der aktuellen Aufteilung auf dem Zeremonierechner (bei 3-of-5 drei; nach `reshare` die neue Schwelle, 7.4). Den Umschaltzeitpunkt `<valid-from>` so wählen, dass Veröffentlichen und Zeugen vorher erledigt sind; die Uhr des Zeremonierechners vorher stellen (Abschnitt 10).
 
 1. **Zeremonie offline:**
 
@@ -398,26 +434,26 @@ Ein neuer Ingest-Schlüssel (und damit ein neuer Log-Schlüssel, Q4) braucht dre
    gomail-ceremony ingest-rotate --pin <pin> --gen <n> --out <export-n> --keys <schlüssel> --valid-from <RFC3339>
    ```
 
-   `<n>` ist die höchste vorhandene Ingest-Generation + 1 (aus `platform/ingest-*.cert`). `--valid-from` darf nach der Uhr des Zeremonierechners nicht in der Vergangenheit liegen. Drei Inhaber geben ihren Anteil ein; der Root muss genau die Identität des Pins ergeben. Ergebnis: `<export-n>` mit `ingest-<n>.pub`/`.cert` und `<schlüssel>/ingest-<n>.key` (0600).
+   `<n>` ist die höchste vorhandene Ingest-Generation + 1 (aus `platform/ingest-*.cert`). `--valid-from` darf nach der Uhr des Zeremonierechners nicht in der Vergangenheit liegen. `<k>` Inhaber geben ihren Anteil ein; der Root muss genau die Identität des Pins ergeben. Ergebnis: `<export-n>` mit `ingest-<n>.pub`/`.cert` und `<schlüssel>/ingest-<n>.key` (0600).
 2. **Veröffentlichen vor dem Umschalten** (Server kurz anhalten): `gomail-ceremony publish --from <export-n> --data <datenverzeichnis> --pin <pin>`, dann den Server mit dem bisherigen Schlüssel wieder starten.
 3. **Zeugen:** Prüfschlüssel der neuen Generation nach 1.7 aus `platform/ingest-<n>.pub` bilden und jeden Zeugen mit beiden Log-Schlüsseln neu starten (`--log-key <alt> --log-key <neu>`, gleiches Zustandsverzeichnis).
 4. **Umschalten ab `<valid-from>`:** Ab diesem Zeitpunkt signiert die alte Generation nichts mehr gültig. Ein laufender Server mit dem alten Schlüssel lehnt Einlieferungen mit `451` ab; ein Neustart mit dem alten Schlüssel verweigert (`ingest: the ingest generation is superseded in the log`). Den Server **nach** `<valid-from>` mit `--ingest-key <ingest-<n>.key>` neu starten; vorher verweigert der Server den Start mit dem neuen Schlüssel (Exit 2, `der Ingest-Schlüssel ist noch nicht gültig`), denn eine Mail mit Empfangszeit vor `valid_from` des neuen Zertifikats lehnen die Clients ab. Maßgeblich ist die Uhr des Servers (Abschnitt 10). Absender wiederholen nach `451`.
-5. **Alten Schlüssel vernichten**, sobald der Server mit dem neuen läuft.
+5. **Alten Schlüssel vernichten**, sobald der Server mit dem neuen läuft. Den alten `--log-key` kann der Zeuge danach weglassen, frühestens wenn er einen mit dem neuen Schlüssel signierten Kopf gegengezeichnet hat; sein gespeicherter Kopf bleibt auch ohne den alten Schlüssel lesbar (`internal/witness/witness.go`, Abschnitt „State“; kein Test).
 
-Clients beenden die alte Generation bei `valid_from` des neuen Zertifikats, sobald es im Log steht: Metadaten, die der alte Schlüssel für eine Empfangszeit ab `valid_from` signiert hat, lehnen sie ab (`WARNUNG: Mail <id> wird nicht verarbeitet: Plattformzertifikat oder Annahmeschlüssel nicht gültig.`); ältere Mails bleiben lesbar. Einen Widerruf einer kompromittierten Ingest- oder Admin-Generation und eine Admin-Rotation gibt es nicht (Q8, R18).
+Clients beenden die alte Generation bei `valid_from` des neuen Zertifikats, sobald es im Log steht: Metadaten, die der alte Schlüssel für eine Empfangszeit ab `valid_from` signiert hat, lehnen sie ab (`WARNUNG: Mail <id> wird nicht verarbeitet: Plattformzertifikat oder Annahmeschlüssel nicht gültig.`); ältere Mails bleiben lesbar. Einen Widerruf einer kompromittierten Ingest- oder Admin-Generation und eine Admin-Rotation gibt es im gebauten Stand nicht (Q8, R18); entschieden ist beides mit D93, gebaut wird es mit Auftrag 21.
 
 ## 7. Nachfolge der Plattformidentität
 
 ### 7.1 Regulärer Wechsel
 
-1. **Zeremonie offline** (drei Inhaber, Uhr gestellt; `succeed` zeigt die Uhr, sie gibt `valid_from` der Nachfolge):
+1. **Zeremonie offline** (`<k>` Inhaber der aktuellen Aufteilung, Uhr gestellt; `succeed` zeigt die Uhr, sie gibt `valid_from` der Nachfolge):
 
    ```
    gomail-ceremony succeed --pin <identity-g.pin> --out <export-g+1>
    ```
 
    Origin, Zeugen und Quorum kommen aus dem Pin; `--origin` ist nur eine Kontrolle (der Origin ändert sich nie). Ergebnis: `<export-g+1>` mit `identity-<g+1>.succ` (signiert von Generation g) und der neue Pin `identity-<g+1>.pin`.
-2. **Neuen Pin verteilen** an Server-Host und Clients (Client-Update, getrennter Weg). Clients mit dem alten Pin übernehmen die Nachfolge aus dem Log, sobald ein bestätigter Kopf sie deckt; der neue Pin ist trotzdem zu verteilen.
+2. **Neuen Pin verteilen** an Server-Host, Administrator (`address add` und `log repair` nehmen `--pin`) und Clients (Client-Update, getrennter Weg). Clients mit dem alten Pin übernehmen die Nachfolge aus dem Log, sobald ein bestätigter Kopf sie deckt, aber nur, solange sich Zeugen und Quorum nicht ändern (7.2); der neue Pin ist trotzdem zu verteilen. Mit `--witness` (7.2) den neuen Pin nicht vor `publish` an die Clients verteilen, sondern wie in 7.2 beschrieben.
 3. **Veröffentlichen** bei angehaltenem Server, mit dem **neuen** Pin: `gomail-ceremony publish --from <export-g+1> --data <datenverzeichnis> --pin <identity-g+1.pin>`. Neben einem laufenden Server oder mit dem alten Pin verweigert `publish`.
 4. **Server mit dem neuen Pin starten** (`--pin <identity-g+1.pin>`). Mit dem alten Pin verweigert er den Start, weil `platform/` eine Generation nennt, die der Pin nicht kennt. Ingest- und Admin-Schlüssel bleiben gültig.
 5. Zeugen weiterlaufen lassen (der Log-Schlüssel ändert sich nicht).
@@ -433,6 +469,8 @@ gomail-ceremony publish --from <export-g+1> --data <datenverzeichnis> --pin <ide
 
 Ohne `--replace-witnesses` verweigert `publish`, wenn `platform/witnesses.rec` vom Pin abweicht. Mit dem Schalter ersetzt es die Datei durch Zeugen und Quorum des Pins und nennt altes und neues Quorum. Der Pin ist nicht signiert: die Zeugen, denen der Server danach traut, hängen allein an seiner Echtheit. Die neuen Zeugen starten mit eigenem Zustandsverzeichnis; der Server startet danach ohne Warnung zu `witnesses.rec`.
 
+**Clients mit altem Pin (kein Test):** Ein Client nimmt Zeugen und Quorum nur aus seinem Pin (`internal/client/log.go`); eine Nachfolge ändert sie nicht, und der Server nimmt nach `--replace-witnesses` nur noch Gegensignaturen der Zeugen aus `witnesses.rec` an. Ein Client mit dem **neuen** Pin prüft Köpfe nur gegen die neuen Zeugen (`internal/translog/verifier.go`, Prüfung des Quorums) und arbeitet erst, wenn sie nach `publish --replace-witnesses` gegengezeichnet haben; ein Client mit dem alten Pin stoppt spätestens 24 Stunden nach dem letzten von den alten Zeugen gegengezeichneten Kopf (`translog: no fresh verified tree head`, Abschnitt 10). Deshalb entweder die neue Zeugenmenge so wählen, dass sie die Quoren beider Pins erfüllt (die alten Zeugen bleiben enthalten), bis alle Clients den neuen Pin haben, oder den neuen Pin unmittelbar nach dem ersten von den neuen Zeugen gegengezeichneten Kopf verteilen, innerhalb dieser 24 Stunden (kein Test).
+
 ### 7.3 Kompromittierte Identität
 
 `gomail-ceremony succeed --compromised` ist **gesperrt** (Aufruffehler, Exit 2: „noch nicht verfügbar: Widerruf einer Plattformgeneration ist nicht festgelegt (Q19)“). **Bekannte Grenze:** Weder Pin noch Nachfolge noch Log können eine Identitätsgeneration als kompromittiert kennzeichnen; wer den Schlüssel einer kompromittierten Generation hat, könnte weiter Ingest- und Admin-Zertifikate ausstellen, die `publish`, Log und Clients annehmen. Ein Befehl dafür ist ohne neuen signierten Datensatz und neue Prüfregeln in Client und Log nicht zu bauen (Q19, R17).
@@ -445,7 +483,9 @@ Ohne `--replace-witnesses` verweigert `publish`, wenn `platform/witnesses.rec` v
 gomail-ceremony reshare --pin <pin> --shares <k-of-n>
 ```
 
-Drei Inhaber stellen den Root her, die neuen Anteile werden einzeln gezeigt und geprüft. Die alten Anteile bleiben gültig und lassen sich nicht widerrufen: ihre Inhaber vernichten sie.
+`<k>` Inhaber der bisherigen Aufteilung stellen den Root her, die neuen Anteile werden einzeln gezeigt und geprüft. Die alten Anteile bleiben gültig und lassen sich nicht widerrufen: ihre Inhaber vernichten sie, aber erst, wenn die neuen Inhaber ihren Anteil bestätigt haben.
+
+Sind weniger als `<k>` Inhaber erreichbar, sind Ingest-Rotation, Nachfolge und `reshare` nicht mehr möglich. Deshalb `reshare` rechtzeitig ausführen, wenn Inhaber ausscheiden.
 
 ## 8. Störungen
 
@@ -464,13 +504,18 @@ gomail-server log repair --data <datenverzeichnis> --pin <pin>
 
 *Wann:* wenn der Server wegen eines inkonsistenten Logs nicht startet oder mit 451 ablehnt, und nur bei beendetem Server (der Befehl hält die Serversperre `locks/server` und scheitert neben einem laufenden Server mit „Server-Sperre“).
 
-*Was es tut:* Es baut `log/tree.rec`, die Kacheln und `log/keys/` aus den Einträgen und den signierten Köpfen neu. Die neue Größe m ist die Zahl der Einträge, die ab `entries/0.rec` lückenlos vorhanden und lesbar sind; jeder Kopf in `log/heads/` muss eine gültige Log-Signatur tragen, höchstens m groß sein und zum neu berechneten Baum passen. Es löscht nichts. Liegen Einträge jenseits von m (verwaiste Einträge `log/entries/<i>.rec` mit i ≥ m), meldet es deren Zahl und Bereich, schreibt nichts und endet mit Exit 1; der Betreiber prüft und entfernt sie bewusst und führt `log repair` erneut aus. Bei Erfolg meldet es `0 verwaiste Einträge gemeldet, 0 verworfen`. Danach den Server neu starten.
+*Was es tut:* Es baut `log/tree.rec`, die Kacheln und `log/keys/` aus den Einträgen und den signierten Köpfen neu. Die neue Größe m ist die Zahl der Einträge, die ab `entries/0.rec` lückenlos vorhanden und lesbar sind; jeder Kopf in `log/heads/` muss eine gültige Log-Signatur tragen, höchstens m groß sein und zum neu berechneten Baum passen. Es löscht nichts. Liegen Einträge jenseits von m (verwaiste Einträge `log/entries/<i>.rec` mit i ≥ m), meldet es deren Zahl und Bereich, schreibt nichts und endet mit Exit 1 (`<n> verwaiste Einträge jenseits von <m> gemeldet, 0 verworfen; nichts geschrieben …`); der Betreiber prüft sie und nimmt sie bewusst aus `log/entries/` heraus und führt `log repair` erneut aus. Bei Erfolg meldet es `0 verwaiste Einträge gemeldet, 0 verworfen`. Danach den Server neu starten.
+
+*Verwaiste Einträge prüfen (kein Test):* Meist sind es gültige Einträge von Clients hinter einem einzigen fehlenden oder unlesbaren `log/entries/<m>.rec`, denn m ist die Länge der lückenlosen Folge ab `entries/0.rec`.
+1. `ls -l <datenverzeichnis>/log/entries/<m>.rec` ansehen: fehlt die Datei oder ist sie nicht lesbar?
+2. Enthält eine Sicherung (8.8) diesen Eintrag, nur ihn zurückspielen (Rechte 0660, Gruppe `gomail`) und `log repair` erneut ausführen; dann geht nichts verloren.
+3. Sonst: Vorher in jedem Zustandsverzeichnis eines Zeugen die Größe in `<hex>.head` (zweite Zeile) ablesen; ist sie größer als m, nicht so vorgehen (8.8, 8.9). Andernfalls die gemeldeten Dateien nicht löschen, sondern außerhalb des Datenverzeichnisses aufbewahren (`mkdir -m 700 <aufbewahrung>`, dann `mv <datenverzeichnis>/log/entries/<i>.rec … <aufbewahrung>/`) und `log repair` erneut ausführen. Clients, deren Einträge darunter waren, hängen sie selbst neu an (8.3).
 
 *Was es nicht heilt:* einen fehlenden oder geänderten Eintrag unterhalb eines signierten Kopfes (nur ein Backup von `log/`, das jeden je an einen Zeugen gegebenen Kandidaten umfasst, stellt die Bytes wieder her; sonst bleibt nur eine neue Plattform mit neuem Origin); ein `tree.rec`, das mehr Einträge nennt als vorhanden sind; eine Datei in `log/heads/`, die kein Kopf dieses Logs ist (der Betreiber entfernt sie und repariert erneut). Einen Rückschritt, bei dem auch `entries/<n+1>.rec` entfernt wurde und den kein veröffentlichter Kopf deckt (die Einträge seit dem letzten veröffentlichten Kopf), erkennt ein neu gestarteter Server gar nicht (R12).
 
 ### 8.3 Clients, deren Einträge verloren gingen
 
-Gingen bei einem Rückschritt oder einer Wiederherstellung von `log/` aus einem Backup Einträge verloren, die noch kein veröffentlichter Kopf deckte, bemerken das nur die Clients, die sie geschrieben haben: über ihre offenen Einträge in `state.json`. Findet ein Client seinen Eintrag ersetzt oder nicht mehr vor (`log is inconsistent`), hängt er ihn beim nächsten Befehl selbst erneut an; bis ein neuer bestätigter Kopf ihn deckt, scheitern seine Befehle wie in 3.4 und werden wiederholt (am einfachsten `gomailctl sync`). Meldet er, dass ein anderer Eintrag den Schlüssel belegt (`ErrDuplicate`), bleibt er gestoppt: der Betreiber prüft das Log. Wer nie etwas in den verlorenen Bereich geschrieben hat, merkt nichts. Ein Server, der einen eigenen Eintrag länger als `HeadInterval` nicht deckt, obwohl er neuere Köpfe signiert, hält ihn zurück: der Client stoppt dann mit `own log entry withheld`.
+Gingen bei einem Rückschritt oder einer Wiederherstellung von `log/` aus einem Backup Einträge verloren, die noch kein veröffentlichter Kopf deckte, bemerken das nur die Clients, die sie geschrieben haben: über ihre offenen Einträge in `state.json`. Findet ein Client seinen Eintrag ersetzt oder nicht mehr vor (`log is inconsistent`), hängt er ihn beim nächsten Befehl selbst erneut an; bis ein neuer bestätigter Kopf ihn deckt, scheitern seine Befehle wie in 3.4 und werden wiederholt (am einfachsten `gomailctl sync`). Meldet er, dass ein anderer Eintrag den Schlüssel belegt (`translog: duplicate log entry`), bleibt er gestoppt, bis der Betreiber das Log geprüft und den Widerspruch behoben hat; ein Werkzeug dafür gibt es im PoC nicht (wie 8.7 Schritt 2). Wer nie etwas in den verlorenen Bereich geschrieben hat, merkt nichts. Ein Server, der einen eigenen Eintrag länger als `HeadInterval` nicht deckt, obwohl er neuere Köpfe signiert, hält ihn zurück: der Client stoppt dann mit `own log entry withheld`.
 
 ### 8.4 Alleiniges Mitglied ohne geprüfte Ordnerliste (Q18)
 
@@ -506,6 +551,16 @@ Server, Zeuge und Clients enden mit SIGINT oder SIGTERM. Für Skripte, die Progr
 | `store: file exists: the client directory … is not empty or in use by another client` | `keygen`/`restore` auf ein belegtes `--dir` (3.2, Client-Verzeichnis) |
 | `client: the temporary directory of the client directory was replaced by another directory; its parent must not be writable by other users` | Bei `keygen`/`restore` hat jemand das Temp-Verzeichnis oder `--dir` ausgetauscht. Vor dem Umbenennen hat der Befehl dann nichts umbenannt und nichts entfernt; nach dem Umbenennen steht an `--dir` möglicherweise ein fremdes Verzeichnis (ansehen, nicht ungesehen löschen). Elternverzeichnis prüfen (0.3, D92; 3.2, Client-Verzeichnis) |
 | `translog: log entry violates a validity rule: valid_from does not increase` bei `address add` | Uhr zurückgegangen oder nachgehend (4.2, bekannte Grenze) |
+| `Server-Sperre: store: in use by another process` | `log repair` neben einem laufenden Server (8.2); den Server vorher beenden |
+| `der Pin darf nicht im Datenverzeichnis liegen` | Pin innerhalb des Datenverzeichnisses, auch über einen Link (Exit 2; 0.3) |
+| `der Pin ist ein Entwicklungs-Pin …` | Pin aus `init --dev` an einem Produktionsbuild (Exit 2; 0.2) |
+| `--data und --pin sind erforderlich` | `gomailctl` ohne `--data` oder `--pin` (Exit 1; 3) |
+| `ceremony: unusable key directory: …` (etwa `… has mode 0755, not 0700`) | `--keys` nicht 0700, fremd, ein Link oder mit vorhandenem Schlüssel (1.2) |
+| `ceremony: unusable export directory: … is not empty` | `--out` nicht leer (1.2) |
+| `Seed und Anteile erscheinen nur auf einem Terminal …` | `gomailctl keygen` mit umgeleiteter Ausgabe (3.2) |
+| `loghttp: invalid configuration: head interval at most 1h0m0s, at least the minimum gap` | `--head-interval` außerhalb von 1 min bis 1 h (1.6) |
+| `gomail-witness: Das Log hat zwei verschiedene Köpfe gleicher Größe gezeigt. …` (Exit 3) | Fork: Abschnitt 8.9 |
+| `… not a regular file …` bei jeder Änderung eines Postfachs | FIFO, Gerät oder Verzeichnis an Stelle einer Datei des Postfachs, etwa `epochs/<n>/epoch.rec` (8.10, AUDIT R26) |
 
 ### 8.7 Epoche widerspricht dem Log
 
@@ -525,6 +580,35 @@ Vorgehen des Betreibers:
 2. Den Logeintrag der Epoche finden und prüfen: Er liegt als `log/entries/<i>.rec` vor, das Feld `content` ist die geloggte `epoch.rec` Byte für Byte. Geprüft ist er, wenn er für dieses Postfach und diese Nummer steht und ein von den Zeugen bestätigter Kopf ihn deckt (i kleiner als dessen Größe und der Blatt-Hash des Eintrags per Inklusionsbeweis im Baum dieses Kopfes). **Einen Befehl dafür gibt es im PoC nicht:** Weder findet einer den Eintrag zu Postfach und Nummer, noch zeigt `inspect` Logeinträge (es kennt ihren Typ nicht), noch schreibt einer das Feld `content` heraus. Der Betreiber braucht dafür ein eigenes Werkzeug für das Datensatzformat (Abschnitt 3.6 des Plans).
 3. Die alte Datei als Beleg außerhalb des Datenverzeichnisses aufbewahren. Nach dem Kopf: die Datei `epochs/<n>/epoch.rec` entfernen. Am Kopf: sie durch den geprüften Inhalt ersetzen (atomar, Rechte 0660, Gruppe `gomail`).
 4. Prüfen: Ein Mitglied führt `gomailctl sync` aus; die Warnung darf nicht mehr erscheinen.
+
+### 8.8 Sicherung und Wiederherstellung
+
+Kein Programm sichert etwas, und kein Test fährt diese Regeln nach. Sie folgen aus den Regeln des Zeugen und der Clients (AUDIT R13).
+
+- **Was sichern:**
+  - `admin-<g>.key` und `ingest-<g>.key`: verschlüsselt, auf getrennten Medien, getrennt von den Anteilen. Einen verlorenen Ingest-Schlüssel ersetzt eine Ingest-Rotation (6). Einen verlorenen Admin-Schlüssel ersetzt nichts: Bis zur Admin-Rotation aus D93 (3), die Auftrag 21 baut, gibt es dann keine neue Adresszuordnung mehr.
+  - Pins und Exporte der Zeremonien (öffentlich; der Pin ist aber der Vertrauensanker, 1.3).
+  - Zeugenschlüssel. Ohne ihn hilft nur ein Zeugenwechsel (7.2).
+  - Das Datenverzeichnis, nur bei angehaltenem Server (`log/` und die übrigen Dateien müssen zusammenpassen), mit Rechten und Gruppe. Eine Sicherung von `log/` dient vor allem dazu, einzelne fehlende Einträge zurückzuholen (8.2).
+  - Client-Verzeichnisse sichert jeder Benutzer selbst, nie zusammen mit der Passphrase-Datei (3); fehlt das Client-Verzeichnis, stellt der Seed den Benutzer wieder her (5.2).
+- **`log/` nie als Ganzes aus einer Sicherung zurückspielen, die älter ist als der neueste gegengezeichnete Kopf.** Maßgeblich ist `<hex>.head` im Zustandsverzeichnis des Zeugen; `log/heads/` zeigt die veröffentlichten Köpfe. Der Zeuge verweigert dann jeden kleineren Kopf und jeden größeren, der den gespeicherten nicht konsistent fortsetzt, und hält einen Kopf gleicher Größe mit anderer Wurzel dauerhaft als Fork fest (Exit 3, 8.9; Regeln 5 bis 7 in `internal/witness/witness.go`). Ist nur eine solche Sicherung vorhanden, bleibt eine neue Plattform mit neuem Origin (7.3; AUDIT R13).
+- **Übriges Datenverzeichnis:** Ein Client mit neuerem Zustand erkennt ältere `epoch.rec`, `mailbox.rec`, Metadaten oder `folders.gml` als Zurückspielen und lehnt sie ab (AUDIT Abschnitt 2); Mails seit der Sicherung fehlen. Ein erprobtes Verfahren, ein Datenverzeichnis aus einer Sicherung wieder in Betrieb zu nehmen, gibt es im PoC nicht.
+- **Zustandsverzeichnis des Zeugen:** nie löschen und nie durch ein leeres oder ein älteres aus einer Sicherung ersetzen. Der Zeuge schreibt seinen Zustand, bevor die Gegensignatur ihn verlässt, damit er keinen gegengezeichneten Kopf vergisst (Regel 8 in `internal/witness/witness.go`); ein älterer Zustand macht genau das rückgängig, und ohne Zustand vertraut er dem nächsten Kopf beim ersten Kontakt. Eine Sicherung dient nur als Beleg (8.9).
+
+### 8.9 Zeuge meldet einen Fork (Exit 3)
+
+`gomail-witness` endet mit Exit 3 und „Das Log hat zwei verschiedene Köpfe gleicher Größe gezeigt“. Der Zeuge signiert für diesen Origin nie wieder, auch nicht nach einem Neustart (`<hex>.fork` im Zustandsverzeichnis). Mit einem Zeugen (1 von 1) veröffentlicht der Server keinen Kopf mehr, und nach spätestens 24 Stunden stoppen alle Clients (Abschnitt 10). Die Erkennung prüfen Tests in `internal/witness` und `cmd/gomail-witness`; das folgende Vorgehen ist nicht getestet.
+
+1. Das Zustandsverzeichnis mit `<hex>.fork` und `<hex>.head` unverändert sichern (Beweis). Meldet der Zeuge, dass der Beweis **nicht** gespeichert werden konnte, seine Ausgabe und `log/heads/` sichern und den Zeugen erst nach Klärung der Ursache wieder starten.
+2. Ursache klären: (a) Wurde `log/` zurückgesetzt oder aus einer Sicherung zurückgespielt (8.8), oder wurden Einträge entfernt und danach `log repair` ausgeführt? Dann ist es ein Betreiberfehler. (b) Sonst hat jemand mit dem Ingest-Schlüssel, der zugleich Log-Schlüssel ist (Q4, AUDIT R16), zwei Sichten signiert; der Ingest-Schlüssel gilt dann als kompromittiert. Im gebauten Stand bleibt nur die Ingest-Rotation (Abschnitt 6); einen Widerruf einer Ingest-Generation gibt es noch nicht (Abschnitt 6, D93; 7.3 (Ingest, nach Auftrag 21)).
+3. Zustandsverzeichnis und Beweis nie löschen, um den Zeugen wieder in Gang zu bringen: Ein Zeuge ohne Zustand vertraut dem nächsten Kopf beim ersten Kontakt, und die Erkennung ist wertlos.
+4. Ein geprüftes Verfahren, das Log danach mit einem anderen Zeugen fortzusetzen, gibt es nicht; ein Zeugenwechsel nach 7.2 hilft Clients mit altem Pin nicht. Solange es kein solches Verfahren gibt, bleibt eine neue Plattform mit neuem Origin (7.3, Betriebsregel).
+
+### 8.10 Weitere Grenzen für den Betrieb
+
+- **Nicht reguläre Datei an einer Prüfstelle** (AUDIT R26): Ein Verzeichnis oder eine FIFO an `mailboxes/<postfach-id>/epochs/<n>/epoch.rec` entfernt kein Client, denn sie ist nicht als ungültig beweisbar; jede Änderung am Postfach scheitert, bis der Betreiber sie nach Ansehen (`ls -l`) entfernt. Eine reguläre `epoch.rec` nie so entfernen (8.7).
+- **Größe des Client-Zustands** (AUDIT R43): Im ehrlichen Betrieb reichen die 64 MiB von `state.json` für rund 70 000 Mails je Client-Verzeichnis; danach öffnet der Client nicht mehr. Eine Abhilfe gibt es im PoC nicht.
+- **Exit 3 auf Dauer** (AUDIT R44, R42): `device lost` und `sync` können dauerhaft bei Exit 3 bleiben, wenn sich eine übernommene Datei nicht neu signieren lässt (etwa Metadaten mit der höchsten Version) oder mehr als 4096 ungültige Dateien unter `index/<n>/` liegen. Der Widerruf der alten Generation ist davon nicht betroffen; das Postfach bleibt vorgemerkt.
 
 ## 9. Zwei Maschinen
 
@@ -587,7 +671,7 @@ Ohne `--bin` baut das Skript im lokalen Modus die Programme selbst mit den Testb
 | 1.4 | `gomail-server init` mit `--witnesses`; Server vor `publish` verweigert |
 | 1.5 | `gomail-ceremony publish` |
 | 1.6 | `--require-client-lock` ohne Client verweigert; Server startet; zweiter Server verweigert. Jeder Aufruf, der eine Verweigerung erwartet, hat eine Frist von 30 s; danach wird der Prozess beendet und der Schritt gemeldet |
-| 1.7 | Prüfschlüssel mit den Shell-Zeilen aus 1.7 gebildet; Zeuge |
+| 1.7 | Prüfschlüssel mit den Shell-Zeilen aus 1.7 gebildet (aus `platform/ingest-1.pub` des Datenverzeichnisses, einer Kopie der Datei im Export); Zeuge auf demselben Rechner, ohne Tunnel |
 | 3.1–3.4 | drei Benutzer: Einladung, `keygen` (Pipe des Testbuilds; ohne Schalter verweigert), Registrierung, verbrauchter Code |
 | 4.1–4.6, 4.9 | Postfach, Adresse, Mail, unbekannte Adresse 550, `list` ohne Absender, `read`, `--folder`, `search`, `flag`, `inspect` |
 | 4.7 | `share --from 1` (bob), `share` ab neuer Epoche (carol), `revoke`: carol liest danach nicht; mit `inspect` eine neue Epoche mit `reason` 3, Beginn während des Entzugs, ohne carol, im Log und von einem Kopf gedeckt; die Mail nach dem Entzug liegt in ihr |
@@ -599,4 +683,26 @@ Ohne `--bin` baut das Skript im lokalen Modus die Programme selbst mit den Testb
 | 7.1 | `succeed`, `publish` neben dem Server verweigert, mit neuem Pin; Server mit altem Pin verweigert, mit neuem startet; Clients mit neuem und mit altem Pin |
 | 8.2 | `log repair` neben dem Server verweigert, danach erfolgreich; Client ohne Server verweigert |
 
-Nicht in `TestRunbook`: Exit 3 und 130 und die Terminalregeln (`cmd/gomailctl`, `cmd/gomail-ceremony`, Pseudoterminal-Tests), `--replace-witnesses` (`TestSuccessionEndToEnd`), Störungen 8.1 und 8.3 (`internal/translog`, `internal/client`), die Warnungen aus 8.7 (`TestLogDuplicateNeverReplaced`, `TestLogContradictsAtHead`), die Regeln für das Client-Verzeichnis aus 3.2 (`TestKeygenAtomic`, `TestKeygenExistingDir`, `TestRestoreAtomic`, `TestClientDirLeftovers`, `TestLeftoverNeedsMarker`, `TestRunLosesTempDir` in `internal/client`), die bekannte Grenze aus 4.2 (kein Test), der Zwei-Maschinen-Test (`TestTwoHostScript`).
+Nicht in `TestRunbook` (in Klammern, wo es sonst geprüft ist; „kein Test“, wo nirgends):
+
+- 0.3 und 9.1: die Voraussetzung D92 für das Elternverzeichnis (kein Test, vom Programm nicht geprüft).
+- 1.2: die Zeremonie am echten Terminal mit ihren Schaltern und der Anzeige der Uhr (Pseudoterminal-Tests in `cmd/gomail-ceremony`); die Verweigerungen von `--keys` und `--out` (Tests in `internal/ceremony`); der Weg der Schlüssel vom Live-System (kein Test).
+- 1.4: die Verweigerungen von `init` (nicht leer, Link, FIFO, Entwicklungs-Pin, Gruppe, Rechte; `cmd/gomail-server/init15h_test.go`, `internal/e2e/init15h_test.go`, `TestInitProduction`); das Anlegen von Gruppe und Benutzern (kein Test).
+- 1.6: Loopback-Prüfung und `--isolated-test-network` (`TestCheckListen`), Pin im Datenverzeichnis und Entwicklungs-Pin (Tests in `cmd/gomail-server`, etwa `TestDevPinRefusedInProduction`), Ingest-Schlüssel noch nicht gültig (`TestServeNotYetValid`), Rechte des Datenverzeichnisses (`TestStartDataDirRights`), zurückgesetzter Baum (`TestStartRolledBackTree`), `--head-interval` (`cmd/gomail-server/log_test.go`), `--hostname` (kein Test; geprüft ist nur `smtpd.Config.Hostname`), 452 und 451 (`TestDiskFull452`).
+- 1.7: Fork und Exit 3 des Zeugen, `--interval` unter 1 s (`internal/witness`, `cmd/gomail-witness`); der SSH-Tunnel zu einem Zeugen auf einer anderen Maschine (kein Test, AUDIT R47); die Regeln für `--state` und `--key` (`internal/witness`).
+- 2: alle Terminalregeln, Exit 130 (Pseudoterminal-, Signal-, stderr- und Stillstandstests in `cmd/gomail-ceremony`).
+- 3.2: `keygen` am echten Terminal (Pseudoterminal-Tests in `cmd/gomailctl`); die Regeln für das Client-Verzeichnis (`TestKeygenAtomic`, `TestKeygenExistingDir`, `TestRestoreAtomic`, `TestClientDirLeftovers`, `TestLeftoverNeedsMarker`, `TestRunLosesTempDir`, `TestTempDirMovedAway`, `TestTempDirSwappedForClientDir`, `TestTempDirSwappedNotRemoved`, `TestTempDirSwappedBeforeRename`, `TestOpenTempDirRefuses` in `internal/client`); das Vorgehen bei einem Rest ohne Markierung (kein Test).
+- 3.3: `keygen --shares` (Pseudoterminal-Tests in `cmd/gomailctl`).
+- 4.2: Umordnen einer Adresse mit Exit 2; die bekannte Grenze der Uhr (kein Test).
+- 4.3: die Kommandozeile mit `curl` (kein Test); 451.
+- 4.7: `share --to` (`cmd/gomailctl/cmds_test.go`, Tests in `internal/client`) und der Entzug eines solchen Lesers.
+- 4.8: der Weg über `epoch-fallback.rec` (`TestSupplyEmptyAtMonthChange`).
+- 4.10, 5.1: Exit 3 und 130; Q18 (`internal/client`).
+- 5.2: die Warnung „Noch kein bestätigter Zustand“ (`cmd/gomailctl/cmds_test.go:597`, `internal/client/logrework_test.go:664`).
+- 6: `ingest-rotate` über die Kommandozeile (die Zeremonie läuft über die Testseams); Schritt 2 (Neustart mit dem alten Schlüssel zwischen `publish` und `valid_from`); die Reihenfolge in Schritt 3; in Schritt 4 der laufende alte Server mit 451 nach `valid_from` (der Test nimmt einen Ingest im Prozess) und der neue Schlüssel vor `valid_from` (`TestServeNotYetValid`); Schritt 5.
+- 7.1: `succeed` über die Kommandozeile mit Anzeige der Uhr; `publish` mit altem Pin (`TestSuccessionEndToEnd`); Schritt 5 (der Test startet den Zeugen neu).
+- 7.2: `--replace-witnesses` (`TestSuccessionEndToEnd`); Clients mit altem oder neuem Pin nach einem Zeugenwechsel und die Reihenfolge der Verteilung (kein Test).
+- 7.4: `reshare` (`cmd/gomail-ceremony`, `internal/ceremony/api_test.go`).
+- 8.1 und 8.3 (`internal/translog`, `internal/client`); 8.2 mit verwaisten Einträgen (`TestLogRepairOrphans`) und das Vorgehen dazu (kein Test); 8.4 (Q18, `internal/client`); 8.5 (kein Test); von 8.6 die meisten Zeilen (geprüft sind nur die Meldungen, die die Schritte oben auslösen); die Warnungen aus 8.7 (`TestLogDuplicateNeverReplaced`, `TestLogContradictsAtHead`); 8.8, 8.9 und 8.10 (kein Test für das Vorgehen).
+- 9: der Zwei-Maschinen-Test (`TestTwoHostScript`).
+- 10: 24-Stunden-Regel, 23-Stunden-Regel für offene Einträge, fünf Minuten Abweichung (Tests in `internal/translog`, `internal/witness` und `internal/client`, etwa `TestLogStaleStops`).

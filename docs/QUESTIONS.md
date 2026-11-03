@@ -135,7 +135,7 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
 
 ## Q18 Alleiniges Mitglied nach einem Widerruf ohne geprüfte `folders.gml`
 
-- Haltepunkt 1 (Prüfregel des Clients, Spezifikation schweigt); Fund mittel des Spezifikationsprüfers von 06h (reproduziert: `TestVerifyStuckSoleMemberRemedy`).
+- Haltepunkt 1 (Prüfregel des Clients, Spezifikation schweigt); Fund mittel des Spezifikationsprüfers von 06h (reproduziert: `TestVerifyStuckSoleMemberRemedy`, Prüfertest, nicht im Repository; im Repository belegt `TestVerifyStuckSoleMember` in `internal/client/translog14b_test.go` den Zustand).
 - Stelle: 2.2 Punkt 4 (Dateien, die kein Client vor dem Widerruf geprüft hat, werden nicht übernommen), 2.4 Grund `generation-revoked`, Abschnitt 4 (jede Epoche trägt die aktuelle Ordnerliste), K2 Regel 1.
 - Problem: Ist `folders.gml` der neuesten zugänglichen Epoche von der eigenen, inzwischen widerrufenen Generation signiert und fehlt der lokale Prüfvermerk (Gerät verloren, neues Gerät per `restore`, oder `mailbox.rec` fehlte während `device lost`), kann ein **alleiniges** Benutzer-Mitglied die Epoche `generation-revoked` nicht anlegen: `createEpoch` braucht die Ordnerliste, die darf nicht übernommen werden, kein anderes Mitglied kann helfen. `Sync` und `device lost` enden mit `ErrPartial` und der festen Abhilfe „device lost erneut ausführen“, die hier nie greift; `List`, `Rename`, `SetFolders` scheitern, nur `Read` einzelner Mails geht.
 - Gebaut (strengste Lesart): keine Übernahme; der Zustand ist ehrlich, aber ohne Ausweg. Auftrag 14 macht mindestens die Ursache korrekt („keine geprüfte Ordnerliste; derzeit keine Abhilfe“).
@@ -221,4 +221,4 @@ Jede Frage nennt den Haltepunkt nach Abschnitt 4 des Orchestrierungsauftrags, di
   - `scripts/bench.sh` beschreibt den alten Ablauf;
   - zwei Testlücken.
 - **Antwort des Auftraggebers (03.11., 00:24 Uhr):** „Deine Entscheidungen.“ Der Orchestrator wählt **(A) Vereinfachen**: Auftrag 09g auf dem Stand von 09f, siehe `docs/tasks/09g-client-simplify.md`. Abweichung von Regel 6 (fünfte Runde) auf ausdrücklichen Auftrag; Begründung in DECISIONS beim Merge.
-- Stand: erledigt mit 09g (D91). Beide Prüfungen von 09g fanden nichts über niedrig, der Volllauf auf 7ffed5c ist grün (67 Schritte). Das Wachstum ohne Schlüssel bei Schreibzugriff ist als bekannte Grenze angenommen (D91, R27); Variante (B) bleibt die Abhilfe nach M1.
+- Stand: erledigt mit 09g (D91). Beide Prüfungen von 09g fanden nichts über niedrig, der Volllauf auf 7ffed5c ist grün (67 Schritte; Worktree-Commit, Code gleich 3e06f23 im Arbeitsbranch). Das Wachstum ohne Schlüssel bei Schreibzugriff ist als bekannte Grenze angenommen (D91, R27); Variante (B) bleibt die Abhilfe nach M1.
