@@ -2,6 +2,8 @@
 
 Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzwischen erledigt; Auftrag 20 ordnet sie ein.
 
+Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder Punkt mit genau einer Klasse und Beleg, dazu die Vorschläge für DECISIONS, SPEC-ISSUES und RUNBOOK. Neue Hinweise kommen unten dazu und werden dort nachgetragen.
+
 - Task 14 (Client-Log): `store.ReplaceEpoch` erhält die Funktion `unloggable(old) bool` = `Append(old)` → `errors.Is(err, translog.ErrOrder)`; ErrPrerequisite/ErrUnloggedSigner → nicht ersetzen (07-Angreifer, TestV_ReplaceLoggable). Aufrufer darf `Last` erst nach erfolgreichem Refresh persistieren (07b fixt die Reihenfolge). TODO(phase3-translog) in 06c: ob ein Log-Fehler „nie gültig“ beweist → mit ErrOrder ja.
 - Task 14/15: Options.Now wird in Verifier.Now kopiert (07b Fund 4).
 - Task 15: Testsperre in den Programmen (TODO(task-15)), Rollensperren verdrahten, `--insecure-no-log` entfernen.
@@ -176,3 +178,7 @@ Rohfassung, gesichert nach einem Neustart des Containers. Viele Punkte sind inzw
 - Wachstum je Epoche in `internal/client/index.go` ausdrücklich nennen (Formel aus D91: etwa 270 B · D · k je Sync, ab (D − 1) · k ≥ 16; ein Gerät 300 B · k).
 - AUDIT: R27, 6.5 und 8.1 Punkt 3 auf den Stand nach D91 bringen (Übernahme für Metadaten und Segmente, `internal/terms`, Wachstumsformel und Messwerte); Zeile 5 und Kopf aktualisieren.
 - D79-Nachtrag: SHA-256 der Metadatendatei im Merkzettel und `from:`/`to:` aus gekürzten Werten prüfen, ob 09b sie erledigt hat, sonst in AUDIT nennen.
+
+## Aus der Prüfung von 20c (für 20 und später)
+- D91 (5) und Kommentar an `TestAttack09fForcedMergesDevices` angleichen: Der Code fasst zusammen bei `counted − len(result) ≥ MergeThreshold − 1` und `counted ≥ 16`; das ergibt erzwungene Zusammenfassungen ab (D − 1) · k ≥ 15, nicht 16 (Hinweis, kein Fund).
+- Vorschläge D-1 bis D-4, S-1 bis S-9, R-1 bis R-3 und P-1, P-2 stehen in `docs/tasks/20-triage.md`; der Orchestrator übernimmt sie (P-2 als kleiner Produktivcode-Auftrag nach 20b).

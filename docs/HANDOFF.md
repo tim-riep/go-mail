@@ -1,8 +1,31 @@
-# Übergabe nach Phase 1
+# Übergabe nach M1 (Entwurf)
 
-Stand: Phase 1 ist umgesetzt: der erste durchgehende Ablauf mit Registrierung, Postfach, Empfang per SMTP und Lesen, alles verschlüsselt und geprüft, beschränkt auf Postfächer mit genau einem Mitglied (Meilensteine 2 und 3 aus Spezifikation 11). Grundlage ist `docs/PLAN.md` in Version 1.2 (Abschnitt 14 listet die Änderungen gegenüber 1.1). Dieses Dokument richtet sich an Phase 2 und ist die verbindliche Beschreibung der Pakete, ihrer Invarianten und Grenzen. Entscheidungen stehen in `docs/DECISIONS.md` (Phase 1 ab D47), offene Punkte der Spezifikation in `docs/SPEC-ISSUES.md`, der Ablauf von Hand in `docs/RUNBOOK.md`.
+Stand: 03.11.2026, Entwurf aus Auftrag 20c. Code bei Commit 3e06f23 auf dem Arbeitsbranch `claude/quirky-keller-hjsl5i` (alle Pakete der Wellen 1 bis 4, 13e/13f, 15i bis 15n, 19/19b, 20a und die Linie 09b bis 09g zusammengeführt). Grundlage ist `docs/PLAN.md` in Version 1.4. Auftrag 20b (kleine Nacharbeiten im Produktivcode) läuft parallel und ist nicht enthalten. Messungen, Fuzzing, Abdeckung und die Abnahme nach 10.2 laufen noch; ihre Stellen tragen den Platzhalter „wird mit Auftrag 20 eingetragen“.
 
-**Zwei Entscheidungen stehen aus** (SPEC-ISSUES S11 und S13, Vorschläge dort): die Normalisierung eingegebener Seed-Wörter und die Gültigkeit von Signaturen widerrufener Generationen. Umgesetzt ist jeweils die strengste Lesart, markiert mit `TODO(S11)` und `TODO(S13)`; kein Dateiformat hängt davon ab.
+Dieses Dokument beschreibt Pakete, Invarianten, Build und Grenzen für die nächste Phase. Es verweist, statt zu wiederholen:
+- Entscheidungen: `docs/DECISIONS.md` (Phase 1 ab D47, Phase 2 und M1 ab D63, zuletzt D91).
+- Offene Punkte der Spezifikation: `docs/SPEC-ISSUES.md` (bis S94); Fragen an den Auftraggeber: `docs/QUESTIONS.md` (Q1 bis Q22).
+- Bekannte Grenzen und Restrisiken: `docs/AUDIT.md` Abschnitt 5 (R1 bis R44); Prüfpfade: AUDIT Abschnitt 6.
+- Betrieb von Hand: `docs/RUNBOOK.md`, nachgefahren von `TestRunbook`.
+- Entwurf des Transparenzlogs: `internal/translog/doc.go` (verbindlich).
+- Verlauf der Aufträge und Prüfungen: `docs/ORCHESTRATION.md` Abschnitt 4. Einordnung der gesammelten Hinweise: `docs/tasks/20-triage.md`.
+
+Die Abschnitte zu `rec`, `keys`, `shamir`, `envelope` und `smtpd` sind seit Phase 1 kaum verändert und stehen weiter hier, mit Nachträgen. Die übrigen Pakete beschreibt dieser Stand neu. Tabellen und Prüfberichte aus Phase 0 und Phase 1 stehen am Ende unter „Verlauf“.
+
+## Stand je M1-Kriterium
+
+Die Kriterien stehen in `docs/ORCHESTRATION.md` Abschnitt 1, „M1-Kriterien A–F“. Als erfüllt gilt hier nur, was im Branch gebaut und durch Tests oder Dokumente belegt ist.
+
+| Kriterium | Stand | Was fehlt |
+|---|---|---|
+| **A** Phase 2 vollständig (2.2, 2.4, 2.5, 6, 7, 9) | Gebaut: Generationen mit `device lost`, `restore`, `keygen --shares`; Prüfvermerke und Übernahme nach 2.2 Punkt 4 für alle Dateiarten außerhalb des Logs (D84, D91). Epochen mit Gründen, `discards`, sofortige und geplante Epochen, Vorrat (D63, D68, D71). `mailbox share`, `revoke`, Leser vergangener Zeiträume (D75, D86). Ordnerliste je Epoche; Flags mit Versionsregel (K4, D79); Index, Suche, Zusammenfassen (D79, D91). Sperren und Rechte nach 9.1 (D70, D81); Befehle nach 9.2 (D86, D87). | Befehle, die an offenen Fragen hängen: `mailbox rotate` (Q7), `--server-search` (Q3, nicht M1), `--delegate` (Q6; Art 3 nur in der API), `recovery …` (Q1; nur interne API). Q18: Ein alleiniges Mitglied ohne geprüfte Ordnerliste hat keinen Ausweg (AUDIT R21). |
+| **B** Transparenzlog, Zeuge, Vermerke, 24 h, kein `--insecure-no-log` | Gebaut: Log auf `tlog` (D78), Serverseite mit `loghttp` (D80), Prüfungen in `ingest` und Server (D81), Client am Log mit Vermerken und 24-Stunden-Regel (D88), `gomail-witness` (D74). `--insecure-no-log` ist überall ein Nutzungsfehler. Alle `TODO(phase3-translog)` im Produktivcode sind aufgelöst. | Im Produktivcode nichts. Die 11 Marken `TODO(phase3-translog)` im Testdouble `internal/translog/translogtest` (`Unverified`, nur für `testenv`) sind veraltet und sollten umbenannt werden. Mehrere Zeugen im Betrieb folgen erst vor echten Mails (2.7, AUDIT 1.3). |
+| **C** Zeremonie `init --shares 3-of-5`, `ingest-rotate`, `reshare`, Probe; `--dev` nur für Tests | Gebaut (D82, D85 mit Nachträgen): dazu `succeed` und `publish` über das Log; `--dev` nur im Build mit `gomail_dev`; Terminalregeln mit Abbruchpfad. | Kompromissfall: `succeed --compromised` ist gesperrt (Q19, Haltepunkt 2; AUDIT R17). Der Pflichttest aus 10.1 „Signatur einer kompromittierten … Identitätsgeneration“ liegt übersprungen vor (`TestVerifyCompromisedIdentityStillIssues`). |
+| **D** `docs/MEASUREMENTS.md`, reproduzierbar | Messumgebung gebaut: `internal/bench`, `scripts/bench.sh` (D77, 12d). | `docs/MEASUREMENTS.md` fehlt; Auftrag 17 misst auf ruhiger Maschine. Wird mit Auftrag 20 eingetragen. |
+| **E** Abnahme nach 10.2 | Volllauf des Orchestrators auf dem Stand der Linie 09g grün: gofmt, vet, `-race` mit und ohne Tags, 386, `internal/e2e` (ORCHESTRATION, Verlauf 09g). Zwei-Maschinen-Skript im lokalen Modus durchgelaufen (D83). | Zuordnung der Pflichttests aus 10.1, Läufe mit Protokoll, Fuzzing je Ziel 10 Minuten, Abdeckung je Paket: wird mit Auftrag 20 eingetragen. Zwei Maschinen über NFSv4: **bedingt**, weil es hier weder NFS noch eine zweite Maschine gibt (D83, AUDIT R36). Ob der übersprungene Pflichttest (Q19) Kriterium E berührt, entscheidet Auftrag 20. |
+| **F** HANDOFF, AUDIT, RUNBOOK mit `TestRunbook` | `docs/AUDIT.md` auf dem Stand nach D91 (Aufträge 18, 18b, 18c, 20c). `docs/RUNBOOK.md` mit `TestRunbook` (Zeremonie 3 aus 5, Zeuge, drei Benutzer; D89). Dieses Dokument als Entwurf. | Abschluss dieses Dokuments mit den Zahlen aus Auftrag 20. Redaktionelle Vorschläge für das RUNBOOK in `docs/tasks/20-triage.md` (R-1 bis R-3). |
+
+Nicht in M1 (ORCHESTRATION Abschnitt 1): Löschen von Epochen, Volltextsuche, QR, TLS und Missbrauchsschutz, Padmé, Hardware-Schlüssel, IMAP, Oberflächen über die Kommandozeile hinaus.
 
 ## Überblick
 
@@ -10,33 +33,76 @@ Stand: Phase 1 ist umgesetzt: der erste durchgehende Ablauf mit Registrierung, P
 internal/rec       kanonische Kodierung (3.6), strikter Decoder, NFC-Prüfung
 internal/keys      Seed, BIP-39, HKDF (2.2, 2.3), Zertifikate, Signaturdomänen (3.7), Schlüsselspeicher
 internal/shamir    Aufteilung über GF(256), Anteile als 30 Wörter (2.3)
-internal/envelope  Dateiformat .gml (3): HPKE-Verpackung, STREAM-Inhalt, Signatur
-internal/store     Datenverzeichnis (4): atomares Schreiben, Sperren, alle Datensätze von Phase 1
-internal/translog  Schnittstelle zum Transparenzlog (2.7); einzige Umsetzung Unverified
+internal/envelope  Dateiformat .gml (3): HPKE-Verpackung, STREAM-Inhalt, Signatur, Kopffeld 8
+internal/words     Eingabe von Seed- und Anteilswörtern (2.2): NFKD, Kleinschreibung, Grenzen
+internal/store     Datenverzeichnis (4): atomares Schreiben, Sperren und Rechte (9.1), alle Datensätze
+internal/translog  Transparenzlog (2.7) auf tlog: Einträge, Köpfe, Beweise, Verifier, Audit-Index
+internal/loghttp   HTTP-Seite des Logs zwischen Server und Zeuge
+internal/witness   Zeuge nach 2.7: Regeln, Zustand, Fork-Nachweis
 internal/smtpd     SMTP-Zustandsmaschine mit den Grenzen aus 5.1
-internal/ingest    Annahme, Spool-Transaktion, Metadaten, Marker, Vorverarbeitung (5.2 bis 5.4)
-internal/client    Schlüsselerzeugung, Registrierung, Postfach, Vorrat, Lesepfade mit allen Prüfungen (2.4, 7)
-internal/ceremony  Entwicklungszeremonie (2.3, nur --dev)
-internal/testenv   Plattform, Benutzer und Postfächer für Tests (nur Tests)
-internal/e2e       Ende-zu-Ende-Tests und Lauf der Programme nach RUNBOOK
-cmd/gomail-server  serve, invite create, address add
-cmd/gomailctl      keygen, register, mailbox create, sync, list, read, inspect
-cmd/gomail-ceremony init --dev
+internal/terms     Begriffsregeln aus 5.4 und D55, einmal für Server und Client
+internal/ingest    Annahme, Spool-Transaktion, Metadaten, Begriffslisten, Logprüfungen (5.2 bis 5.4)
+internal/client    Benutzer, Postfächer, Generationen, Lesepfade, Index und Suche, Flags, Log (2, 6, 7)
+internal/ceremony  Schlüsselzeremonie und Veröffentlichung (2.3)
+internal/bench     Messungen (nur Tests und Benchmarks)
+internal/testenv   Plattform, Benutzer und Postfächer für Tests (nur mit -tags gomail_dev)
+internal/e2e       Ende-zu-Ende-Tests, Programme nach RUNBOOK, Zwei-Maschinen-Skript
+cmd/gomail-server  init, serve, invite create, address add, log repair
+cmd/gomailctl      keygen, register, restore, mailbox create/share/revoke, device lost, sync,
+                   list, read, search, flag, inspect
+cmd/gomail-ceremony init, ingest-rotate, reshare, succeed, publish
+cmd/gomail-witness keygen, serve
+scripts/           bench.sh (Messungen), two-host-test.sh (Test nach 9.1)
 ```
 
-Abhängigkeiten: `envelope -> keys -> rec`, `shamir -> keys`, `store -> envelope, keys, rec`, `translog -> store`, `ingest -> smtpd, store, envelope, translog`, `client -> store, envelope, keys, translog`, `ceremony -> store, keys, translog`. `smtpd` hängt von keinem Paket des Projekts ab. Nur Standardbibliothek, `golang.org/x/crypto/argon2` und `golang.org/x/text/unicode/norm` (v0.43.0); `x/mod` kommt erst mit dem Log. Go 1.26 (getestet mit 1.26.10).
+PLAN 9.3 nennt ein Paket `search`. Die Suche liegt in `internal/client` (`Search` in `search.go`, `Index` in `index.go`), weil sie die Schlüssel und Prüfregeln des Clients braucht; die Begriffsregeln liegen in `internal/terms`.
 
-Prüfen:
+Abhängigkeiten im Produktivcode: `envelope -> keys -> rec`; `shamir -> keys`; `words -> keys`; `store -> envelope, keys, rec`; `translog -> keys, rec, store`; `witness -> translog, store, keys, rec`; `loghttp -> translog, witness`; `terms -> store`; `ingest -> smtpd, store, envelope, keys, terms, translog`; `client -> store, envelope, keys, rec, shamir, terms, translog, words`; `ceremony -> keys, shamir, store, translog, witness, words`. `smtpd` hängt von keinem Paket des Projekts ab. Nur Standardbibliothek und `golang.org/x/crypto` v0.58.0, `golang.org/x/mod` v0.42.0 (`sumdb/tlog`, `sumdb/note`), `golang.org/x/text` v0.43.0 (`go.mod`); `x/sys` nur indirekt. Go 1.26, getestet mit 1.26.10 (`GOTOOLCHAIN=go1.26.10`).
+
+## Bauen und testen
+
+### Build-Tags
+
+- **`gomail_dev`:** Entwicklungszeremonie `gomail-ceremony init --dev` und `ceremony.InitDev`, Entwicklungs-Pins. Ohne das Tag enthält kein Programm den Pfad, der den Plattform-Root in eine Datei schreibt (D85 (3)). Produktionsbinaries lehnen einen Entwicklungs-Pin ab (D87 (3), D88 (1)).
+- **`gomail_test`:** Testschalter `GOMAIL_TEST_MIN_FREE` (Grenze für freien Platz statt 10 %), `GOMAIL_TEST_DEV_IDENTITY` (Entwicklungs-Pin im Client), `GOMAIL_TEST_HEAD_GAP` (Abstand der Köpfe) und `GOMAILCTL_TEST_KEYGEN_PIPE` (`keygen` ohne Terminal, für Skripte). Das Produktionsbinary enthält keinen davon (`TestNoTestSwitchInProduction`, AUDIT R35).
+- **`ceremony_notty`:** Tests der Zeremonie ohne Terminal (D82 (5)).
+- Die Tests in `internal/client`, `internal/ingest`, `internal/bench`, `cmd/gomailctl` und `cmd/gomail-server` und die `testenv`-Tests in `internal/e2e` brauchen eine Entwicklungsplattform. Sie sind nur mit `-tags gomail_dev,gomail_test` aussagekräftig; ohne Tags überspringen sie sich (D85 (3), D88 (9) mit Nachtrag). Die Belege für den Produktionsbuild laufen nur ohne Tags. Kein Lauf allein deckt alles; welcher Lauf was trägt, steht in AUDIT 6.1.
+- `internal/e2e` baut seine Programme selbst, in der Regel mit `gomail_dev,gomail_test`; `TestRunbook` und `TestInitProduction` nur mit `gomail_test` (D89 (2)). Für seine Server setzt es `GOMAIL_TEST_MIN_FREE` selbst. Andere Läufe auf einer Platte mit weniger als 10 % frei brauchen `GOMAIL_TEST_MIN_FREE=0.000001` (nur im Testbuild wirksam).
+
+### Befehle
 
 ```
+export GOTOOLCHAIN=go1.26.10
+gofmt -l .
 go vet ./...
-go test -race ./...
-GOARCH=386 go test ./...             # -race gibt es auf 386 nicht
-go test -cover ./internal/...
-go test -run '^$' -fuzz '^FuzzDecodeRecords$' -fuzztime 5m ./internal/store/   # je Fuzz-Ziel
+go vet -tags gomail_dev,gomail_test ./...
+GOOS=openbsd go vet ./...                                           # ebenso freebsd, netbsd, dragonfly, darwin
+go test ./...                                                       # Lauf 1: Produktionsbuild
+go test -tags gomail_dev ./cmd/gomailctl                            # Lauf 2: TestKeygenPipeProduction
+go test -race -p 2 -tags gomail_dev,gomail_test -timeout 60m ./...  # Lauf 3
+GOARCH=386 go test -p 2 -tags gomail_dev,gomail_test -timeout 60m ./...
+go test -run '^$' -fuzz '^FuzzX$' -fuzztime 10m ./internal/<paket>  # je Fuzz-Ziel
+scripts/two-host-test.sh --local …                                 # Test nach 9.1 ohne zweite Maschine (RUNBOOK 9)
+scripts/bench.sh                                                    # Messungen (D77)
 ```
 
-Testvektoren liegen unter `internal/<paket>/testdata/`, die Generatoren unter `internal/<paket>/testdata/gen/` (`go run ./testdata/gen` im Paketverzeichnis). Die `.gml`-Dateien aus Phase 0 (Rahmen ohne Typbytes) liegen unter `internal/envelope/testdata/phase0/` und müssen abgelehnt werden.
+`-race` gibt es auf 386 nicht. Der Standard von `go test -timeout` ist 10 Minuten; `internal/client` braucht länger, daher `-timeout 60m` (mindestens 40 Minuten).
+
+### Laufzeiten (Richtwerte, 4 Kerne)
+
+| Lauf | Dauer | Quelle |
+|---|---|---|
+| `internal/client` mit `-race` | 25 bis 35 Minuten (1489 s nach 14, 2003 s nach 09e) | `docs/tasks/20-notes.md` |
+| `internal/client` unter 386 | etwa 15 bis 30 Minuten (868 s nach 14, 1733 s nach 09e) | `docs/tasks/20-notes.md` |
+| `cmd/gomail-ceremony` mit `-race` | knapp unter 10 Minuten; `TestPTYSignalSalvo` allein 250 bis 470 s | `docs/tasks/20-notes.md` (15n) |
+| `TestRunbook` | etwa 35 s | D89 |
+| Volllauf aller Pakete | wird mit Auftrag 20 eingetragen | – |
+
+Unter Last sind `TestPTYQuitInCommit` (einmal 61 s) und `TestTwoHostScript` (einmal gescheitert) als Ausreißer aufgefallen; Auftrag 20 beobachtet sie (`docs/tasks/20-triage.md`, Nr. 138 und 152).
+
+### Testvektoren
+
+Testvektoren liegen unter `internal/<paket>/testdata/`, die Generatoren unter `internal/<paket>/testdata/gen/` (`go run ./testdata/gen` im Paketverzeichnis). Die Vektoren der Phase-0-Pakete (`rec`, `keys`, `shamir`, `envelope`) dürfen sich nicht ändern; jeder Auftrag prüft vor dem Commit, dass `git diff --stat 38626a9 -- internal/{rec,keys,shamir,envelope}/testdata` leer ist. Die `.gml`-Dateien aus Phase 0 (Rahmen ohne Typbytes) liegen unter `internal/envelope/testdata/phase0/` und müssen abgelehnt werden.
 
 ## rec
 
@@ -97,7 +163,7 @@ func (p *PlatformRoot) Zero()
 
 func Sign(priv ed25519.PrivateKey, domain string, body []byte) ([]byte, error)   // "gomail/v1/sig/"+domain+0x00+body, domain aus der Tabelle in 3.7
 func KnownDomain(d string) bool; RecordDomain(s *rec.Schema) (string, error)
-const DomainPlatformCert, DomainPlatformSuccession, DomainUserGen, DomainEpoch, DomainAddress, DomainCheckpoint, DomainMail, DomainMeta, DomainPending, DomainWrap, DomainIndex
+const DomainPlatformCert, DomainPlatformSuccession, DomainUserGen, DomainEpoch, DomainAddress, DomainCheckpoint, DomainUser, DomainInvite, DomainWrapAccept, DomainMail, DomainMeta, DomainPending, DomainWrap, DomainIndex
 func Verify(pub ed25519.PublicKey, domain string, body, sig []byte) bool
 
 type GenerationCert struct { Gen uint32; IdentityPub ed25519.PublicKey; UnwrapPub *ecdh.PublicKey; Created int64; Revokes uint32; Signature []byte }
@@ -124,7 +190,7 @@ var ErrWordlist, ErrWordCount, ErrUnknownWord, ErrChecksum, ErrGeneration, ErrZe
 ```
 
 ### Invarianten
-- Generationen beginnen bei 1 und sind lückenlos; `VerifyGenerationChain` verlangt die vollständige Folge ab 1. Ob eine Signatur einer widerrufenen Generation vor dem Widerruf im Log stand (2.2 Punkt 4), prüft Phase 6 mit dem Transparenzlog.
+- Generationen beginnen bei 1 und sind lückenlos; `VerifyGenerationChain` verlangt die vollständige Folge ab 1. Ob eine Signatur einer widerrufenen Generation vor dem Widerruf im Log stand (2.2 Punkt 4), prüfen Log und Client (`CheckRevokedSignature`, D88; Prüfvermerke für Dateien außerhalb des Logs, D84, D91).
 - `RootKey` nur kurz im Speicher halten und mit `keys.Wipe` löschen; `UserRoot.Zero` nach der Ableitung aufrufen. Der Seed wird nie gespeichert.
 - Signaturdomänen sind die Kurznamen aus 3.7 (Version 1.2) als Konstanten `Domain*`; `Sign` und `Verify` nehmen keine anderen an, `RecordDomain(schema)` liefert den Kurznamen eines Datensatztyps (DECISIONS D47). Ein neuer signierter Typ braucht eine neue Zeile in 3.7 und in `keys`.
 - `Decode*` prüft Struktur, nicht Signatur; `Verify` immer aufrufen.
@@ -133,8 +199,8 @@ var ErrWordlist, ErrWordCount, ErrUnknownWord, ErrChecksum, ErrGeneration, ErrZe
 
 ### Grenzen
 - `ecdh.PrivateKey` lässt sich nicht überschreiben; `Keystore.Zero` löscht den Ed25519-Schlüssel und gibt den X25519-Schlüssel nur frei.
-- Kein `user.rec` (Phase 2): Es braucht `user_id`, `root_pub`, die Liste der Generationszertifikate und eine Signatur der Identität; `rec.List` mit `GenerationCertSchema` als Elementschema ist dafür vorgesehen.
-- Benutzereingaben für Seed-Wörter werden nicht normalisiert (SPEC-ISSUES S11).
+- `user.rec` ist seit Auftrag 02 ein signierter Datensatz in `store` (Kurzname `user`, D68).
+- `SeedFromWords` bleibt exakt; die Normalisierung der Eingabe (S11) macht `internal/words` (D85 (5)).
 
 ## shamir
 
@@ -195,11 +261,13 @@ var ErrMagic, ErrVersion, ErrSuite, ErrTruncated, ErrTooLarge, ErrHeader, ErrHea
     ErrSignature, ErrSigner, ErrUnsigned, ErrSignaturePolicy, ErrWrap, ErrRandom, ErrClosed
 ```
 
+Nachtrag seit Phase 1: Kopffeld 8 `version` (`Header.Version`, Version 1.4, D66), Pflicht und mindestens 1 für Art `meta`; `meta-signed` nur aus Kopf und Hashes (Auftrag 01).
+
 ### Invarianten für Aufrufer
 - Jede Datei bekommt einen neuen Dateischlüssel und einen neuen Nonce-Präfix (beide zieht der Schreiber). Nie eine Datei durch Verändern einer bestehenden erzeugen; immer neu versiegeln (3.3 Regel 1).
 - `FileID` im Kopf muss der ID im Dateinamen entsprechen; das prüft die Ablage, nicht `envelope`. Ebenso prüft die Ablage `MailboxID` und `Epoch` gegen den Ort der Datei und die Epochenkette (2.4).
 - `OpenOptions.ExpectedSuite` kommt aus der signierten `epoch.rec` der Datei-Epoche; `CheckSuiteTransition` beim Prüfen der Epochenkette aufrufen.
-- Signaturpolitik: Mail-Dateien mit `AllowUnsigned`, alle anderen mit `ResolveSigner`. `envelope` koppelt `AllowUnsigned` nicht an die Dateiart, weil Abschnitt 7 für Index-Dateien keine Signatur nennt; die Ablage muss die Politik je Dateiart setzen und darf `AllowUnsigned` nie pauschal verwenden. Der Resolver setzt Abschnitt 7 um: unbekannter Schlüssel, fehlendes Zertifikat, Widerruf, kompromittierte Generation führen zu einem Fehler. `Extra` muss beim Prüfen gleich dem beim Signieren sein; Phase 3 legt für Metadaten den Datensatz fest (Postfach-ID, Epoche, Mail-ID, Empfangszeit, Ingest-Generation, Hashes der Mail- und Metadaten-Datei, Versionszähler).
+- Signaturpolitik: Mail-Dateien mit `AllowUnsigned`, alle anderen mit `ResolveSigner`. `envelope` koppelt `AllowUnsigned` nicht an die Dateiart (Indexsegmente sind seit Version 1.4 signiert, D79 (1)); die Ablage muss die Politik je Dateiart setzen und darf `AllowUnsigned` nie pauschal verwenden. Der Resolver setzt Abschnitt 7 um: unbekannter Schlüssel, fehlendes Zertifikat, Widerruf, kompromittierte Generation führen zu einem Fehler. `Extra` muss beim Prüfen gleich dem beim Signieren sein; für Metadaten ist es `gomail/v1/rec/meta-signed` (`store.MetaSignedSchema`, Abschnitt 7, K6).
 - Eine Mail-Datei (unsigniert) schützt ihren Empfängerteil nicht gegen Änderungen an fremden Einträgen. Der Client prüft deshalb den SHA-256 der Mail-Datei aus den signierten Metadaten. `FileHash` liefert den Hash aller Bytes vor dem Trailer-Element; bei einer unsignierten Datei ist das die ganze Datei.
 - Dateiaufbau nach dem Empfängerteil (Version 1.1): Elemente `Typbyte || uint32 Länge || Inhalt`, genau in der Folge `0x01* 0x02 0x03?`. Eine unsignierte Datei endet mit dem `0x02`-Element. Das Typbyte eines Blocks muss zum Letzter-Block-Flag im Nonce passen; sonst scheitert die Authentifizierung.
 - `RecipientRecovery` (Typ 4) gehört nach 2.4 nur in `epochs/<n>/members/recovery.wrap`, nie in Mail- oder Metadatendateien. `envelope` nimmt Typ 4 in jeder Datei an (3.1); die Ablage setzt die Regel aus 2.4 beim Schreiben und Lesen durch. Dateien sind unveränderlich: der Empfängerteil wird nie nachträglich ergänzt.
@@ -215,104 +283,27 @@ var ErrMagic, ErrVersion, ErrSuite, ErrTruncated, ErrTooLarge, ErrHeader, ErrHea
 
 ## store
 
-### API
-
-```go
-type ID [16]byte                       // zufällig, Text: base32 klein, 26 Zeichen
-func NewID(r io.Reader) (ID, error); ParseID(s string) (ID, error); (ID) String(); IsZero()
-
-// Dateioperationen: atomar, mit fsync von Datei und Verzeichnis
-func WriteFileAtomic(path string, data []byte) error   // ersetzt
-func CreateFileAtomic(path string, data []byte) error  // nur wenn nicht vorhanden (ErrExists)
-func RenameDurable(src, dst string) error; RemoveDurable(path string) error; MkdirAll(dir string) error; SyncDir(dir string) error
-func ReadFileLimited(path string, max int64) ([]byte, error)   // Größe vor dem Lesen geprüft
-func RemoveTemp(dir string) error
-
-type Store struct{ Root string }
-func Init(root string) (*Store, error); Open(root string) (*Store, error)
-// Pfade nach Abschnitt 4: UserFile, InviteFile, AddressesFile, MailboxDir/File, FoldersFile, NoteFile,
-// EpochDir/File, WrapFile, MailDir, MailFile, MetaFile, PendingDir/File, SpoolDir, WorkDir; Rel/Abs für Journale
-func (s *Store) CreateUser(*User) error; ReadUser(ID) (*User, []byte, error)
-func (s *Store) CreateInvite(nowMillis int64) (ID, error); ConsumeInvite(ID) error
-func NormalizeAddress(string) (string, error); (s) LoadAddresses() (Addresses, error); AddAddress(addr string, mbx ID) (string, error)
-func (s *Store) WritePlatformFile(name string, data []byte) error; ReadPlatformFile(name) ([]byte, error)
-func (s *Store) ReadPlatformCert(role keys.Role, gen uint32) (*keys.PlatformCert, error)   // prüft .pub gegen .cert, nicht die Signatur
-func (s *Store) LockMailbox(ID) (func(), error); LockMailboxes([]ID) (func(), error)
-func (s *Store) WriteMailbox(*Mailbox) error; ReadMailbox(ID) (*Mailbox, error)
-func (s *Store) WriteEpoch(*Epoch) ([]byte, error); ReadEpoch(ID, n) (*Epoch, []byte, error); ListEpochs(ID)
-func (s *Store) WriteWrap(mbx, n, user, data); ReadWrap(mbx, n, user)
-func (s *Store) ListFolders, ListMails, ListPending, ListPendingEpochs; ReadMail, ReadMeta, ReadPending, ReadFolders, WriteFolders
-func (s *Store) ReadNote(ID) (*EpochNote, error); WriteNote(*EpochNote) error; RemoveNote(ID) error
-
-// Datensätze (Typ-Strings gomail/v1/rec/...): user, mailbox, epoch (+ epoch-member), epoch-keys,
-// mail-meta (+ rcpt), meta-signed, pending (+ pending-entry, term), epoch-note, journal (+ move),
-// address, platform-key, platform-pin, mailbox-name, folders (+ folder)
-type User struct{ ID; RootPub; Generations []*keys.GenerationCert }      // DecodeUser prüft die Kette
-type Mailbox struct{ ID; Epoch uint32 /* Kopf */; Inbox ID; Name []byte /* versiegelt */ }
-type Epoch struct{ MailboxID; Number; Begin; Reason; Suite; ContentPub, MetaPub; Members []Member; PrevHash; SignerID; SignerGen; Signature }
-func (e *Epoch) Sign(identity) error; VerifySignature(pub) error; Member(ID) (Member, bool)
-func EpochHash(data []byte) [32]byte; CheckLink(prev *Epoch, prevData []byte, next *Epoch) error
-type EpochKeys struct{ MailboxID; Epoch; Content, Meta *ecdh.PrivateKey; Index [32]byte }; (k) Matches(*Epoch) bool; Zero()
-type MailMeta struct{ Version; MailID; Received; MailHash; Size; Folder; Flags; EnvelopeFrom; Recipients; From, To, Cc, Subject, Date, MessageID; Attachment; HeadersParsed }
-func (m *MailMeta) SignedExtra(mbx ID, epoch uint32) ([]byte, error)
-type Pending struct{ MailboxID; Epoch; Entries []PendingEntry{ MailID; Unprocessed bool; Terms []string } }
-type AddressAssignment struct{ Address; MailboxID; ValidFrom; AdminGen; Signature }; Sign/Verify
-func CleanText(s string, max int) string        // speicherbar nach 3.6 Regel 3
-var ErrRecord, ErrChain, ErrExists, ErrNotFound, ErrTooLarge, ErrID, ErrInvite, ErrAddress
-```
+Datenverzeichnis nach Abschnitt 4 (Version 1.4). Was seit Phase 1 dazukam, steht in D68 bis D70, D73, D78, D87 und D91; die API steht in `internal/store`.
 
 ### Invarianten
-- Alles im Datenverzeichnis wird über `store` geschrieben: atomar, mit `fsync`; nie eine Datei an Ort und Stelle verändern. `epoch.rec`, Plattformdateien und `user.rec` werden nur exklusiv angelegt, nie ersetzt.
-- Jede Datei wird mit `ReadFileLimited` gelesen; die Grenzen stehen in `store.go` (DECISIONS D48).
-- Lesefunktionen prüfen Ort gegen Inhalt (`user.rec` gegen das Verzeichnis, `epoch.rec` gegen Postfach und Nummer, Notizen gegen das Postfach), nicht Signaturen. Signaturen und die Kette prüft der Aufrufer.
-- Sperren: Commit einer Annahme, Schreiben einer Begriffsliste, Anlegen von Epochen und `mailbox.rec` halten die Sperre des Postfachs; mehrere Postfächer nur über `LockMailboxes`.
-- Dekodierte Datensätze sind kanonisch: optionale Felder stehen nur, wenn sie einen Wert tragen; leere optionale Zeichenketten oder Kennzeichen mit dem Wert 0 werden abgelehnt.
+- Alles im Datenverzeichnis wird über `store` geschrieben: atomar, mit `fsync` von Datei und Verzeichnis; nie eine Datei an Ort und Stelle verändern. `epoch.rec`, Plattformdateien und `user.rec` werden nur exklusiv angelegt. Einzige Ausnahme: `ReplaceEpoch` ersetzt eine nie loggbare `epoch.rec` unter der Postfachsperre, und nur wenn der Aufrufer per `unloggable` belegt, dass das Log sie mit `ErrOrder` verweigert (D88 (4)).
+- Jede Datei wird mit `ReadFileLimited` gelesen: Größe vor dem Lesen geprüft, geöffnet mit `O_NONBLOCK`, nur reguläre Dateien (D48, D87 Nachtrag 20a). Andere Öffnungen ohne diesen Schutz: AUDIT R41.
+- Lesefunktionen prüfen Ort gegen Inhalt, nicht Signaturen. Signaturen, Kette (`store.Chain`, D64, D68) und Log prüft der Aufrufer.
+- Sperren nach 9.1 in der Lesart D70: POSIX-Satzsperren (OFD unter Linux), Rollensperren `locks/server` (exklusiv) und `locks/client` (geteilt), Postfachsperren; mehrere Postfächer nur über `LockMailboxes`. Rechte 2770/0660, Gruppe `gomail` (D70, D81 (4)).
+- Nur `gomail-server init` legt ein Datenverzeichnis an (D87).
+- Dekodierte Datensätze sind kanonisch; leere optionale Felder werden abgelehnt.
+- `CleanText` ersetzt Steuerzeichen einschließlich C1 und Bidi (D86 (3)).
 
-## translog
+## translog, witness, loghttp
 
-```go
-type Log interface {
-    Verified() bool
-    AppendUser(user store.ID, userRec []byte) error
-    AppendEpoch(mailbox store.ID, number uint32, epochRec []byte) error
-    AppendAddress(addressRec []byte) error
-    AppendPlatform(name string, data []byte) error
-    CheckUser(user store.ID, userRec []byte) error
-    CheckGeneration(user store.ID, gen uint32) error
-    CheckRevokedSignature(user store.ID, gen uint32, signed []byte) error
-    CheckEpoch(mailbox store.ID, number uint32, epochRec []byte) error
-    CheckAddress(address string, mailbox store.ID, at int64) error
-    CheckPlatform(name string, data []byte) error
-    CheckFresh(now time.Time) error
-}
-type Unverified struct{}                      // nimmt alles an
-func NewUnverified(insecureNoLog bool) (*Unverified, error)   // ErrNoLog ohne den Schalter
-const Warning                                  // gibt der Client bei jedem Start aus
-```
+Verbindlicher Entwurf: `internal/translog/doc.go` (Abschnitte „Reference head“, „Validity rules“, „Who writes“, „Unlogged epoch.rec“, „Withheld entries“, „What write access to log/ gives an attacker“, „Witness quorum“, „Platform generations“). Umsetzung D78 (Log), D80 (Serverseite), D81 (Ingest und Server), D88 (Client), D74 (Zeuge).
 
-- Jede Stelle, die das Log braucht, ruft diese Schnittstelle auf und bricht bei einem Fehler ab (getestet mit einem Log, das einzelne Prüfungen verweigert: `client/log_test.go`). Phase 3 ersetzt nur die Umsetzung.
-- Ein Client lehnt eine Entwicklungsidentität ab, sobald `Verified()` wahr ist.
-
-### Alle `TODO(phase3-translog)`
-
-| Stelle | Prüfung oder Eintrag | Spezifikation |
-|---|---|---|
-| `client/client.go`, `Open` | `CheckFresh`: Baumkopf mit Zeugensignatur höchstens 24 Stunden alt | 2.3, 2.7 |
-| `client/client.go`, `Open` | `CheckUser`: eigene `user.rec` im Log | 2.7 |
-| `client/mailbox.go`, `userKey` | `CheckUser`: `user.rec` des Unterzeichners im Log | 2.7 |
-| `client/mailbox.go`, `userKey` | `CheckGeneration`: Generation erst ab ihrem Logeintrag gültig | 2.2 Punkt 3 |
-| `client/mailbox.go`, `userKey` | `CheckRevokedSignature`: Signatur einer widerrufenen Generation vor dem Widerruf geloggt | 2.2 Punkt 4, S13 |
-| `client/mailbox.go`, `checkEpoch` | `CheckEpoch`: `epoch.rec` im Log | 2.7 |
-| `client/mailbox.go`, `createEpoch` | `AppendEpoch` | 2.7 |
-| `client/read.go`, `ingestKeyFor` | `CheckPlatform`: Zertifikat im Log, Generation nicht als kompromittiert markiert | 2.3, 7 |
-| `client/read.go`, `checkMeta` | `CheckAddress`: Adresse zur Empfangszeit diesem Postfach zugeordnet | 2.3 |
-| `client/keygen.go`, `Register` | `AppendUser`: die Generation gilt erst ab dem Eintrag | 2.2 Punkt 3 |
-| `cmd/gomail-server`, `address add` | `AppendAddress`: signierte Zuordnung | 2.3 |
-| `ceremony/ceremony.go`, `InitDev` | `AppendPlatform`: Zertifikate | 2.7 |
-| `store/records.go`, `UserSchema` | Bindung von Benutzer-ID und Root nur über das Log (S16) | 2.2, 2.7 |
-| `translog/translog.go` | alle elf Methoden von `Unverified` | 2.7 |
-
-Noch ohne Aufrufstelle, weil die Funktion erst später kommt: Vermerke der Clients (`checkpoints/`), Nachfolgen der Plattformidentität (`identity-<gen>.succ`), Widerruf kompromittierter Plattformgenerationen.
+- `translog.Log` ist die Schnittstelle für alle Prüfungen und Einträge; `translog.Open` liefert ein Client-Log (mit `Verifier`, Referenzkopf aus `state.json`) oder ein Operator-Log (Server, Zeremonie; Referenz ist `log/tree.rec`).
+- Das Urteil über einen Eintrag ist eine Funktion von Logpräfix und Anker; jeder Client urteilt gleich. Köpfe gelten nur mit dem Quorum der Zeugen nach Schlüsseln; ein Kopf ist höchstens 24 Stunden alt (23 Stunden mit offenem eigenem Eintrag).
+- Operator-Log fail closed: ein geschrumpftes oder beschädigtes `tree.rec` stoppt Annahme und Signatur bis `gomail-server log repair` und Neustart (D81 (3)); `RepairTree` meldet verwaiste Einträge und löscht nichts.
+- `loghttp`: `GET /gomail/log/head`, `GET /gomail/log/consistency`, `POST /gomail/log/cosign`; Zeitlimits und Größengrenzen, keine Verbindungsobergrenze (AUDIT R8).
+- `witness`: acht Regeln aus 2.7, Zustand vor der Gegensignatur dauerhaft, Fork beendet den Dienst (Exit 3).
+- `translogtest.Unverified` nimmt alles an und dient nur `testenv` (Serverseite der Testplattform); kein Programm nutzt es.
 
 ## smtpd
 
@@ -328,98 +319,150 @@ var ErrUnknownRecipient /*550*/, ErrDiskFull /*452*/, ErrTemporary /*451*/, ErrC
 - `250` nach `DATA` erst, wenn `Commit` ohne Fehler zurückkam. Bei jedem Abbruch ruft die Sitzung `Abort`.
 - Der Server schreibt den `Received`-Header als erstes in die Zustellung; Inhalte, Header und Adressen loggt er nie (nur Sitzungs-ID, Größen, Statuscodes).
 - Grenzen und Antworten: DECISIONS D54. Zeitlimits und die Mindestrate laufen über `Config.Now` und Lese-Deadlines.
+- Seit Auftrag 01 kündigt `EHLO` `SIZE` 26.214.400 an (25 MiB, 5.1); gezählt werden nur die Daten des Absenders (S62).
 
 ## ingest
 
-```go
-type Config struct{ Store; Log; IngestKey; IngestGen; Now; Logger; MinFree; DiskSpace; QueueMemory; WorkLimit; BatchSize; BatchAge }
-func New(Config) (*Ingest, error)            // prüft den Schlüssel gegen ingest-<gen>.cert
-func (in *Ingest) Recover() error            // vor dem Start: Rollback offener Transaktionen, spool/ und work/ leeren
-func (in *Ingest) Start(); Flush() error; Close() error
-func (in *Ingest) Accepting() error; Recipient(string) error; Begin(...)   // smtpd.Backend
-func Terms(header []byte, received time.Time) ([]string, bool)          // 5.4
-```
+`ingest.New` prüft Ingest-Schlüssel gegen sein Zertifikat, das Zertifikat im Log und `valid_from` gegen die Uhr des Servers ohne Toleranz (D90); dann nimmt es die Serversperre, auf Verlangen prüft es die Client-Sperre, zuletzt, dass die Generation nicht abgelöst ist (`internal/ingest/ingest.go`, `New`).
 
 ### Invarianten
-- Ablauf je Mail: Epochenwahl bei `DATA` (D50), Verschlüsselung je Postfach nach `spool/<txn>/<postfach>/mail.gml`, danach `meta.gml` und `marker.gml`, Journal, Umbenennungen, Löschen des Journals (Commit, D52). Kein Klartext auf der Platte; die Warteschlange lagert nur verschlüsselt aus.
-- `Recover` muss vor dem ersten `Begin` laufen. Ein Journal, das sich nicht dekodieren lässt oder Pfade außerhalb des Datenverzeichnisses nennt, stoppt den Start.
+- Ablauf je Mail: Epochenwahl bei jedem `DATA` unter der Sperre (K8, D71), Verschlüsselung je Postfach im Spool, Metadaten und Marker, Journal, Umbenennungen (D50, D52). Kein Klartext auf der Platte; die Warteschlange lagert nur verschlüsselt aus (`mlock`, sonst nicht).
+- Gegen das Log geprüft werden `epoch.rec` und `user.rec` des Signierers, die Adresszuordnung (bei RCPT, in `Begin` und im Commit) und die eigene Ingest-Generation (in `New`, `Begin` und im Commit). Jeder Logfehler ist `451`; gegen eine ungeloggte oder zurückgesetzte Epoche wird nie verschlüsselt (D81 (1)).
+- Jede eigene Signatur wird vor dem Commit ohne Schlüssel selbst geprüft (D73).
+- `Recover` muss vor dem ersten `Begin` laufen. `BatchSize` höchstens `store.MaxBatch` (D81 (6)).
+- Unbekannter freier Platz ist fail closed (`451`, S81); die 10-%-Grenze ist nur im Testbuild veränderbar.
 - Absturzpunkte für Tests: Paketvariable `crashHook`, nur in Tests gesetzt.
-- Der Server prüft die Signatur der gewählten `epoch.rec` gegen `user.rec` des Unterzeichners, aber nicht die ganze Kette und nicht das Log; das ist Aufgabe des Clients.
+
+## terms und words
+
+- `internal/terms` hält die Regeln aus D55 einmal: Begriffe einer Mail (`List`), Anfragen (`Query`), Thread-Wurzel (`ThreadRoot`), Anhang (`HasAttachment`). `ingest.Terms` und `client.metaTerms` rufen sie auf (D91 (1)). Für Mails ohne Begriffsliste bildet der Client `thread:` aus der eigenen Message-ID (S23, Q12).
+- `internal/words` normalisiert Seed- und Anteilswörter (NFKD, Kleinschreibung, beliebiger Leerraum) und prüft `MaxTokens` und `MaxInput` vor der Normalisierung (D85 (5)). `internal/client/words.go` ist nur noch eine Hülle darüber.
 
 ## client
 
-```go
-type Config struct{ Store; Dir; Pin *store.PlatformPin; Log; Now; Warn func(string) }
-func Keygen(Config, passphrase []byte, Prompter) (store.ID, error)
-func Register(Config, code store.ID) (store.ID, error)
-func Open(Config, passphrase []byte) (*Client, error)
-func (c *Client) CreateMailbox(name string) (store.ID, error)
-func (c *Client) Sync() error
-func (c *Client) List(mbx, folder store.ID) ([]*Mail, error)   // folder 0 = Posteingang
-func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error)
-func (c *Client) OpenPending(mbx, epoch, file) (*store.Pending, error)
-func (c *Client) MailboxName(store.ID) (string, error); Folders(store.ID) ([]store.Folder, error); Mailboxes() []store.ID; UserID(); Close()
-func Inspect(data []byte) ([]byte, error)
-const SupplyMonths = 3; ImmediateDelay = 5 * time.Minute; InboxName = "INBOX"
-var ErrNotRegistered, ErrRegistered, ErrConfirm, ErrDevIdentity, ErrPlatform, ErrUserRecord, ErrRollback, ErrEpoch,
-    ErrStaleEpoch, ErrReplay, ErrMailHash, ErrMismatch, ErrSigner, ErrWrap, ErrNotFound
-```
+Einstieg: `Keygen`, `Register`, `Restore`, `DeviceLost`, `Open`; am `Client`: `CreateMailbox`, `Share`, `Revoke`, `Sync`, `List`, `Read`, `Search`, `Index`, `SetFlags`, `SetFolders`, `Rename`, `Mailboxes`; dazu `Inspect`. `Config` trägt Datenverzeichnis, Client-Verzeichnis und Pin; das Log baut der Client selbst (D88 (1)).
 
-### Prüfungen beim Lesen (Reihenfolge)
-1. Epochenkette ab 1: jede `epoch.rec` am richtigen Ort, verknüpft (`CheckLink`), signiert von einem Mitglied der Vorgängerin, im Log; Kopf aus `mailbox.rec` nicht unter dem gemerkten, gemerkte Epoche unverändert (D57). Bei einem Bruch gilt nur der Teil davor; jede Abweichung erzeugt eine Warnung.
-2. Verpackung: signiert von einem Mitglied der Epoche (aktuelle Generation, S13), Kopf passend, Schlüssel gleich den öffentlichen Schlüsseln der `epoch.rec` (D61).
-3. Metadaten: Art, Postfach, `file_id`, Epoche in der Kette, Suite, Signatur durch einen Ingest-Schlüssel mit Zertifikat der hinterlegten Identität, Felder aus Abschnitt 7 signiert, `received = created`, Zertifikat zur Empfangszeit gültig, Epochenregel (D50), Adresse über das Log, Version nicht kleiner als gesehen (D51).
-4. Mail (nur `Read`): SHA-256 der ganzen Datei gleich den Metadaten, dann Kopf (Art, Postfach, Epoche, `file_id`, ohne Trailer), dann Entschlüsselung mit Freigabe erst nach dem letzten Block.
+### Prüfungen
+- Jede Operation beginnt mit `ready()`: `Refresh` beim Öffnen, danach `CheckFresh` (24-Stunden-Regel); `Sync` und `DeviceLost` refreshen zusätzlich (D88 (1)).
+- Vor jeder Verwendung: `CheckUser`, `CheckGeneration`, `CheckRevokedSignature`, `CheckEpoch` für jede Epoche, `CheckAddress` für jede Mail, `CheckPlatform` (D88 (2)). Danach die Lesepfade aus 2.4 und 7: Kette ab Epoche 1 (`store.Chain`, `checkSignerGen` als lokale Schranke, Q13), Verpackung, Metadaten mit Versionsregel und Merkzettel (Epoche, Empfangszeit, Mail-Hash, SHA-256 der Metadatei), Mail nur mit passendem Hash.
+- Signaturen einer widerrufenen Generation außerhalb des Logs zählen nur mit Prüfvermerk vor dem Widerruf und werden dann neu signiert (D84, D91; AUDIT R27).
+- Vermerke anderer Mitglieder (`checkpoints/`) werden in beide Richtungen verglichen; `Unconfirmed` bleibt bis zum Vermerk eines anderen Benutzer-Mitglieds (D88 (5), (6); Q20).
 
 ### Invarianten
-- `List` zeigt nur Mails, die alle Prüfungen bestanden haben, und warnt für jede andere; `Read` gibt bei jedem Fehler nichts heraus.
-- Der Client schreibt ins Datenverzeichnis nur Epochen, Verpackungen, `folders.gml`, `mailbox.rec` und `user.rec`; alles mit privatem Inhalt ist verschlüsselt.
-- Der lokale Zustand (`state.json`) ist Teil der Sicherheit (Schutz gegen Zurückspielen). Geht er verloren, beginnt der Client wieder bei Vertrauen beim ersten Kontakt (2.7, neues Gerät).
+- **Kein Pfad verkleinert den lokalen Zustand eines Postfachs** (D84 (2), S74). Einträge in `Checked` dürfen an Ort und Stelle in fester Größe geändert werden (D91 (6)).
+- Wachstum von `state.json` ist begrenzt mit dokumentierter Rate; gelesen wird bis 64 MiB (`loadState`). Ohne Schlüssel bei Schreibzugriff: AUDIT R27 (a); im ehrlichen Betrieb: AUDIT R43.
+- `List` zeigt nur Mails, die alle Prüfungen bestanden haben, und warnt für jede andere; `Read` gibt bei jedem Fehler nichts heraus. Warnungen nennen nur IDs, Nummern und feste Ursachen (`warnCause`).
+- Erste Einträge nach „Who writes“: erst Log, dann Datei (`Register`, `CreateMailbox` über `new-mailboxes/`), Epochen und Generationen erst Datei, dann Log (D88 (3)).
+- Schreibfolgen sind absturzsicher: was nach einem Absturz übrig bleibt, übernimmt oder räumt der nächste Lauf (Vormerkungen `Reissue`, `ErrPartial`). Ausnahme bis 20b: `keygen` (AUDIT R33).
+- Der lokale Zustand ist Teil der Sicherheit. Ohne ihn beginnt ein Gerät bei Vertrauen beim ersten Kontakt (2.7; AUDIT R20, R22).
 
 ## ceremony und Programme
 
-- `ceremony.InitDev(data, keys, now, log)`, `ReadKey(path, role)`, `ReadPin(path)`; Dateien und Regeln in DECISIONS D58.
-- `gomail-server serve` liest den Ingest-Schlüssel aus einer Datei außerhalb des Datenverzeichnisses, lauscht nur auf Loopback (sonst `--isolated-test-network`), ruft `Recover`, startet die Vorverarbeitung und beendet sich sauber bei SIGINT/SIGTERM (offene Begriffslisten werden geschrieben).
-- `gomailctl` liest die Passphrase aus `GOMAILCTL_PASSPHRASE`, `--passphrase-file` oder einer Zeile von stdin (sichtbar, siehe Grenzen).
-- Ohne `--insecure-no-log` starten `serve`, `address add`, `gomailctl` und die Zeremonie nicht.
+- `gomail-ceremony`: `init --shares k-of-n` (Standard 3 aus 5) mit Probe-Rekonstruktion, `ingest-rotate`, `reshare`, `succeed` (ohne `--compromised`, Q19), `publish` über das Log mit `--replace-witnesses` (D82, D85). Terminalregeln mit Abbruchpfad, `outputGrace`, `confirmDelay` (D85 Nachträge; RUNBOOK 2; AUDIT R1 bis R5). Schlüsselverzeichnis `--keys` über `os.Root`, 0700, kein Symlink im letzten Element.
+- `gomail-server`: `init` (einziger Weg zum Datenverzeichnis, D87), `serve --pin --log-listen` (Startprüfungen RUNBOOK 1.6; Serversperre vor dem Laden des Ingest-Schlüssels, D88 (8)), `invite create`, `address add` (Logeintrag vor `addresses.json`, Admin-Schlüssel außerhalb des Datenverzeichnisses), `log repair`.
+- `gomailctl`: Befehle nach 9.2 und `restore`, `flag` (D86, S92). Exit-Codes 0, 1, 2, 3 (`ErrPartial`), 130. Seed und Anteile nur am Terminal, Wörter ohne Echo; die Passphrase vom Terminal mit Echo (R31). Jeder Befehl außer `inspect` verlangt eine wirksame Serversperre.
+- `gomail-witness`: `keygen`, `serve --log --log-key --origin --key --state` (S68).
 
-## Datenverzeichnis in Phase 1
+## Datenverzeichnis
+
+Auszug; maßgeblich sind Abschnitt 4, `internal/store` und `internal/translog/doc.go`.
 
 ```
 data/
-  platform/identity-1.pub, admin-1.pub, admin-1.cert, ingest-1.pub, ingest-1.cert
+  platform/identity-<g>.pub, identity-<g>.succ (g ≥ 2), admin-<g>.pub/.cert, ingest-<g>.pub/.cert, witnesses.rec
   users/<user-id>/user.rec
   invites/<code>.json
   addresses.json, addresses.lock
+  locks/server, locks/client
+  log/lock, tree.rec, entries/<i>.rec, tree/tile/…, heads/<size>.sig, keys/…
   mailboxes/<postfach-id>/
-    mailbox.rec, folders.gml, lock, epoch-fallback.rec (nur nach einem Rückfall)
-    epochs/<n>/epoch.rec, content.pub, meta.pub, members/<user-id>.wrap
+    mailbox.rec, epoch-fallback.rec (nur nach einem Rückfall)
+    epochs/<n>/epoch.rec, folders.gml, members/<user-id>.wrap, members/<user-id>.accept, members/recovery.wrap
     mail/<ordner-id>/<mail-id>.gml, <mail-id>.meta.gml
-    pending/<n>/<mail-id>.gml (Marker), <batch-id>.gml (Begriffslisten)
-  spool/<txn-id>/<postfach-id>/{mail,meta,marker}.gml, journal.rec   (nur während einer Annahme)
-  work/<zufall>.bin                                                   (verschlüsselt, nur bei Last)
+    pending/<n>/…                         Marker und Begriffslisten
+    index/<n>/<device-id>-<lfd>.gml       Indexsegmente
+    checkpoints/<user-id>-<device-id>.rec Vermerke der Clients
+  spool/, work/                           nur während einer Annahme bzw. bei Last
 ```
 
-Nicht angelegt werden in Phase 1: `log/`, `checkpoints/`, `index/`, `platform/identity-<gen>.succ`, `platform/witnesses.rec`.
+Client-Verzeichnis (Standard `~/.config/gomailctl`, nie im Datenverzeichnis): `keystore`, Kopie der eigenen `user.rec`, `state.json`, Audit-Index des Logs, `new-mailboxes/`, `lock` (AUDIT 3).
 
 ## Bekannte Grenzen
-- Kein Transparenzlog, keine Zeugen: siehe die Tabelle oben. Alles, was laut 2.7 erst das Log garantiert (Aufspalten von Sichten, stilles Umleiten von Adressen, zurückgehaltene Widerrufe, Bindung von Benutzer-ID und Root), ist in Phase 1 nicht geschützt.
-- Nur ein Mitglied je Postfach; die Formate (Mitgliederliste, Verpackung je Benutzer) tragen mehrere.
-- Keine Benutzersignaturen auf Metadaten (Flags); der Client lehnt sie ab. Kein Indexieren von `pending/` (Phase 5), nur `OpenPending`.
-- Nur die hinterlegte Generation der Plattformidentität; Nachfolgen und kompromittierte Generationen sind nicht umgesetzt.
-- Server und Client prüfen die Ingest-Signatur der Metadaten nur mit Schlüssel (S22).
-- `flock` ist über NFS oder SSHFS (Abnahme mit getrennten Maschinen, 9.1) nicht verlässlich; dort schreiben Server und Client nicht dieselben Dateien gleichzeitig, aber `epoch-fallback.rec` und `mailbox.rec` brauchen dann einen anderen Schutz.
-- Uhren: Epochenwahl und Prüfung hängen an den Uhren von Server und Client; der Vorlauf von fünf Minuten deckt nur mäßige Abweichungen (S19).
-- Die Passphrase wird auf dem Terminal sichtbar eingegeben, weil `x/term` nicht zugelassen ist; die Datei oder die Umgebungsvariable verwenden.
-- Mails, die der Server nach dem Commit, aber vor `250` verliert, stellt der Absender doppelt zu.
-- `ecdh.PrivateKey` (Epochenschlüssel im Speicher des Clients) lässt sich nicht überschreiben (DECISIONS D04).
-- Die Mindestrate wird in festen 60-Sekunden-Fenstern gemessen; ein Absender, der in jedem Fenster knapp 60 KB schickt, darf `DATA` bis zum Zeitlimit von 10 Minuten ausdehnen.
-- Mehrere Empfängerpostfächer vervielfachen den Spool: eine Mail von 25 MB an 100 Postfächer schreibt 2,5 GB und hält 100 Dateien offen; bei 20 Verbindungen im schlimmsten Fall rund 50 GB. Die Prüfung auf 10 % freien Platz greift nur bei `MAIL FROM` und `DATA`, danach erst ENOSPC (`452`). Eine Obergrenze für den Spool insgesamt fehlt.
-- Bleibt das Rückgängigmachen nach einem Fehler beim Verschieben selbst hängen (Dateisystemfehler), liegen Teile einer Mail bis zum nächsten Serverstart im Postfach; `Recover` räumt sie dann auf.
-- Der Server vertraut beim Prüfen der Epochenkette Epoche 1 beim ersten Kontakt; ein Benutzer mit Schreibzugriff könnte ein neues Postfach mit eigener Epoche 1 an eine fremde Adresse hängen, wenn er auch `addresses.json` ändern kann. Dagegen schützt erst das Log (Adresszuordnungen und Epochen sind dort eingetragen).
-- Dateirechte 0600/0700: Server und Client müssen in der Entwicklung als derselbe Betriebssystembenutzer laufen oder gemeinsame Gruppenrechte bekommen (9.1 verlangt für die Abnahme getrennte Maschinen).
+
+Vollständig in `docs/AUDIT.md` Abschnitt 5 (R1 bis R44), jeweils mit Beleg. Für die Übergabe besonders:
+
+- **Q19, kompromittierte Plattformidentität** (R17): kein Weg im Code; bei Kompromittierung neue Zeremonie mit neuem Origin und neuen Pins.
+- **Wachstum des Client-Zustands** (R27 (a), R43): ohne Schlüssel bei Schreibzugriff je nach Geräten und Größe der Epoche in Tagen bis Monaten bis 64 MiB; im ehrlichen Betrieb rund 70 000 Mails je Client-Verzeichnis. Abhilfe nach M1 (Q22 Variante B).
+- **Verfügbarkeit bei Schreibzugriff:** Sperre durch frei signierten Vermerk (R23), nicht loggbare Epoche 1 (R24), dem Log widersprechende Epoche (R25), nicht reguläre Dateien (R26, R41), Lesegrenze der Segmente (R42), Neuausstellung, die nie gelingt (R44). 2.7 verspricht Erkennung, nicht Verfügbarkeit.
+- **Zwei Maschinen nur bedingt** (R36): NFSv4-Sperren und Cache-Verhalten ungeprüft.
+- **Zielplattformen** (R40): Terminalbehandlung auf BSD und Darwin nur per `go vet` geprüft, nie ausgeführt; PTY-Tests nur unter Linux. plan9 und js/wasm übersetzen die Terminalteile gewollt nicht; Windows lehnt die Zeremoniebefehle ab.
+- **Terminal in `gomailctl`** (R6): Ein statisch per `mknod` angelegter Terminalknoten auf einem anderen Dateisystem (etwa in einem chroot) hat ein anderes `st_dev` und wird verweigert; das ist die sichere Richtung. Auf den BSDs ohne `/dev/tty` im Dateisystem entfällt die Unterscheidung der Sitzungen.
+- **Ohne S-Punkt, offen mit `TODO(ask)`:** Passphrase mit Echo und Löschen des Seeds vor der Abfrage der Kontrollwörter (D86, R31); Gruppenname bei `gomail-server init` nur Warnung (D87 (4), R34); neuer `init` statt Nachfolge bei kompromittiertem Root (Nachtrag zu Q19, R17).
+- **Aus Phase 1 weiter offen** (R38): Spool-Vervielfachung bei vielen Empfängerpostfächern, Mindestrate in festen 60-Sekunden-Fenstern, Doppelzustellung bei Verlust zwischen Commit und `250`.
+- **Kein Klartext, aber Metadaten sichtbar** (R37): Root während des Empfangs liest neue Mails; Größen, Zeiten, Mitgliedschaften und Trefferzahlen bleiben sichtbar.
+
+## Offene Fragen
+
+Alle Fragen mit Stand stehen in `docs/QUESTIONS.md` und AUDIT 7.1. Die drei, die das Verhalten nach M1 am stärksten bestimmen:
+
+| Frage | Gegenstand | Stand | Gebaut bis zur Antwort |
+|---|---|---|---|
+| Q18 | alleiniges Mitglied nach einem Widerruf ohne geprüfte `folders.gml` | offen (Haltepunkt 1) | Ablehnung ohne Ausweg: `List`, `Rename`, `SetFolders` scheitern, `Read` geht; `sync` und `device lost` enden mit Exit 3 und fester Ursache (D84 (3), D88 (7), `TODO(Q18)` in `internal/client/devicelost.go`). Vorbeugung: Postfächer mit mindestens zwei Benutzer-Mitgliedern führen (RUNBOOK 8.4). AUDIT R21. |
+| Q19 | Nachfolge nach Kompromittierung der Plattformidentität | offen, **Haltepunkt 2** | `succeed --compromised` gesperrt (Nutzungsfehler, `ErrCompromised`, `TODO(Q19)`); Pflichttest aus 10.1 übersprungen. Vorschlag in Q19: Logeintrag `revocation-<g>.rec` der neuen Identität. Zusätzlich offen: wann ein neuer `init` statt einer Nachfolge nötig ist. AUDIT R17, S76. |
+| Q20 | Markierung „noch kein bestätigter Zustand“ nach Wiederherstellung | offen (Haltepunkt 1) | strengste Lesart: `Unconfirmed` bleibt bis zum Vergleich mit dem Vermerk eines **anderen** Benutzer-Mitglieds; ein eigenes zweites Gerät zählt nicht; ein alleiniges Mitglied bleibt dauerhaft markiert (nur Warnung; D88 (6), `TODO(Q20)` in `internal/client`). AUDIT R22. |
+
+Weiter offen und für den Betrieb mit echten Mails wichtig: Q8 (Widerruf von Ingest- und Admin-Generationen, kein Pin-Feld 7), Q9 (zeitliche Bindung von Adresszuordnungen), Q4 (Logschlüssel ist der Ingest-Schlüssel). Entschieden in dieser Phase: Q22 (Variante A, D91).
 
 ## Testabdeckung
+
+Wird mit Auftrag 20 eingetragen: `go test -cover` je Paket unter `internal/` (mit `-tags gomail_dev,gomail_test`, wo nötig), Mindestwerte 85 % je Paket und 90 % für `rec`, `keys`, `shamir`, `envelope`, `translog` (M1-Kriterium E).
+
+Letzter bekannter Wert: `internal/client` 87,9 % (09g, ORCHESTRATION Verlauf). Die Werte aus Phase 1 stehen unter „Verlauf“.
+
+## Fuzzing
+
+Wird mit Auftrag 20 eingetragen: jedes Ziel 10 Minuten, Protokolle unter `docs/acceptance/<datum>/fuzz-*.log`.
+
+25 Ziele (AUDIT 6.4): `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`, `store.FuzzDecodeRecords`, `smtpd.FuzzCommands`, `smtpd.FuzzData`, `ingest.FuzzTerms`, `words.FuzzNormalize`, `translog.FuzzParseHeadText`, `translog.FuzzDecodeEntry`, `translog.FuzzOpenHead`, `translog.FuzzProofs`, `translog.FuzzAuditIndex`, `witness.FuzzParseProof`, `witness.FuzzDecodeWitnesses`, `witness.FuzzCosign`, `witness.FuzzPoll`, `loghttp.FuzzServer`.
+
+10.1 verlangt Fuzzing für den `.gml`-Parser, den SMTP-Parser und das Einlesen von Shamir-Anteilen; alle drei sind abgedeckt. Kein eigenes Ziel haben die Prüfpfade des Clients (Kette, Vermerke, `state.json`) und die Zeremonie; `internal/terms` deckt `ingest.FuzzTerms` über `ingest.Terms`.
+
+## Unabhängige Prüfungen bis M1
+
+Jedes Paket hatte nach `docs/ORCHESTRATION.md` Abschnitt 2 einen oder zwei Prüfer (Spezifikation und Angreifer für sicherheitskritische Pakete). Funde, Nacharbeitsrunden und Abweichungen von Regel 6 stehen je Paket in ORCHESTRATION Abschnitt 4 und in der Begründung des D-Eintrags. Funde niedrig, die nach der Zusammenführung offen blieben, sind in `docs/tasks/20-triage.md` eingeordnet. Zahlen für den Abschlussbericht (Prüfrunden, Funde nach Schwere): wird mit Auftrag 20 eingetragen.
+
+## TODO-Inventar
+
+Vorkommen in `cmd` und `internal` am Stand 3e06f23, einschließlich Tests (`grep -rhoE 'TODO\([^)]*\)' cmd internal --include=*.go`):
+
+| Marke | Zahl | Bedeutung |
+|---|---|---|
+| `TODO(ask)` | 25 | strengste Lesart, wo die Spezifikation schweigt; ohne eigene Frage oder mit Verweis auf Q8, Q11, Q20 |
+| `TODO(phase3-translog)` | 11 | nur im Testdouble `translogtest`; veraltet, umzubenennen |
+| `TODO(Q1)`, `TODO(Q15)`, `TODO(Q19)` | je 8 | Wiederherstellungsempfänger, Neuausstellung für Leser vergangener Zeiträume, Kompromissfall |
+| `TODO(Q20)` | 7 | Markierung `Unconfirmed` |
+| `TODO(Q12)` | 5 | Thread-Wurzel ohne Begriffsliste |
+| `TODO(Q9)`, `TODO(Q6)` | je 3 | Adresszuordnung, Vertretung |
+| `TODO(Q13)`, `TODO(Q18)` | je 2 | `checkSignerGen`, alleiniges Mitglied |
+| `TODO(Q3)`, `TODO(Q4)`, `TODO(Q7)` | je 1 | Serversuche, Logschlüssel, `mailbox rotate` |
+| `TODO(task-13)` | 1 | `ShowShares` in `internal/client/keygen.go`; Auftrag 20b Punkt 2 |
+
+Außerhalb von Go: `scripts/two-host-test.sh` trägt noch `TODO(task-15b)` (Pin und Zeuge einer echten Zeremonie); der Produktionsweg steht im Kommentar darunter und in RUNBOOK 1.
+
+## Was die nächste Phase als Erstes wissen muss
+
+1. **Q19 vor jedem Betrieb mit echten Mails entscheiden.** Ohne Kennzeichnung einer kompromittierten Identität in Pin, Nachfolge oder Log ist eine Kompromittierung nur durch eine neue Plattform zu heilen. Mit Q8 zusammen entscheiden (Widerruf von Ingest- und Admin-Generationen).
+2. **Wachstum des Client-Zustands begrenzen** (Q22 Variante B oder Grenze je Epoche), bevor große Postfächer oder viele Geräte kommen (AUDIT R27 (a), R43). Dafür braucht D84 (2) eine Ausnahme.
+3. **Zwei echte Maschinen mit NFSv4** fahren (`scripts/two-host-test.sh` ohne `--local`, RUNBOOK 9), erst dann ist M1-Kriterium E ohne Einschränkung erfüllt.
+4. **Vor 10.2 Punkt 1:** TLS, Ratenbegrenzung (auch `loghttp`, R8), Missbrauchsschutz; mehrere Zeugen im Betrieb (R15).
+5. **Lokaler Zustand ist Sicherheit:** `state.json` schützt gegen Zurückspielen und trägt die Prüfvermerke. Eine Kopplung neuer Geräte (2.7, nicht in M1) muss ihn übertragen. Jede neue Schreibfolge im Client braucht dieselbe Überlegung, was nach einem Absturz übrig bleibt, und die Regel D84 (2).
+6. **Tests:** `internal/testenv` (`New`, `NewLogged`) baut Plattform, Log, Zeuge, Benutzer und Postfächer; `internal/client/tamper_test.go` zeigt gefälschte Mails, `takeover09*_test.go` die Angriffe auf die Übernahme, `cmd/gomail-ceremony/abort15m_*` und `blocked15n_*` die Terminalangriffe (AUDIT 6.5).
+
+## Verlauf
+
+Die folgenden Abschnitte sind der Stand von Phase 0 und Phase 1 und bleiben zur Nachvollziehbarkeit erhalten.
+
+### Testabdeckung in Phase 1
 
 `go test -cover` (Phase 1):
 
@@ -444,7 +487,7 @@ Die nicht abgedeckten Zeilen in `store`, `ingest` und `client` fallen in vier Gr
 
 Die Programme unter `cmd/` haben keinen Mindestwert; ihr Ablauf ist zusätzlich durch `TestRunbook` (gebaute Programme, alle Schritte des RUNBOOK) abgedeckt, der nicht in die Abdeckung der Pakete eingeht.
 
-### Nicht abgedeckte Zeilen der Pakete aus Phase 0 (Stand Phase 0.1)
+#### Nicht abgedeckte Zeilen der Pakete aus Phase 0 (Stand Phase 0.1)
 
 Die Zeilennummern in `envelope/envelope.go` sind seit Phase 1 um eins verschoben (ein Import mehr).
 
@@ -470,7 +513,7 @@ Die Zeilennummern in `envelope/envelope.go` sind seit Phase 1 um eins verschoben
 
 Alle nicht abgedeckten Zeilen sind Fehlerzweige, die Fehler nur weiterreichen oder Grenzen ein zweites Mal prüfen. Keiner gibt Daten heraus.
 
-## Unabhängige Prüfung in Phase 1
+### Unabhängige Prüfung in Phase 1
 
 Zwei Subagenten prüften ohne Kenntnis von DECISIONS, HANDOFF, SPEC-ISSUES und der Commit-Historie.
 
@@ -490,11 +533,11 @@ Zur Kenntnis genommen: B4 (bleibt ein Rückgängigmachen hängen, liegen Teile b
 - C: Der Arbeiter der Vorverarbeitung hatte keinen Schutz gegen Panics; jetzt abgefangen. Antworten auf abgewiesene Verbindungen liefen in unbegrenzt vielen Goroutinen; jetzt höchstens 16, `Close` wartet auf sie (`TestRefusalsAreBounded`).
 Zur Kenntnis genommen: Eine Mail mit 25 MB an 100 Postfächer schreibt 2,5 GB in den Spool und versiegelt 100-mal (begrenzt durch die Konstanten und den freien Platz, siehe Grenzen). Nur wegen des fehlenden Logs möglich (nicht als Fund gezählt): Zurückspielen gegenüber einem Client ohne Vorgeschichte, Umleiten von Adressen, widerrufene Generationen, unbemerktes Löschen von Mails.
 
-### Unabhängige Prüfung in Phase 0.1 (Verlauf)
+#### Unabhängige Prüfung in Phase 0.1 (Verlauf)
 
 Ein Subagent ohne Kenntnis von DECISIONS, SPEC-ISSUES und HANDOFF prüfte `envelope` und `rec` gegen 3.1 bis 3.6 der Version 1.1 und fand keine Abweichung von der Spezifikation. Behoben (Commit 3b8cb50): Der Schreiber überschrieb seinen Klartextpuffer nur im Erfolgsfall; `Kind.String` lieferte für unbekannte Dateiarten einen Kunstnamen, den `keys.Sign` als Domäne angenommen hätte. Zur Kenntnis genommen, nicht geändert: `SealOptions.Rand` erlaubt Aufrufern die Wiederverwendung von Zufall (siehe Invarianten); `Decrypt` leitet das Flag aus der Position in der Blockliste ab, die `Parse` als `0x01* 0x02` garantiert; `Parse` kopiert die ganze Datei (bis 50 MiB) und hält sie für `FileHash`.
 
-## Fuzzing
+### Fuzzing in Phase 1
 
 Fuzz-Ziele aus Phase 0: `rec.FuzzDecode`, `rec.FuzzIsNFC`, `keys.FuzzParseWordlist`, `keys.FuzzSeedFromWords`, `keys.FuzzDecodeGenerationCert`, `keys.FuzzOpenKeystore`, `shamir.FuzzShareFromWords`, `shamir.FuzzShareFromBytes`, `shamir.FuzzCombine`, `envelope.FuzzParseAndOpen`. Neu in Phase 1:
 
@@ -516,14 +559,3 @@ Ergebnis Phase 1: alle 14 Ziele je 5 Minuten ohne Fund, kein neuer Fall unter `t
 | shamir.FuzzShareFromWords | 20,4 Mio. | ingest.FuzzTerms | 3,1 Mio. |
 
 Die Ziele von `store`, `smtpd` und `ingest` liefen auf dem Stand nach den Korrekturen aus den Prüfungen. Bei `smtpd` und `ingest` zeigt der Fuzzer zeitweise 0 Ausführungen je Sekunde; das ist das Minimieren neuer Eingaben, keine einzelne Eingabe brauchte länger als eine halbe Sekunde (geprüft). Der Regressionsfall `revokes = 0` aus Phase 0 liegt zusätzlich mit dem neuen Typ-String `user-gen` vor.
-
-## Was Phase 2 als Erstes wissen muss
-
-1. **S11 und S13 entscheiden lassen, bevor `device lost`, Wiederherstellung und Teilen gebaut werden.** Beide Stellen sind heute die strengste Lesart (`TODO(S11)` in `client/keygen.go` und `cmd/gomailctl`, `TODO(S13)` in `client/mailbox.go`, `userKey`). Nach dem Vorschlag zu S13 muss `device lost` alles neu ausstellen, was die alte Generation außerhalb des Logs signiert hat (Verpackungen für andere Mitglieder, Name, `folders.gml`, geänderte Metadaten).
-2. **Mehrere Mitglieder:** Die Mitgliederliste der Epoche und die Verpackungen je Benutzer tragen sie schon. Zu bauen sind das Verpacken für andere (Empfänger `user-unwrap` mit ihrer aktuellen Generation, signiert vom Verpackenden), die Prüfung "Unterzeichner ist Mitglied der Vorgängerin" mit Generationsabgleich (Prüfung C7), `revoke` mit sofortiger Epoche und `share` mit Auswahl der Epochen. `createEpoch` in `client/mailbox.go` schreibt heute nur die eigene Verpackung.
-3. **Name und Ordnerliste hängen an Epoche 1** (S20). Ein Mitglied, das nur spätere Epochen bekommt, kann sie nicht lesen. Vor `share --from` entscheiden.
-4. **Metadaten mit Benutzersignatur** (Flags) lehnt der Client heute ab (`checkMeta`). Mit Flag-Änderungen kommen: eigene Signaturpolitik (Mitglied der Epoche, aktuelle Generation), neue Datei mit höherer Version, `extra` wie bei Ingest (S22 beachten).
-5. **Lokaler Zustand ist Sicherheit:** `state.json` schützt gegen Zurückspielen. Kopplung neuer Geräte (2.7) muss ihn übertragen, sonst beginnt das neue Gerät bei Vertrauen beim ersten Kontakt.
-6. **Server und Kette:** `ingest.chooseEpoch` prüft die ganze Kette bei jeder Annahme. Bei vielen Epochen lohnt ein Zwischenspeicher je Postfach, der an den Hash der `epoch.rec`-Dateien gebunden ist.
-7. **Absturzsicherheit beim Client:** Epochen werden vor `mailbox.rec` geschrieben, Verpackungen vor `epoch.rec`. Jede neue Schreibfolge (Teilen, Entziehen) braucht dieselbe Überlegung, was nach einem Absturz übrig bleibt und wie der nächste Lauf es übernimmt oder aufräumt.
-8. **Tests:** `internal/testenv` baut Plattform, Benutzer und Postfächer in einem Aufruf; `client/tamper_test.go` zeigt, wie man gefälschte Mails mit beliebigem Schlüssel, beliebiger Epoche und Version erzeugt; `ingest/crash_test.go` die Einspritzpunkte.
