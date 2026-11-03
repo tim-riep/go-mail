@@ -67,6 +67,17 @@ import (
 //     round (126,000 to 255,000 rounds, 440 to 890 days, measured).
 //   - Copies, pending files put back while their segment is there, and
 //     index/<n>/ rolled back to before a merge: +0.
+//
+// The rate as a formula (DECISIONS D91, "Bekannte Grenze"): per Sync and
+// attacked epoch about 270 bytes times D times k, where D is the number
+// of devices that merge and k the number of segments of a merge result
+// (k is about the mails of the epoch divided by store.MaxPostingIDs),
+// once (D - 1) * k >= 16, that is once the results of the other devices
+// save MergeThreshold-1 segments; below that +0. With one device only
+// the pending files put back after their segment was removed make it
+// grow: about 300 bytes times k per round and epoch. Several attacked
+// epochs add up. The attacker needs write access to the data directory,
+// and the effect is visible (Open refuses a state.json above 64 MiB).
 
 // MergeThreshold is the number of segments of one epoch from which a
 // client merges them (6.2, K5 point 4).
@@ -100,9 +111,11 @@ var resignHook func()
 // for many devices that index without merging. Both bound the memory of
 // one run to 256 MiB plus the decoded postings, and the time to 4096
 // decryptions and signature checks. They are variables only so that
-// tests can lower them.
+// tests can lower them; maxReadSegments never exceeds
+// store.MaxListedIndexSegments, of which store.ListIndexSegments lists
+// one more, enough to tell that there are more (task 20b point 4).
 var (
-	maxReadSegments       = 4096
+	maxReadSegments       = store.MaxListedIndexSegments
 	maxReadBytes    int64 = 256 << 20
 )
 
@@ -1102,6 +1115,17 @@ func resultID(sums [][32]byte) string {
 // successors.used). These records are made once per segment this client
 // writes, as readers make one for each, not per file put back. The
 // caller saves the state.
+//
+// A part record made here carries the tree size of the reference head,
+// which a client has from Open on, so the first check of the segment
+// later (recordChecked: same hash, signer and generation, tree size
+// above 0) leaves it as it is. recordChecked replaces a record of the
+// same hash only when that record has tree size 0 (or names another
+// signer or generation, which the same bytes cannot), and keeps its Part
+// then (mutation P3-f of task 09g, "recordChecked drops Part", is
+// therefore equivalent in operation and survives); the line stays so
+// that no path of recordChecked can turn a part back into a whole
+// result.
 func (c *Client) noteResult(mbx store.ID, n uint32, dev store.ID, written []segmentFile) string {
 	sums := make([][32]byte, 0, len(written))
 	for _, w := range written {

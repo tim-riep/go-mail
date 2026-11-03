@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -336,9 +335,11 @@ var (
 	fsyncDir  = store.SyncDir
 )
 
-// syncFile fsyncs a file that exists.
+// syncFile fsyncs a regular file that exists. It is opened with
+// store.OpenRegular (task 20b point 5): a FIFO in its place is
+// store.ErrNotRegular at once, not a hang.
 func syncFile(p string) error {
-	f, err := os.Open(p)
+	f, _, err := store.OpenRegular(p)
 	if err != nil {
 		return err
 	}
@@ -772,8 +773,10 @@ func RepairTree(opts Options) error {
 }
 
 // eachHead calls fn with the size of every canonical heads/<size>.sig.
+// heads/ is opened with store.OpenDir (task 20b point 5): a FIFO there is
+// an error at once, not a hang.
 func (l *fileLog) eachHead(fn func(size int64) error) error {
-	d, err := os.Open(l.f.path(HeadsDir))
+	d, err := store.OpenDir(l.f.path(HeadsDir))
 	if err != nil {
 		return logErr("heads", err)
 	}
@@ -805,9 +808,10 @@ func (l *fileLog) eachHead(fn func(size int64) error) error {
 // orphans returns an *OrphanEntriesError when entries/ holds a file
 // <i>.rec with a canonical decimal i >= m (RepairTree step 4), of any
 // file type: refuse looks at the name only. Other names are no entries
-// and are ignored. It only reads the directory.
+// and are ignored. It only reads the directory, which it opens with
+// store.OpenDir (task 20b point 5): a FIFO there is an error at once.
 func (f *files) orphans(m int64) error {
-	d, err := os.Open(f.path(EntriesDir))
+	d, err := store.OpenDir(f.path(EntriesDir))
 	if err != nil {
 		return logErr("entries", err)
 	}

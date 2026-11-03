@@ -1122,7 +1122,7 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 			e, data, next := c.readBeyond(links, id, n)
 			if next != nil {
 				if errors.Is(next.cause, errEpochContradicts) {
-					c.warnContradicts(id, n)
+					c.warnContradicts(id, n, false)
 					ch.next = next
 				} else if !errors.Is(next.cause, store.ErrNotFound) {
 					c.warn("WARNUNG: Epoche %d von %s nach dem Kopf von mailbox.rec ist ungültig und wird ignoriert: %s.", n, id, warnCause(next.cause))
@@ -1135,11 +1135,21 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 			continue
 		}
 		e, data, err := c.st.ReadEpoch(id, n)
+		var logErr error
+		logRan := false
 		if err == nil {
-			err = c.checkEpoch(links, e, data)
+			logErr, logRan, err = c.checkEpoch(links, e, data)
 		}
-		if err != nil && e != nil && n == head && n == m.Epoch && n > ms.Epoch && n > logged && ch.err == nil &&
-			errors.Is(c.epochLogged(e, data), translog.ErrOrder) {
+		unloggable := false
+		if err != nil && e != nil && n == head && n == m.Epoch && n > ms.Epoch && n > logged && ch.err == nil {
+			// epochLogged runs at most once per epoch: a second run
+			// would append the epoch.rec once more under log/lock.
+			if !logRan {
+				logErr = c.epochLogged(e, data)
+			}
+			unloggable = errors.Is(logErr, translog.ErrOrder)
+		}
+		if unloggable {
 			// The epoch.rec that mailbox.rec names can never be logged
 			// (translog doc.go "Unlogged epoch.rec" steps 1 and 2, then
 			// Append: ErrOrder; task 14b point 3). Readers report the
@@ -1158,6 +1168,9 @@ func (c *Client) loadChain(id store.ID, adopt bool) (*chain, error) {
 		}
 		if err != nil {
 			c.warn("WARNUNG: Epochenkette von %s bricht bei Epoche %d ab: %s.", id, n, warnCause(err))
+			if n == head && errors.Is(err, errEpochContradicts) {
+				c.warnContradicts(id, n, true)
+			}
 			if ch.err == nil {
 				ch.err = fmt.Errorf("%w: epoch %d: %v", store.ErrChain, n, err)
 			}
@@ -1247,14 +1260,24 @@ var errUnloggableHead = errors.New("client: the head epoch can never be logged; 
 // doc.go "Unlogged epoch.rec" step 4).
 var errEpochContradicts = errors.New("client: another epoch with this number is in the log")
 
-// warnContradicts warns about epoch.rec n of mbx beyond the head of
-// mailbox.rec that contradicts the log, with the fixed cause and the
-// remedy, which is the operator's (translog doc.go "Unlogged epoch.rec"
-// step 4, task 14b point 13). An epoch of the chain up to the head that
-// contradicts the log breaks the chain with the usual warning: removing
-// it would not help, the logged content belongs there.
-func (c *Client) warnContradicts(mbx store.ID, n uint32) {
-	c.warn("WARNUNG: Epoche %d von %s widerspricht dem Transparenzlog: dort ist eine andere Epoche %d eingetragen. Sie wird nie ersetzt; das Postfach bleibt blockiert. Abhilfe (Betreiber): die Datei entfernen, nachdem der Logeintrag geprüft wurde.", n, mbx, n)
+// warnContradicts warns about epoch.rec n of mbx that contradicts the
+// log, with the fixed cause and the remedy, which is the operator's
+// (translog doc.go "Unlogged epoch.rec" step 4, task 14b point 13). It
+// is called for an epoch beyond the head of mailbox.rec (atHead false)
+// and, after the usual warning that the chain breaks, for the epoch at
+// the head of the chain (atHead true, task 20b point 3; the head is that
+// of mailbox.rec or the newest logged epoch, whichever is higher). Only
+// the message differs: the epoch is never replaced either way and the
+// mailbox stays blocked. Beyond the head the file is removed after
+// checking the log entry; at the head the logged content belongs there,
+// so removing the file would not help. An epoch below the head that
+// contradicts the log breaks the chain with the usual warning only.
+func (c *Client) warnContradicts(mbx store.ID, n uint32, atHead bool) {
+	remedy := "die Datei entfernen, nachdem der Logeintrag geprüft wurde"
+	if atHead {
+		remedy = "die Datei durch den Inhalt des Logeintrags ersetzen, nachdem er geprüft wurde"
+	}
+	c.warn("WARNUNG: Epoche %d von %s widerspricht dem Transparenzlog: dort ist eine andere Epoche %d eingetragen. Sie wird nie ersetzt; das Postfach bleibt blockiert. Abhilfe (Betreiber): %s.", n, mbx, n, remedy)
 }
 
 // remember notes begin and effect of each epoch in ms (the first values
@@ -1394,22 +1417,25 @@ func (c *Client) readBeyond(links *store.Chain, id store.ID, n uint32) (*store.E
 // every epoch of the chain, K2 rule 3 decided by the log order; an
 // unlogged one is appended first), the signer's generation from the log
 // (userKey: CheckUser, CheckGeneration, CheckRevokedSignature) and the
-// signature.
-func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) error {
+// signature. It returns as well the result of epochLogged and whether it
+// ran (it does not when a check before it fails), so that loadChain asks
+// the log about the head once and never appends it twice (task 20b
+// point 3).
+func (c *Client) checkEpoch(links *store.Chain, e *store.Epoch, data []byte) (logErr error, logRan bool, err error) {
 	if err := links.Add(e, data); err != nil {
-		return err
+		return nil, false, err
 	}
 	if err := c.checkSignerGen(links, e); err != nil {
-		return err
+		return nil, false, err
 	}
-	if err := c.epochLogged(e, data); err != nil {
-		return err
+	if logErr = c.epochLogged(e, data); logErr != nil {
+		return logErr, true, logErr
 	}
 	pub, err := c.userKey(e.SignerID, e.SignerGen, data)
 	if err != nil {
-		return err
+		return nil, true, err
 	}
-	return e.VerifySignature(pub)
+	return nil, true, e.VerifySignature(pub)
 }
 
 // checkSignerGen rejects epoch e of the chain links (already added) if

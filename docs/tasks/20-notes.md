@@ -272,3 +272,4 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - F2 (aus 20b geerbt, nur zwei Prozesse desselben Benutzers): `lockOnlyDir` entfernt `lock` unter gehaltener Sperre; ein anderer Prozess mit Deskriptor auf dem alten Inode kann danach eine wirkungslose Sperre bekommen. Abhilfe: nach `lockPath` Inode von fd und Pfad vergleichen, sonst wiederholen; oder als bekannte Grenze dokumentieren.
 - F3 (Hinweis): Verlierer zweier gleichzeitiger `keygen` meldet `ENOENT` statt `ErrExists`.
 - Angriffstests: Scratchpad `verify20e-attack/internal/client/attack20e_test.go`.
+- Nach Merge 20b: RUNBOOK braucht die Abhilfe am Kopf („Datei durch den geprüften Logeintrag ersetzen“) und die Regeln zu `keygen`/`restore` (leeres oder nur-`lock`-Verzeichnis, Temp-Präfixe, Aufräumen) → Auftrag 20.

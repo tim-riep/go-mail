@@ -94,7 +94,8 @@ func checkDirs(out, keyDir string) (string, string, error) {
 }
 
 // checkEmpty reports whether dir does not exist or is an empty
-// directory.
+// directory. dir is opened with store.OpenDir (task 20b point 5): a FIFO
+// put there after the Lstat is an error at once, not a hang.
 func checkEmpty(dir string) error {
 	fi, err := os.Lstat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -106,7 +107,7 @@ func checkEmpty(dir string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%w: %s is not a directory", ErrOutDir, filepath.Base(dir))
 	}
-	f, err := os.Open(dir)
+	f, err := store.OpenDir(dir)
 	if err != nil {
 		return err
 	}

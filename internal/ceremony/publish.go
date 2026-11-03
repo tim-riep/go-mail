@@ -78,12 +78,13 @@ func roleOf(name string) keys.Role {
 
 // readExport reads Out/platform/ of an export directory strictly: only
 // regular files with the names of section 4, each at most
-// store.MaxRecordFile bytes.
+// store.MaxRecordFile bytes. platform/ is opened with store.OpenDir
+// (task 20b point 5): a FIFO there is ErrOutDir at once, not a hang.
 func readExport(from string) (map[string]platformFile, []byte, error) {
 	dir := filepath.Join(from, "platform")
-	d, err := os.Open(dir)
+	d, err := store.OpenDir(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrOutDir, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrOutDir, err)
 	}
 	ents, err := d.ReadDir(maxExportFiles + 1)
 	d.Close()

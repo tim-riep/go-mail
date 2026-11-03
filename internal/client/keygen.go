@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/shamir"
@@ -29,9 +30,12 @@ type Prompter interface {
 // seed (2.2 "Wiederherstellung", gomailctl keygen --shares). The shares
 // are shown only through ShowShares and never written to a file.
 //
-// TODO(task-13): ShowShares belongs to Prompter; it is a separate
-// interface only because cmd/gomailctl, which implements Prompter, is
-// changed by task 13 and not by this task.
+// It stays a separate interface (task 20b point 2): Prompter is all that
+// Keygen without shares and RecoveryKeygen, which never splits its seed,
+// need, so their callers implement no method that is never called.
+// KeygenWithOptions asks for SharePrompter only when opts.Shares is set
+// and refuses a Prompter without ShowShares (ErrArgument) before a seed
+// exists. The prompter of gomailctl keygen implements it.
 type SharePrompter interface {
 	Prompter
 	// ShowShares displays the shares once: shares[i] are the 30 words of
@@ -146,19 +150,151 @@ func KeygenWithOptions(cfg Config, passphrase []byte, p Prompter, opts KeygenOpt
 	if err != nil {
 		return store.ID{}, err
 	}
-	if err := mkdirClient(cfg.Dir); err != nil {
-		return store.ID{}, err
-	}
-	if err := store.WritePrivateFileAtomic(cfg.userPath(), userData); err != nil {
-		return store.ID{}, err
-	}
-	if err := keys.WriteKeystoreFile(cfg.keystorePath(), ksData); err != nil {
-		return store.ID{}, err
-	}
-	if err := saveState(cfg.statePath(), &state{UserID: id.String(), Mailboxes: map[string]*mailboxState{}}); err != nil {
+	err = createClientDir(cfg.Dir, func(tmp string) error {
+		t := Config{Dir: tmp}
+		if err := store.WritePrivateFileAtomic(t.userPath(), userData); err != nil {
+			return err
+		}
+		if err := keygenStep("user"); err != nil {
+			return err
+		}
+		if err := keys.WriteKeystoreFile(t.keystorePath(), ksData); err != nil {
+			return err
+		}
+		if err := keygenStep("keystore"); err != nil {
+			return err
+		}
+		if err := saveState(t.statePath(), &state{UserID: id.String(), Mailboxes: map[string]*mailboxState{}}); err != nil {
+			return err
+		}
+		return keygenStep("state")
+	})
+	if err != nil {
 		return store.ID{}, err
 	}
 	return id, nil
+}
+
+// keygenFault, if set, is called after every write step of Keygen with
+// the name of the step ("dir", "user", "keystore", "state", "renamed");
+// an error it returns is handled like a failed write of that step. It is
+// nil in production and set only by tests of this package.
+var keygenFault func(step string) error
+
+// keygenStep ends a write step of Keygen: a simulated crash (crashHook,
+// point "keygen-<step>") stops without cleanup as a killed process
+// would; an injected fault (keygenFault) fails the step.
+func keygenStep(step string) error {
+	if crash("keygen-" + step) {
+		return errCrashed
+	}
+	if keygenFault != nil {
+		return keygenFault(step)
+	}
+	return nil
+}
+
+// createClientDir creates the client directory dir of a new user in one
+// step (task 20b point 1): write fills a new temporary directory next to
+// dir (each file synced on its own), the temporary directory is synced,
+// renamed to dir and the parent of dir is synced. A signal or a failed
+// write at any point leaves either no client directory or a complete one
+// with key store, user.rec and state.json, so a second keygen succeeds
+// after an interrupted one, and a complete directory is never half
+// overwritten. Before the rename a failure removes the temporary
+// directory; a killed process may leave it behind as .<name>.keygen-*
+// next to dir, holding only the sealed key store and the public user.rec,
+// and no client reads it.
+//
+// dir may exist as an empty directory, which the rename replaces, or as
+// one that holds only the lock file (lockOnlyDir); a directory with
+// other entries is kept and refused (store.ErrExists; Keygen itself
+// refuses a directory with a key store before, ErrRegistered). A
+// symbolic link as dir is followed, as before: the directory it names is
+// created or replaced.
+func createClientDir(dir string, write func(tmp string) error) (err error) {
+	if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if dir, err = filepath.EvalSymlinks(dir); err != nil {
+			return err
+		}
+	}
+	parent, name := filepath.Dir(dir), filepath.Base(dir)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(parent, "."+name+".keygen-")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// A simulated crash leaves everything as a killed process would.
+		if err != nil && !errors.Is(err, errCrashed) {
+			os.RemoveAll(tmp)
+		}
+	}()
+	// MkdirTemp creates the directory with 0700 less the umask.
+	if err := os.Chmod(tmp, 0o700); err != nil {
+		return err
+	}
+	if err := keygenStep("dir"); err != nil {
+		return err
+	}
+	if err := write(tmp); err != nil {
+		return err
+	}
+	if err := store.SyncDir(tmp); err != nil {
+		return err
+	}
+	release, err := lockOnlyDir(dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+	// syscall.Rename, because os.Rename refuses every existing directory
+	// as target; rename(2) replaces an empty one and refuses any other.
+	if err := syscall.Rename(tmp, dir); err != nil {
+		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("%w: the client directory %s is not empty", store.ErrExists, dir)
+		}
+		return &os.LinkError{Op: "rename", Old: tmp, New: dir, Err: err}
+	}
+	if err := keygenStep("renamed"); err != nil {
+		return err
+	}
+	return store.SyncDir(parent)
+}
+
+// lockOnlyDir prepares an existing directory dir for the rename of
+// createClientDir. Open creates the client directory and its lock file
+// before it finds that no user exists (ErrNotRegistered), so a client
+// directory that holds only the regular file lock counts as empty: under
+// that lock the file is removed and the rename replaces the then empty
+// directory; release ends the lock. A directory with any other entry is
+// left alone, and the rename refuses it.
+func lockOnlyDir(dir string) (release func(), err error) {
+	release = func() {}
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return release, nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return release, err
+	}
+	ents, _ := d.ReadDir(2)
+	d.Close()
+	if len(ents) != 1 || ents[0].Name() != "lock" || !ents[0].Type().IsRegular() {
+		return release, nil
+	}
+	lock := filepath.Join(dir, "lock")
+	unlock, err := store.LockFile(lock)
+	if err != nil {
+		return release, err
+	}
+	if err := os.Remove(lock); err != nil {
+		unlock()
+		return release, err
+	}
+	return unlock, nil
 }
 
 // showAndConfirm shows the 24 words of seed through p and asks three

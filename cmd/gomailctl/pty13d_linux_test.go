@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -45,6 +46,40 @@ func stderrFile(t *testing.T) (*os.File, func() string) {
 			t.Fatal(err)
 		}
 		return string(b)
+	}
+}
+
+// waitQueued waits until the number of bytes in the input queue of the
+// terminal f satisfies ok, and fails with msg after a minute.
+func waitQueued(t *testing.T, f *os.File, msg string, ok func(n int) bool) {
+	t.Helper()
+	for deadline := time.Now().Add(60 * time.Second); !ok(inputQueued(t, f)); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+	}
+}
+
+// stopChild stops the child with SIGSTOP and waits until it is stopped
+// (state T in /proc/<pid>/stat); the caller continues it with SIGCONT.
+func stopChild(t *testing.T, ch *child) {
+	t.Helper()
+	pid := ch.cmd.Process.Pid
+	if err := ch.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// pid (comm) state ...: the state follows the last parenthesis.
+		if i := bytes.LastIndexByte(b, ')'); i >= 0 && i+2 < len(b) && b[i+2] == 'T' {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d does not stop: %q", pid, b)
+		}
 	}
 }
 
@@ -302,15 +337,20 @@ func TestPtyRestoreStderrClosed(t *testing.T) {
 	}
 	r.Close()
 	p.waitEcho(t)
+	// The program has read the first line once the line was in the
+	// input queue and the queue is empty again (no fixed wait, task 20a
+	// point 8, task 20b point 9). Right after the write the queue is
+	// often still empty, and a waiting program reads the line at once:
+	// it is stopped while the line is typed, so that the line is seen in
+	// the queue, and then continued.
+	stopChild(t, ch)
 	p.typeIn(t, strings.Join(ws[:12], " ")+"\n")
-	// The program has read the first line once the input queue is
-	// empty (no fixed wait, task 20a point 8); it runs on after the
-	// failed progress line.
-	for deadline := time.Now().Add(60 * time.Second); inputQueued(t, p.slave) != 0; time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the first line is not read")
-		}
+	waitQueued(t, p.slave, "the first line does not reach the terminal", func(n int) bool { return n > 0 })
+	if err := ch.cmd.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
 	}
+	waitQueued(t, p.slave, "the first line is not read", func(n int) bool { return n == 0 })
+	// It runs on after the failed progress line.
 	ch.running(t)
 	p.typeIn(t, strings.Join(ws[12:], " ")+"\n")
 	code := ch.exit(t)

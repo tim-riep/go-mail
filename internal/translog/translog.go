@@ -40,7 +40,10 @@ import (
 // did not explicitly accept running without one.
 var ErrNoLog = errors.New("translog: no transparency log available; refusing to start (development only: --insecure-no-log)")
 
-// Warning is printed by clients on every start with Unverified.
+// Warning is the warning of a start without the log. No command prints
+// it: every command runs with the log, and the switch --insecure-no-log
+// that it names is a usage error everywhere. It remains, with ErrNoLog,
+// for translogtest.Unverified.
 const Warning = "WARNUNG: Ohne Transparenzlog (--insecure-no-log). Generationen, Widerrufe, Epochen, " +
 	"Zertifikate und Adresszuordnungen werden NICHT gegen ein Log geprüft. Ein Server kann " +
 	"unbemerkt abweichende Zustände zeigen. Nur für die Entwicklung, nie mit echten Mails."

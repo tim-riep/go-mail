@@ -197,3 +197,28 @@ func TestScreenAbort(t *testing.T) {
 		t.Fatal("lock released after the abort")
 	}
 }
+
+// TestTerminalIDDevice (task 20b point 9): terminalID takes the device
+// number and the file system device of the terminal from fstat: the
+// same st_rdev and st_dev as a stat of the descriptor and of the path of
+// the slave.
+func TestTerminalIDDevice(t *testing.T) {
+	_, slave := openPty(t)
+	id, ok := terminalID(slave.Fd())
+	if !ok {
+		t.Fatal("the slave is no terminal")
+	}
+	for name, stat := range map[string]func() (os.FileInfo, error){
+		"descriptor": slave.Stat,
+		"path":       func() (os.FileInfo, error) { return os.Stat(slave.Name()) },
+	} {
+		fi, err := stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := fi.Sys().(*syscall.Stat_t)
+		if id.dev != uint64(st.Dev) || id.rdev != uint64(st.Rdev) {
+			t.Fatalf("terminalID %+v, stat of the %s: dev %d rdev %d", id, name, st.Dev, st.Rdev)
+		}
+	}
+}

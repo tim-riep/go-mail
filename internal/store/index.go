@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -165,32 +165,52 @@ func (s *Store) RemoveIndexSegment(id ID, n uint32, device ID, seq uint64) error
 	return RemoveDurable(s.IndexSegmentFile(id, n, device, seq))
 }
 
+// MaxListedIndexSegments bounds ListIndexSegments. It is the number of
+// segment files one client run reads of an epoch (client maxReadSegments,
+// task 09c): a caller learns that there are more without the directory
+// being read to its end.
+const MaxListedIndexSegments = 4096
+
+// listIndexChunk is the number of directory entries read at a time.
+const listIndexChunk = 256
+
 // ListIndexSegments returns the segments of epoch n sorted by device and
 // sequence number. Other files (fulltext.gml, temporary files, names that
 // are not canonical) are ignored.
+//
+// It returns at most MaxListedIndexSegments+1 segments (task 20b point
+// 4): the directory is read in parts (ReadDir(n)), and reading stops at
+// the first segment beyond MaxListedIndexSegments, so len > the limit
+// tells the caller that there are more, as before, while the rest of the
+// directory is not read. Up to the limit every segment is returned; above
+// it, which of them are returned follows the order of the directory. The
+// directory is opened with OpenDir: a FIFO in its place is an error at
+// once.
 func (s *Store) ListIndexSegments(id ID, n uint32) ([]IndexSegmentRef, error) {
-	entries, err := os.ReadDir(s.IndexDir(id, n))
+	d, err := OpenDir(s.IndexDir(id, n))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	defer d.Close()
 	var out []IndexSegmentRef
-	for _, e := range entries {
-		name, ok := strings.CutSuffix(e.Name(), ".gml")
-		if !ok || !e.Type().IsRegular() || len(name) < IDLen+2 || name[IDLen] != '-' {
-			continue
+	for len(out) <= MaxListedIndexSegments {
+		entries, err := d.ReadDir(listIndexChunk)
+		for _, e := range entries {
+			if r, ok := indexSegmentName(e); ok {
+				if out = append(out, r); len(out) > MaxListedIndexSegments {
+					break
+				}
+			}
 		}
-		device, err := ParseID(name[:IDLen])
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			continue
+			return nil, err
 		}
-		seq, err := strconv.ParseUint(name[IDLen+1:], 10, 64)
-		if err != nil || strconv.FormatUint(seq, 10) != name[IDLen+1:] {
-			continue
-		}
-		out = append(out, IndexSegmentRef{Device: device, Seq: seq})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Device != out[j].Device {
@@ -199,4 +219,22 @@ func (s *Store) ListIndexSegments(id ID, n uint32) ([]IndexSegmentRef, error) {
 		return out[i].Seq < out[j].Seq
 	})
 	return out, nil
+}
+
+// indexSegmentName parses the directory entry of a segment file,
+// <device-id>-<seq>.gml with a canonical sequence number.
+func indexSegmentName(e fs.DirEntry) (IndexSegmentRef, bool) {
+	name, ok := strings.CutSuffix(e.Name(), ".gml")
+	if !ok || !e.Type().IsRegular() || len(name) < IDLen+2 || name[IDLen] != '-' {
+		return IndexSegmentRef{}, false
+	}
+	device, err := ParseID(name[:IDLen])
+	if err != nil {
+		return IndexSegmentRef{}, false
+	}
+	seq, err := strconv.ParseUint(name[IDLen+1:], 10, 64)
+	if err != nil || strconv.FormatUint(seq, 10) != name[IDLen+1:] {
+		return IndexSegmentRef{}, false
+	}
+	return IndexSegmentRef{Device: device, Seq: seq}, true
 }

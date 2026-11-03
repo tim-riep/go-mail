@@ -396,9 +396,17 @@
 //     reader). Reading (task 14b point 13, the open question of task 14): it is
 //     never replaced by a client, not even by exactly the logged content
 //     (which some member logged without writing store, breaking this
-//     protocol); the mailbox stays blocked for changes, and the client
-//     warns with the fixed cause and the remedy, which is the operator's:
-//     remove the file after checking the log entry.
+//     protocol); the mailbox stays blocked for changes. What the client
+//     reports depends on where the file lies relative to the head of the
+//     chain, which is the epoch mailbox.rec names or the newest logged
+//     epoch of the mailbox, whichever is higher (task 20b point 3).
+//     Beyond the head (read only by a change, which then fails) it warns
+//     with the fixed cause and the remedy, which is the operator's:
+//     remove the file after checking the log entry. At the head the
+//     chain breaks with the usual warning, followed by the same fixed
+//     cause with the remedy to replace the file by the content of the
+//     checked log entry. Below the head only the usual warning that the
+//     chain breaks is given.
 //
 // store cannot ask the log itself (translog imports store). Built by
 // task 07, used by task 14: store.ReplaceEpoch(mailbox, number, old,
@@ -1170,7 +1178,8 @@
 // mailbox.go (internal/client 14). Task 11 resolves the site in
 // cmd/gomail-server/main.go ("address add" appends with
 // Append(KindAddress) to the operator log of --pin before AddAddress;
-// only --insecure-no-log still uses Unverified until task 15): 30 sites.
+// at that base its --insecure-no-log still used Unverified, task 15
+// removed that switch): 30 sites.
 // Task 15 resolves the four sites in internal/ingest/delivery.go (the
 // server's ingest checks against its operator log, see the rows below)
 // and the one in ceremony.InitDev (the certificates go into the operator

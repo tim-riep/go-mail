@@ -1,6 +1,8 @@
 package client
 
 import (
+	"fmt"
+
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/translog"
 )
@@ -48,4 +50,24 @@ var WarnCause = warnCause
 func SetLogHook(t interface{ Cleanup(func()) }, f func(translog.Log) translog.Log) {
 	logHook = f
 	t.Cleanup(func() { logHook = nil })
+}
+
+// CommitHeadAt calls commitHead with epoch n of the verified chain of
+// mbx, for the test of its rule that the head never sinks.
+func (c *Client) CommitHeadAt(mbx store.ID, n uint32) error {
+	ch, err := c.verifyChain(mbx)
+	if err != nil {
+		return err
+	}
+	if n == 0 || int(n) > len(ch.epochs) {
+		return fmt.Errorf("client: no epoch %d in the chain", n)
+	}
+	return c.commitHead(ch, ch.epochs[n-1], ch.data[n-1])
+}
+
+// SetKeygenFault sets the fault hook of Keygen (see keygenFault) until
+// the test ends.
+func SetKeygenFault(t interface{ Cleanup(func()) }, f func(step string) error) {
+	keygenFault = f
+	t.Cleanup(func() { keygenFault = nil })
 }

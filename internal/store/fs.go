@@ -21,15 +21,56 @@ var (
 	ErrTooLarge = errors.New("store: file too large")
 	// ErrLocked reports a lock held by another process.
 	ErrLocked = errors.New("store: in use by another process")
+	// ErrNotRegular reports a file that must be a regular file and is
+	// not (a FIFO, a device, a directory); OpenRegular, ReadFileLimited.
+	ErrNotRegular = errors.New("not a regular file")
 )
 
 // tmpPrefix marks temporary files. They are never valid data files; a
 // crash may leave them behind and RemoveTemp deletes them.
 const tmpPrefix = ".tmp-"
 
+// OpenDir opens the directory dir for reading its entries or for fsync
+// with O_DIRECTORY and O_NONBLOCK (task 20b point 5, R41): anything but a
+// directory is refused by the open itself (syscall.ENOTDIR), so a FIFO
+// in place of the directory is an error at once instead of an open that
+// waits for a writer. A symbolic link to a directory is followed, as by
+// os.Open. On a platform without O_DIRECTORY the type is checked after
+// the open instead (openDir in dir_other.go).
+func OpenDir(dir string) (*os.File, error) { return openDir(dir) }
+
+// OpenRegular opens path for reading (or fsync) if it is a regular file:
+// it is opened with O_NONBLOCK and checked with fstat after the open
+// (task 20a point 2, task 20b point 5). A FIFO, or a device, put in
+// place of a file is refused as not regular (ErrNotRegular), and the
+// open, which waits for a writer on a FIFO without O_NONBLOCK, returns
+// at once. On a regular file O_NONBLOCK changes nothing. A missing file
+// is ErrNotFound.
+func OpenRegular(path string) (*os.File, fs.FileInfo, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(path))
+		}
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("store: %s is %w", filepath.Base(path), ErrNotRegular)
+	}
+	return f, fi, nil
+}
+
 // SyncDir fsyncs a directory so that a rename or create in it is durable.
+// It opens dir with OpenDir: a FIFO in place of the directory is an error
+// at once.
 func SyncDir(dir string) error {
-	d, err := os.Open(dir)
+	d, err := OpenDir(dir)
 	if err != nil {
 		return err
 	}
@@ -221,28 +262,17 @@ func RemoveDurable(path string) error {
 // ReadFileLimited reads path if it is a regular file of at most max
 // bytes. The size is checked before anything is allocated.
 //
-// The file is opened with O_NONBLOCK and checked with fstat after the
-// open (task 20a point 2): a FIFO, or a device, put in place of a file
-// of the data directory (or given as a pin or key file) is refused as
-// not regular, and the open, which waits for a writer on a FIFO without
-// O_NONBLOCK, returns at once; no reader (server, client, ceremony)
-// hangs at it. On a regular file O_NONBLOCK changes nothing.
+// The file is opened with OpenRegular (task 20a point 2): a FIFO, or a
+// device, put in place of a file of the data directory (or given as a
+// pin or key file) is refused as not regular (ErrNotRegular), and the
+// open returns at once; no reader (server, client, ceremony) hangs at
+// it.
 func ReadFileLimited(path string, max int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, fi, err := OpenRegular(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(path))
-		}
 		return nil, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("store: %s is not a regular file", filepath.Base(path))
-	}
 	if fi.Size() > max {
 		return nil, fmt.Errorf("%w: %s has %d bytes, at most %d", ErrTooLarge, filepath.Base(path), fi.Size(), max)
 	}

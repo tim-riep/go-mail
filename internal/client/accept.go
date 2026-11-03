@@ -321,6 +321,9 @@ func (c *Client) recordChecked(mbx store.ID, key string, data []byte, signer sto
 	}
 	if old != nil && old.Hash == m.Hash {
 		// A part of a result of several segments stays one (task 09g).
+		// Reached for a part record (noteResult) only if it was made
+		// with tree size 0, which does not happen once a client is open
+		// (P3-f, see noteResult); kept for every path.
 		m.Part = old.Part
 	}
 	ms.Checked[key] = m

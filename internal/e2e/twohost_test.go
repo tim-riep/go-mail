@@ -1161,18 +1161,20 @@ func hasWords(b []byte, words []string, runs []*regexp.Regexp) bool {
 
 // wordRun matches the words ws as whole words one after the other,
 // apart by one to four characters that are no letters (a space, a line
-// break, ", ", "\",\"").
+// break, ", ", "\",\"") with white space of any length before and after
+// them (task 20b point 10: a seed indented on its lines, ",\n    ").
 func wordRun(ws []string) *regexp.Regexp {
 	q := make([]string, len(ws))
 	for i, w := range ws {
 		q[i] = regexp.QuoteMeta(w)
 	}
-	return regexp.MustCompile(`(?i)(^|[^a-z])` + strings.Join(q, `[^a-z]{1,4}`) + `($|[^a-z])`)
+	return regexp.MustCompile(`(?i)(^|[^a-z])` + strings.Join(q, `\s*[^a-z]{1,4}\s*`) + `($|[^a-z])`)
 }
 
-// TestHasWords (task 20a point 6): a hit is a word with its number or
-// three words of the seed in their order; three words scattered over a
-// file, or two in order, are none.
+// TestHasWords (task 20a point 6, task 20b point 10): a hit is a word
+// with its number or three words of the seed in their order, also apart
+// by white space of any length (an indented seed); three words scattered
+// over a file, or two in order, are none.
 func TestHasWords(t *testing.T) {
 	words := []string{"abandon", "ability", "able", "about", "above"}
 	var runs []*regexp.Regexp
@@ -1180,15 +1182,20 @@ func TestHasWords(t *testing.T) {
 		runs = append(runs, wordRun(words[i:i+3]))
 	}
 	for in, want := range map[string]bool{
-		"3. able":                          true,
-		"ability able about":               true,
-		"x\nABLE\nABOUT\nABOVE\n":          true,
-		`["abandon","ability","able"]`:     true,
-		"able to talk about it, above all": false,
-		"about able ability":               false,
-		"abandon ability":                  false,
-		"abandonability able about":        false,
-		"ability able aboutx":              false,
+		"3. able":                                  true,
+		"ability able about":                       true,
+		"x\nABLE\nABOUT\nABOVE\n":                  true,
+		`["abandon","ability","able"]`:             true,
+		"able to talk about it, above all":         false,
+		"about able ability":                       false,
+		"abandon ability":                          false,
+		"abandonability able about":                false,
+		"ability able aboutx":                      false,
+		"abandon\n        ability\n        able\n": true,
+		"\tability,\n\t\table,\n\t\tabout":         true,
+		"ability          able   about":            true,
+		"abandon\n        ability\n        x able": false,
+		"able\n        about\n\n  away above":      false,
 	} {
 		if got := hasWords([]byte(in), words, runs); got != want {
 			t.Errorf("%q: %v, want %v", in, got, want)
