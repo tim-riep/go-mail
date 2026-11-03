@@ -26,6 +26,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Präzisiert werden S24 (durch S76), S32 (S78), S56 (S79), S65 (S82 bis S84) und S67 (S86); dort steht jeweils ein Verweis.
 - Nachtrag nach Auftrag 18: Neu sind S88 bis S92 aus D85, D86, D88 und Q11. Zahl: 5 neue Punkte, davon 2 klarstellend und 3 offen. Offen: S88 (ohne Frage), S89 (ohne Frage), S90 (Q11).
 - Zusammen seit Welle 4: 23 Punkte (S70 bis S92), davon 13 klarstellend und 10 offen.
+- Nachtrag 20d: Neu sind S95 bis S98 aus der Einordnung der Hinweise zu Auftrag 20 (`docs/tasks/20-triage.md`; D80, D81, D88). Zahl: 4 neue Punkte, alle klarstellend. Nachgetragen ist der Stand in S23, S52, S70 und S90.
 
 ## S01 `.gml`: Ende der Blockfolge ist ohne Schlüssel nicht bestimmbar
 - Erledigt in Phase 0.1 (Commit 53b92a0): Version 1.1 gibt jedem Element nach dem Empfängerteil ein Typbyte (`0x01` Block, `0x02` letzter Block, `0x03` Trailer). D29 ist aufgehoben, siehe D42.
@@ -194,7 +195,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: Offen ist, ob `to` auch `Cc` umfasst, ob `day` und `month` aus dem `Date`-Header oder der Empfangszeit kommen, wann eine Mail einen Anhang hat und wie die Wurzel eines Threads bestimmt wird.
 - Phase 1: `to` aus `To` und `Cc`; `day` und `month` aus der signierten Empfangszeit in UTC; Anhang bei `multipart/mixed` auf oberster Ebene; Wurzel ist der erste Eintrag von `References`, sonst `In-Reply-To`, sonst die eigene `Message-ID` (DECISIONS D55).
 - Vorschlag: Diese Regeln in 5.4 aufnehmen; sie bestimmen, welche Marken ein Client in Phase 5 sucht.
-- Stand M1: Offen bleibt die Thread-Wurzel für Mails mit Marker `unprocessed`. Die Metadaten halten weder `References` noch `In-Reply-To`; der Client bildet `thread:` aus der eigenen `Message-ID` (`client/terms.go`, Auftrag 09), eine Antwort ist unter der Wurzel dann nicht auffindbar. Ob die Metadaten ein Feld `thread` erhalten, entscheidet Q12.
+- Stand M1: Offen bleibt die Thread-Wurzel für Mails mit Marker `unprocessed`. Die Metadaten halten weder `References` noch `In-Reply-To`; der Client bildet `thread:` aus der eigenen `Message-ID` (`terms.ThreadRoot` in `internal/terms`, aufgerufen von `client.metaTerms`; D91 (1)), eine Antwort ist unter der Wurzel dann nicht auffindbar. Ob die Metadaten ein Feld `thread` erhalten, entscheidet Q12.
 
 ## S24 Widerruf kompromittierter Ingest- und Admin-Generationen
 - Art: offen (Q8).
@@ -401,6 +402,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Stelle: 2.7 „Abgleich zwischen Clients“.
 - Problem: Die Spezifikation legt nicht fest, welche Rolle die Kopfzeit eines Vermerks bei der Prüfung spielt.
 - Stand M1: Strengste Lesart: Ein Vermerk kleiner als der eigene Kopf mit späterer Kopfzeit zeigt, dass der Server für ein anderes Gerät eine alte Größe weiter signiert hat (`ErrConsistency`); bei gleicher Größe sind beide Richtungen erlaubt, ein größerer Vermerk ist `ErrPending` (`translog.Verifier.CheckCheckpoint`).
+- Stand nach Auftrag 14b: Die Kopfzeit wird in beide Richtungen geprüft. Ein Vermerk, der größer ist als der eigene Kopf und eine frühere Kopfzeit trägt, ergibt `ErrConsistency` (dem eigenen Client werden Einträge vorenthalten), ebenso einer, der kleiner ist und eine spätere Kopfzeit trägt (dem anderen Client werden Einträge vorenthalten). Ein größerer Vermerk mit gleicher oder späterer Kopfzeit bleibt `ErrPending` (`translog.Verifier.CheckCheckpoint`, D88 (5); `TestCheckpointLargerEarlier`). Das setzt als Betriebsregel voraus, dass der Server nie eine kleinere Größe nach einer größeren signiert. Wird die Lesart bestätigt, gehören Regel und Betriebsregel in 2.7 „Abgleich zwischen Clients“.
 - Vorschlag: Diese Lesart bestätigen oder die Kopfzeit nur zur Anzeige verwenden.
 
 ## S53 Signierte Struktur führt den Unterzeichner
@@ -530,7 +532,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: klarstellend (Q16, D84, D88 (7)).
 - Stelle: 2.2 „Generationen“ Punkt 2; 2.2 „Was der Benutzer selbst tun muss“ (`gomailctl device lost`, „erzeugt eine neue Generation“); 9.2.
 - Problem: Offen ist, was ein zweiter Aufruf bewirkt, wenn der erste die Neuausstellung nicht in allen Postfächern abgeschlossen hat. Auftrag 06b hat dafür einen Modus „nur fortsetzen“ gebaut: keine neue Generation, solange ein Postfach vorgemerkt ist, mit `ForceNewGeneration` als Ausweg. Die Angreifer-Prüfung von 06h zeigt, dass ein gepflanztes Postfach (Strohmann mit `member-added` ohne Verpackung) oder eine gebrochene fremde Kette den Befehl so dauerhaft festhält; die verlorene Generation wird dann nie widerrufen.
-- Stand nach Auftrag 18: Der Fortsetzungsmodus ist mit Auftrag 14 entfallen (D88 (7), Commit c4e9014). `ForceNewGeneration` und `DeviceLostOptions` gibt es im Client nicht mehr. Jeder Aufruf von `client.DeviceLost` erzeugt die nächste Generation. Vorgemerkte Postfächer werden im selben Lauf mit der neuen Generation fortgesetzt. Scheitern sie weiter, bleibt die Marke und der Befehl endet mit `ErrPartial`. Fehlt `mailbox.rec`, bleibt eine bestehende Marke stehen, und der Befehl endet ebenfalls mit `ErrPartial`. Eine Marke hält den Benutzer nie davon ab, eine Generation zu widerrufen; ein Strohmann-Postfach macht nur das Ergebnis wieder zu `ErrPartial`. Ein Kommentar in `cmd/gomailctl/commands.go` nennt noch `device lost --force-new-generation` mit `TODO(ask)`; er ist überholt.
+- Stand nach Auftrag 18: Der Fortsetzungsmodus ist mit Auftrag 14 entfallen (D88 (7), Commit c4e9014). `ForceNewGeneration` und `DeviceLostOptions` gibt es im Client nicht mehr. Jeder Aufruf von `client.DeviceLost` erzeugt die nächste Generation. Vorgemerkte Postfächer werden im selben Lauf mit der neuen Generation fortgesetzt. Scheitern sie weiter, bleibt die Marke und der Befehl endet mit `ErrPartial`. Fehlt `mailbox.rec`, bleibt eine bestehende Marke stehen, und der Befehl endet ebenfalls mit `ErrPartial`. Eine Marke hält den Benutzer nie davon ab, eine Generation zu widerrufen; ein Strohmann-Postfach macht nur das Ergebnis wieder zu `ErrPartial`. Der überholte Kommentar in `cmd/gomailctl/commands.go` ist mit Auftrag 20a entfernt.
 - Vorschlag: In 2.2 Punkt 2 festhalten: „Jeder Aufruf von `device lost` erzeugt eine neue Generation. Nicht abgeschlossene Neuausstellungen früherer Aufrufe setzt der Client im selben Lauf und bei jedem `sync` mit der neuen Generation fort.“
 
 ## S71 Generation eines Unterzeichners sinkt in der Kette nicht
@@ -671,7 +673,7 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Art: offen (Q11).
 - Stelle: 3.1 Feld 4 („`file_id` gleich der ID im Dateinamen“); 4 (`index/<n>/<device-id>-<lfd>.gml`); 6.2; K5.
 - Problem: Der Dateiname eines Segments besteht aus Gerätekennung und Laufnummer. `file_id` im signierten Kopf trägt nur die Gerätekennung. Ein gültiges Segment, das der Server auf eine andere Laufnummer desselben Geräts kopiert, nimmt der Client still an. Falschtreffer oder ein Leck folgen daraus nicht, weil Treffer je Marke vereinigt werden. Der Server kann aber die Zahl der Segmente aufblähen und das Zusammenfassen ab 16 Segmenten (`client.MergeThreshold`) früher auslösen. Eine Kopie auf ein anderes Gerät wird erkannt.
-- Stand nach Auftrag 18: `file_id` ist die Gerätekennung (D79 (1)); `client.readSegment` prüft nur sie (`TODO(ask)` in `internal/client/index.go`). Auftrag 09b soll nach Q11 nur eine Warnung bei doppelten Laufnummern ergänzen.
+- Stand nach Auftrag 18: `file_id` ist die Gerätekennung (D79 (1)); `client.readSegment` prüft nur sie (`TODO(ask)` in `internal/client/index.go`). Seit 09b warnt der Client, wenn ein Segmentinhalt unter einer weiteren Laufnummer desselben Geräts liegt (`TestSegmentCopyWarns`); Vermerke hängen am Inhalt, nicht an der Laufnummer (D91 (4)).
 - Vorschlag: Wie Q11: `file_id` eines Segments bindet den vollständigen Basisnamen `<device-id>-<lfd>`, und der Client lehnt Segmente ab, deren `file_id` nicht dem Dateinamen entspricht. Alternativ die heutige Lesart in 3.1 und 6.2 festschreiben.
 
 ## S91 Nachfolgekette der Plattformidentität beim Veröffentlichen
@@ -701,3 +703,31 @@ Stand Phase 1 (Version 1.2, Abschnitt 14): S03, S05, S10 und S14 sind erledigt (
 - Problem: K5 nennt „ab 16 Segmenten“ als Schwelle für das Zusammenfassen. Bei Ergebnissen aus mehreren Segmenten (große Epochen) würde jedes Mitglied bei jedem Index erneut zusammenfassen.
 - Stand: Der Client fasst zusammen, wenn das mindestens `MergeThreshold − 1` Segmente einspart (gezählt: verschiedene, gültige, nicht verbrauchte Segmente; abgezogen: die Segmente des Ergebnisses). Für ein Ergebnis aus einem Segment ist das „ab 16“.
 - Vorschlag: In K5 Punkt 4 „wenn das Zusammenfassen mindestens 15 Segmente einspart“ statt „ab 16 Segmenten“.
+
+## S95 Fremde Dateien in `log/heads/`
+- Art: klarstellend (D80 (3) und (4)).
+- Stelle: 2.7; 4 (`log/heads/<n>.sig`).
+- Problem: 4 sagt nicht, was mit einer Datei in `log/heads/` geschieht, die kein gültiger Kopf dieses Logs ist.
+- Stand: Eine reguläre Datei `heads/<n>.sig` (n kanonisch dezimal), die keinen Kopf dieses Logs mit Größe n und gültiger Log-Signatur hält, gilt als Widerspruch zum Log (`ErrConsistency`). `RepairTree` prüft jeden Kopf und verweigert (D80 (3)); `SignHead` verweigert, wenn die Datei der größte Kopf ist oder über `tree.rec` hinausgeht (`refuse`, `published` in `internal/translog`). Der Betreiber entfernt die Datei und repariert erneut (RUNBOOK 8.2). Andere Namen und andere Dateiarten übergehen beide (`newestHeadSize`, `eachHead`). Der Operator liefert bei `GET /head` nur verifizierte Zeilen (D80 (4)).
+- Vorschlag: In 4 festhalten, dass `log/heads/` nur Köpfe dieses Logs enthält und jede Datei mit Kopfnamen, die kein solcher Kopf ist, als Widerspruch zum Log gilt, den der Betreiber vor einer Reparatur entfernt (spätestens `log repair` verweigert).
+
+## S96 `mailbox.rec` hinter der neuesten geloggten Epoche
+- Art: klarstellend (D81 (1), D88 (2)).
+- Stelle: 2.4 „Schutz gegen Zurückspielen“; 2.7.
+- Problem: 2.4 vergleicht `mailbox.rec` nur mit der höchsten Epoche, die ein Client lokal gesehen hat. Ein Client ohne lokalen Zustand und der Server haben keine solche Epoche; ob eine neuere geloggte Epoche des Postfachs als Zurückspielen gilt, sagt die Spezifikation nicht.
+- Stand: Nennt `mailbox.rec` eine kleinere Epoche als die neueste geloggte Epoche des Postfachs, ist das ein Zurückspielen (`ErrRollback`): für den Server, der die Mail mit 451 abweist (`checkLogHead` in `internal/ingest/delivery.go`, D81 (1)), und für jeden lesenden Client, auch einen ohne lokalen Zustand (`client.loadChain`, D88 (2)). Die Kette wird bis zur geloggten Epoche geprüft. Eine Änderung oder ein `sync`, auch eines Nichtmitglieds (`TestHeadIsMailboxRec`), übernimmt die geloggten Epochen unter der Postfachsperre und schreibt `mailbox.rec` neu; ein `mailbox.rec` unter der lokal gesehenen Epoche bleibt ein Zurückspielen (`TestHeadIsMailboxRec`).
+- Vorschlag: In 2.4 „Schutz gegen Zurückspielen“ ergänzen: „Der Kopf eines Postfachs ist mindestens die neueste geloggte Epoche.“
+
+## S97 Reparatur-Epoche für eine nie loggbare Epoche am Kopf
+- Art: klarstellend (D88 (4)).
+- Stelle: 2.4; K2 Regel 4; `internal/translog/doc.go` „Unlogged epoch.rec“ Schritt 3.
+- Problem: 2.4 und K2 sagen nicht, wie eine `epoch.rec` am Kopf von `mailbox.rec` ersetzt wird, die nie ins Log kommen kann (`Append` meldet `ErrOrder`), ohne dass der Kopf sinkt.
+- Stand: Ein Benutzer-Mitglied der Epoche n−1 ersetzt die nie loggbare Epoche n am Kopf durch eine neue Epoche mit derselben Nummer: Grund `regular`, Mitglieder von n−1 mit ihrer aktuellen Generation, Beginn am Monatsanfang nach dem Beginn von n−1, frühestens `ImmediateDelay` nach jetzt (`client.healHead` in `internal/client/members.go`; `TestLogUnloggableHeadHealed`). `mailbox.rec` nennt weiter n; der Kopf sinkt nie (`commitHead` verweigert). Für Epoche 1 gibt es keine Reparatur (S89).
+- Vorschlag: In 2.4 aufnehmen.
+
+## S98 Dem Log widersprechende Epoche
+- Art: klarstellend (D88 (4); AUDIT R25).
+- Stelle: 2.7; K2 Regel 4; `internal/translog/doc.go` „Unlogged epoch.rec“ Schritt 4.
+- Problem: 2.7 und K2 sagen nicht, was mit einer `epoch.rec` geschieht, deren Nummer im Log schon eine andere Epoche trägt, und wer das behebt.
+- Stand: Liefert der `Append` einer `epoch.rec` `ErrDuplicate` (eine andere Epoche dieser Nummer ist geloggt, für Leser `ErrMismatch`), ersetzt kein Client die Datei, auch nicht durch den geloggten Inhalt. Änderungen am Postfach scheitern, bis der Betreiber die Datei nach Prüfung des Logeintrags entfernt (`TestLogDuplicateNeverReplaced`, AUDIT R25).
+- Vorschlag: Die Abhilfe des Betreibers in 2.7 nennen.
