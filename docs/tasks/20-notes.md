@@ -306,3 +306,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - Niedrig: `Close` gegen gleichzeitige Methodenaufrufe aus anderen Goroutinen meldet Datenrennen (vorbestehend, auch Methode gegen Methode). → HANDOFF/Paketkommentar: `Client` ist nicht goroutinesicher, `Close` eingeschlossen.
 - Angriffstests: Scratchpad `verify20h-attack/internal/client/attack20h_test.go`.
 - Zweites Auftreten (Volllauf 20h, race mit Tags, Last 4–5): `TestPTYStopLoop`: „share 1 neither cleared nor the program ended within 4.5s“ (blocked15n_linux_test.go:491). Zwei Fehlschläge der 4,5-s-Grenze in zwei Läufen gelten als echter Fund; Analyse läuft, danach Fix-Auftrag. Protokoll: Scratchpad `orch/fr-20h/racetag-cmd_gomail-ceremony.log`.
+
+## Aus der Prüfung von 20j (für den nächsten Code-Auftrag)
+- Code-Kommentar an `maxReadSegments` (`internal/client/index.go:104`) nennt `rec.MaxRecordSize` „4 MiB“; richtig ist 1 MiB (`rec.go:37`). Ein Segment kodiert knapp 1 MiB (`segmentBudget`).
+- Vorschlag nach M1: Befehl, der für Postfach und Epoche den Logeintrag findet und dessen `content` ausgibt (RUNBOOK 8.7 hat dafür kein Werkzeug).
