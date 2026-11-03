@@ -257,3 +257,4 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus 20g (Implementierer, Produktivcode, für 20h)
 - `client.(*Client).CreateMailbox` nach `Close` panikt (nil-Dereferenz in `prepareMailbox`, `internal/client/mailbox.go:556`; `Close` setzt `c.ks` auf nil). Fehler über `errors.Is` statt Panik, für alle öffentlichen Methoden nach `Close` prüfen.
 - Kommentar an `testenv.ImmediateEpoch` beschreibt einen Fall (reguläre Epoche mit Verwürfen), den der Code nicht erzeugt.
+- Prüfung von 20g (niedrig): die meisten `fatalOn`/`expectFatal`-Fälle in `internal/testenv/dev_test.go` prüfen nur, dass Fatal kam, nicht den Grund → Teiltext je Fall prüfen (20h oder später).
