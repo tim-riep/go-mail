@@ -266,3 +266,9 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - AUDIT R33/L3: Reste werden beim nächsten erfolgreichen Lauf derselben Art entfernt; ein Rest der anderen Art bleibt.
 - `internal/client` unter race mit Tags bis 3401 s bei geteilten CPUs → HANDOFF: `-timeout 60m` knapp; Abschlussläufe ohne parallele Last.
 - `translog/files.go` geändert → Fuzzing von `translog` nach dem Merge wiederholen (5 Ziele).
+
+## Aus der Angreiferprüfung von 20e (keine Funde über niedrig; für 20h)
+- F1: `removeLeftovers` löscht jedes eigene Verzeichnis mit Namen `.<name>.<kind>-*` rekursiv, nur nach Namensmuster (z. B. ein umbenanntes echtes Client-Verzeichnis). Abhilfe: Marker `.incomplete`, den `createClientDir` zuerst in tmp schreibt und kurz vor dem Umbenennen entfernt; `removeLeftovers` entfernt nur Verzeichnisse mit Marker, und dann nur die bekannten Namen plus `rmdir` (nicht rekursiv). AUDIT R33.
+- F2 (aus 20b geerbt, nur zwei Prozesse desselben Benutzers): `lockOnlyDir` entfernt `lock` unter gehaltener Sperre; ein anderer Prozess mit Deskriptor auf dem alten Inode kann danach eine wirkungslose Sperre bekommen. Abhilfe: nach `lockPath` Inode von fd und Pfad vergleichen, sonst wiederholen; oder als bekannte Grenze dokumentieren.
+- F3 (Hinweis): Verlierer zweier gleichzeitiger `keygen` meldet `ENOENT` statt `ErrExists`.
+- Angriffstests: Scratchpad `verify20e-attack/internal/client/attack20e_test.go`.
