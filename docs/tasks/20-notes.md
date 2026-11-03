@@ -246,3 +246,10 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - L5: über `MaxListedIndexSegments` Teilmenge in Verzeichnisreihenfolge (wie Spezifikationsprüfung).
 - Hinweis, schon vorher: `OpenRegular`/`ReadFileLimited` ohne `O_NOCTTY`.
 - Angriffstests: Scratchpad `verify20b-attack/src/` (`zz_attack20b_*`).
+
+## Aus 20f und seiner Prüfung (für 20g und 20)
+- `internal/testenv` hat 0 % Abdeckung (Test-Infrastruktur ohne eigene Tests). Entscheidung des Orchestrators: Kriterium E gilt für jedes Paket unter `internal/`, also bekommt `testenv` eigene Tests (20g); nicht gelockert.
+- F-1 (Z3 ohne Volltext): Test Gerätewechsel mit Übernahme der Indexsegmente (`devicechange_test.go`, Beschreibung in `docs/tasks/20-mandatory-tests.md`) → 20g nach 20e.
+- F-2 (S9) nach Q19/Q8; F-3 (S7) außerhalb M1.
+- Prüfung (niedrig): `TestTypedRoundTripOutsideStore` doppelt bestehende Tests, Kommentar „vier Arten“ falsch → entfernen oder berichtigen; `TestAllSchemasListed` sucht per Regex (übersieht Struct-Literale und Aliasimporte, meldet auskommentierte Aufrufe) → mit `go/parser`; Text „Höchstlänge“ in der Testbeschreibung → „bis 300 Byte bzw. höchstens MaxLen“. → 20g.
+- AUDIT 6.2 und HANDOFF (Abdeckungstabelle, Kriterium E) nach Vorschlag in 20f → 20.
