@@ -333,3 +333,10 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus 20p (für einen späteren Code-Auftrag)
 - Kommentar „checks, in this order“ in `cmd/gomail-server/main.go:28` nennt die Serversperre vor den Zertifikatsprüfungen; `ingest.New` nimmt sie danach (RUNBOOK 1.6 stimmt). Triage Nr. 148 ist insoweit falsch.
 - `--log-listen` nur loopback (außer `--isolated-test-network`, das auch SMTP öffnet): Zeuge auf anderer Maschine nur per SSH-Tunnel (RUNBOOK 0.1/1.7, nicht getestet; AUDIT R47). Nach M1: eigener Schalter nur für das Log oder TLS.
+
+## Aus der Angreiferprüfung von 21a (für die Nacharbeit 21a und für 21c/21d)
+- F1 (mittel): Admin-/Ingest-Generationen, die die gestohlene Identität vor `revoked_at_size` zertifiziert hat, bleiben gültig und können nach dem Widerruf mit rückdatiertem `valid_from` Adressen übernehmen (Test im Scratchpad `verify21a-attack/src/internal/translog/attack21a_test.go` `TestAttackForeignCertsBeforeBoundary`). Entscheidung des Orchestrators: Widerruf einer Identitätsgeneration g bei N wirkt auch auf alle Rollengenerationen, die g zertifiziert hat (deren Handlungen ab N ungültig); das deckt sich mit der Pflicht zur Neuausstellung (D93 (4)). → Nacharbeit 21a, D93-Nachtrag.
+- F2 (niedrig): `admin-rotate` ohne `revoke` stoppt einen gestohlenen Admin-Schlüssel nicht (Rückdatierung); doc.go/RUNBOOK: nach Verlust immer `revoke`.
+- F3 (niedrig, Q9): weit in der Zukunft liegendes `valid_from` friert eine Adresse ein; Abhilfe frühes `revoked_at_size`; Grenze für `valid_from` beim Anhängen erwägen.
+- F4 (niedrig, für 21c): Lücke ohne Ingest-Generation, wenn `valid_from` des Nachfolgers nach `revoked_at_time` liegt → keine frischen Köpfe; Zeremonie muss das verhindern.
+- F5 (niedrig): doc.go „Reading for the operator“ zu ErrPrerequisite irreführend (Neuausstellung unter gleichem Namen möglich).
