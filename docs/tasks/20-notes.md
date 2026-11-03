@@ -354,3 +354,9 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus der Spezifikationsprüfung von 21c
 - Mittel (außerhalb der Dateien von 21c): zwei e2e-Tests erwarten den alten „Q19“-Text (`internal/e2e/runbook_test.go:799-801`, `succession_test.go:291-293`) → in 21b angepasst; Merge von 21c nur zusammen mit 21b.
 - Niedrig: (1) `ingest-rotate` nach `succeed --compromised` verweigert ein `valid_from` später als die Grenze nicht (erst `publish`); (2) `boundOf` nimmt das eigene Ingest-Element statt des früheren von eigenem und Kaskade (Sackgasse bei Bedienfehler); (3) toter Teil `es[0].Index >= r.AtSize` in `checkRevocations`; Hinweis: Reihenfolge „log repair, dann publish“ in RUNBOOK 7.3.
+
+## Aus der Spezifikationsprüfung von 21b (keine Funde über niedrig)
+- L1: Serverstart mit einer Ingest-Generation, die nur über die Kaskade widerrufen ist, scheitert erst bei `checkHead` (Exit 1) statt mit `ingestRevoked` (Exit 2); optional `RevokedCertAtTime` in `ingest.New`.
+- L2: Zweig ErrRevoked in `addressErr` ist heute nicht erreichbar (Index lässt ungültige Zuordnungen weg); Kommentar an `checkMeta` überzeichnet.
+- L3: Auffrischen nach ErrOrder ungetestet.
+- Hinweis: Client-Integrationstest für den Widerruf einer Identität (Kaskade bis zur Mail) fehlt noch; bisher Einheitstest und translog-Tests.
