@@ -393,3 +393,9 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - N2 (niedrig, Doku): Kommentare `cmd/gomail-ceremony/main.go:193-196`, `internal/ceremony/publish.go:745` versprechen Heilung auch für Dateien, die `checkDataPlatform` vorher ablehnt (Müll, Zertifikat unter falschem Namen).
 - N3 (niedrig, Testlücke): Mutanten P1-4 (`.pub`-Rückfall ohne `bytes.Equal`, `publish.go:784`) und P1-6 (`os.WriteFile` statt `WriteFileAtomic`, `publish.go:668`) überleben die Tests des Repositorys; Belegtests des Prüfers `TestV22PubUnderUnloggedSameCert`, `TestV22SymlinkOverLogged` (Scratchpad `verify22-spec/`) nach M1 übernehmen.
 - N4 (Doku, Vorschlag): RUNBOOK Z. 493 (gültiger Eintrag „ersetzt es nie“ → außer durch genau diesen Eintrag aus dem Export), Z. 492 (Prüfung „nie gültig“ nur Ingest); D86-Nachtrag 20o („hält an einem hängenden Symlink an“ gilt nicht mehr); D93-Nachtrag zur Heilung durch `publish`.
+
+## Aus den Prüfungen von 22d (Doku zu 22 und 23)
+- Erste Prüfung: 1 mittel (RUNBOOK 8.6: Abhilfe bei `… a valid entry is never replaced` nannte nicht den Fall eines vor `<N>` geloggten Zertifikats des Diebs) und 5 niedrig → Nacharbeit 5d88c4b; Nachprüfung: alle behoben.
+- L1 (niedrig, nach M1): „ein Link mit anderem Zielinhalt wird ersetzt“ gilt nur, wenn `freeName` den Namen freigibt und das Ziel eine lesbare reguläre Datei ist; ein Link als `identity-<g>.pub` oder auf FIFO/Verzeichnis wird verweigert (`store: file exists: … with other content than … of the export`, ohne Zeile in RUNBOOK 8.6).
+- L2 (niedrig): Liegt ein vor `<N>` geloggtes Zertifikat des Diebs nicht in `platform/`, schreibt `publish` die Neuausstellung gleichen Namens nach `platform/` und scheitert erst beim Loggen (`ceremony: logging <name>: translog: duplicate log entry: key taken by entry <k>`).
+- Hinweis: DECISIONS D93 Nachtrag 21e „Dateien des Diebs ersetzt `publish`“ gilt nur für Zertifikate ab `<N>`.
