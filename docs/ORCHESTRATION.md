@@ -297,7 +297,7 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   - D94 (fd7b87f)
   - 17e (`scripts/bench.sh` lehnt Werte ab, die mit `-` beginnen; behebt den Fund aus D94; 4f247c6)
   - 20s (niedrige Punkte aus den Prüfungen von 20r in HANDOFF und AUDIT, D94 als erledigt; e314241, Ersatztexte der Prüfung danach)
-  - 22e (RUNBOOK 7.3/8.6: Symlinks und nur im Log stehende Zertifikate des Diebs bei `publish`, D93-Nachtrag 21e; a108683; Prüfung ohne Funde über niedrig, vier niedrige nach M1)
+  - 22e (RUNBOOK 7.3/8.6: Symlinks und nur im Log stehende Zertifikate des Diebs bei `publish`, D93-Nachtrag 21e; a108683; Prüfung ohne Funde über niedrig, vier niedrige mit 22f eingesetzt, 14c49c7; Prüfung von 22f ohne Funde über niedrig)
   - 20r mit Nacharbeit (541a349)
   - Ergebnis des Volllaufs in HANDOFF und AUDIT (5f0c088, mit Nacharbeit nach Prüfung)
   - Abschlussbericht `docs/M1-ABSCHLUSSBERICHT.md`, Liste nach M1 `docs/tasks/backlog-nach-m1.md`, Zusammenfassungen der Abschlussläufe `docs/tasks/abschluss-laeufe/` (8422e9d)
