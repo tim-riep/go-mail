@@ -326,4 +326,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
      - Optionsprüfung von `bench.sh`.
   4. Format-Restlücke F2 aus 21b: Version ≥ 2 der Metadaten hält den Signierer von Version 1 nicht fest. Braucht eine Formatänderung (Haltepunkt).
   5. Offene Fragen Q1, Q2, Q6, Q7, Q18, Q20.
-- 04.11., 04:45 UTC: Arbeit beendet. Keine Agenten und keine Läufe aktiv. Alles zusammengeführt und gepusht; offen sind nur die Punkte nach M1 in Abschnitt 7 und in `docs/tasks/20-notes.md`.
+- 04.11., 04:24 UTC: Hauptarbeit beendet; bis 05:00 UTC nur noch eine lesende Konsistenzprüfung der Dokumente. Keine Läufe aktiv. Alles zusammengeführt und gepusht; offen sind nur die Punkte nach M1 in Abschnitt 7 und in `docs/tasks/20-notes.md`.
