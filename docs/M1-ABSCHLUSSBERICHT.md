@@ -2,6 +2,8 @@
 
 Stand: 04.11.2026, gegen 02:45 UTC; das Ergebnis des Volllaufs `fr-m1` und der Abschluss von 20r sind gegen 04:00 UTC nachgetragen. Arbeitsbranch `claude/quirky-keller-hjsl5i`, gelesen bei fd7b87f („docs: D94, notes on the reviews of 17, ORCHESTRATION merges“).
 
+> **Nachtrag 04.11., 04:15 UTC (Orchestrator):** Nach Redaktionsschluss ist Auftrag 17e zusammengeführt (4f247c6). `scripts/bench.sh` lehnt jetzt Optionswerte ab, die mit `-` beginnen. Das ist der Fund, den D94 als niedrig eingestuft hatte. Die Prüfung von 17e ergab keine Funde über niedrig. **Damit entfällt der Vorbehalt D94: Kriterium D ist ohne Vorbehalt erfüllt.** Wo dieser Bericht unten „erfüllt mit Vorbehalt D94“ oder den Vorbehalt des Auftraggebers zu D94 nennt, gilt das als erledigt (DECISIONS D94, Nachtrag 17e). Das Urteil bleibt **bedingt erreicht**, allein wegen E (NFSv4 auf zwei Maschinen).
+
 **Endstand des Codes für M1: fba4eb2** = 9ad24a5 + 22 + 23 + 23b (ORCHESTRATION, 04.11., 00:50 und 02:35 UTC). Zusammengeführt um 02:35 UTC (ORCHESTRATION):
 - aed6ea4: 17 mit 17b bis 17d (MEASUREMENTS, nur `internal/bench`, `scripts` und Dokumentation);
 - afad8de: Auftrag 22;

@@ -14,7 +14,7 @@ Rohdaten unter [`docs/measurements/2026-11-04/`](measurements/2026-11-04/):
 
 Die Rohdaten vom 3. November liegen unverändert unter [`docs/measurements/2026-11-03/`](measurements/2026-11-03/) (gleiche Dateien ohne `nachtrag-17c.diff`).
 
-Eine Lauftabelle lässt sich aus den Rohdaten ohne neue Messung wieder erzeugen: `GOMAIL_BENCH_MIN_FREE=0.1 scripts/bench.sh -render docs/measurements/2026-11-04/lauf1-raw.txt -count 5` gibt `lauf1-tabelle.md` bis auf die Zeile „Erzeugt mit …“ (Zeitpunkt, Commit) gleich aus; dasselbe gilt für Lauf 2 und für beide Läufe vom 3. November.
+Eine Lauftabelle lässt sich aus den Rohdaten ohne neue Messung wieder erzeugen: `env -u TMPDIR GOMAIL_BENCH_MIN_FREE=0.1 scripts/bench.sh -render docs/measurements/2026-11-04/lauf1-raw.txt -count 5` gibt `lauf1-tabelle.md` bis auf die Zeile „Erzeugt mit …“ (Zeitpunkt, Commit) gleich aus; dasselbe gilt für Lauf 2 und für beide Läufe vom 3. November.
 
 ## Angaben, die für jede Zahl gelten
 
