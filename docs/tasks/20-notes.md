@@ -405,3 +405,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - Mutationen der Spezifikationsprüfung (M1–M9): getötet außer M4 (naive Doppel-Lese-Fassung in `store`; Testlücke niedrig, bekannt). Die Ergebnisse für `TestPlatformIngestCertSwapped` sind nicht aussagekräftig, solange der Test nicht deterministisch ist (scheitert auch ohne Mutation mit breitem `-run`, siehe 23b).
 - `TestPlatformIngestCertSwapped/forged_then_logged` (Fall `list`) scheitert unter 386 und unter amd64 ohne race mit breitem `-run`; Sicherheitseigenschaft hält (Mail des Angreifers nie angezeigt). → Nacharbeit 23b.
 - Nachprüfung 23b (c6fa0b3): ohne Funde über niedrig. Ursache bestätigt (zufällige IDs, `listIDs` sortiert nach Bytes, Cache nur bei Erfolg). Mutationen zweites Lesen, Cache auch bei Fehler, Ablehnung merken: je 5/5 getötet unter amd64 und 386. Niedrig: Jeder Lauf deckt zufällig nur eine Prüfreihenfolge ab; Vorschlag nach M1: zweiten Aufruf von `IngestKeyFor(1)` im Schlüssel-Zweig.
+
+## Aus den Prüfungen von 17 (17b, 17c, 17d)
+- Prüfung 17b: alle Zahlen gegen Rohdaten bestätigt; 3 mittel (Commits unerreichbar, Schluss D93 für Empfang, `bench.sh` nicht fail closed), 7 niedrig → 17c.
+- Nachprüfung 17c: alle behoben; neu F1 mittel (`-render=` leer startet Messung; dabei versehentliche Messung des Prüfers 02:15–02:17 UTC neben dem Volllauf), F2/F3 niedrig → 17d.
+- Nachprüfung 17d: F1 behoben für leere Werte; neu M1 mittel (Wert, der mit `-` beginnt, wird angenommen: `-o -render=F` misst) → als niedrig eingestuft, D94; N1 (fehlende `command:`/`env:`-Zeilen nicht abgeglichen), N2 (weitere Umgebungsvariablen nicht abgeglichen) niedrig; F3 aus 17c (fehlender Unter-Benchmark, eingerücktes `--- SKIP`) niedrig. Alles nach M1.
