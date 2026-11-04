@@ -276,3 +276,49 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - 03:00 UTC: **20r zusammengeführt** (541a349): HANDOFF und AUDIT auf dem Endstand fba4eb2. Erste Prüfung: 3 Funde mittel, nämlich Urteil A „bedingt“ nicht belegt, R48 nannte einen Test ohne Haken, der Urteilsspalte fehlte der Vorbehalt. Nacharbeit 94190c6; Nachprüfung nur mit niedrigen Funden. Vorschläge an andere Dokumente übernommen (1f8278c): Commit-Verweise in DECISIONS und RUNBOOK, S9 vollständig in `20-mandatory-tests.md`.
 - 03:26 und 03:40 UTC: zwei weitere Container-Neustarts (Systemlaufzeit jeweils 0 Minuten). Der Volllauf `fr-m1` wurde danach jeweils fortgesetzt; neu gelaufen sind `386-internal_ingest` und `386-internal_translog`.
 - 03:41 UTC: **Volllauf auf dem Endstand `fr-m1` grün, 67 von 67 Schritten** (01:32:49 bis 03:40:59 UTC). gofmt, vet und `cmd/gomail-ceremony` liefen auf 10b1783, alle übrigen Schritte auf 1217496; der Code von 1217496 gleicht fba4eb2 außer `internal/bench`. `internal/bench` mit den Testdateien aus 17 lief auf aa87a99 grün (race, race mit Tags, 386). Den Eintrag in HANDOFF und AUDIT hat ein Prüfer geprüft (2 mittel, 4 niedrig, alle mit Ersatztext); die Nacharbeit läuft. Abschlussbericht, Liste nach M1 und Zusammenfassungen der Abschlussläufe liegen im Repository (8422e9d): `docs/M1-ABSCHLUSSBERICHT.md`, `docs/tasks/backlog-nach-m1.md`, `docs/tasks/abschluss-laeufe/`.
+
+## 7. Stand beim Anhalten (04.11.2026, 06:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+- **Ergebnis:** M1 „PoC abgeschlossen“ ist **bedingt erreicht**. Bedingt ist E wegen der Zwei-Maschinen-Prüfung über NFSv4: Es gibt hier weder NFS noch eine zweite Maschine; vorbereitet ist nur `scripts/two-host-test.sh` (D83, AUDIT R36). Dazu kommt bei D der Vorbehalt aus D94. A, B, C, F sind erfüllt, D erfüllt mit diesem Vorbehalt; Belege in `docs/HANDOFF.md`, „Stand je M1-Kriterium“.
+- **Endstand des Codes:** fba4eb2 (9ad24a5 + Auftrag 22 + Auftrag 23 mit 23b).
+  - Abschluss-Volllauf auf der gemeinsamen Quelle `orch/m1-final` (1217496, im Code gleich fba4eb2 außer `internal/bench`): **67 von 67 Schritten grün**, 01:32 bis 03:41 UTC, über drei Container-Neustarts fortgesetzt.
+    Vor den Neustarts um 03:26 und 03:40 UTC hing der laufende Schritt ungewöhnlich lange (`386-internal_ingest` etwa 19 Minuten statt etwa 67 s, `386-internal_translog` etwa 10 Minuten statt etwa 22 s); nach dem Neustart liefen beide in der gewohnten Zeit grün. Eine Ursache im Code ist daraus nicht abzulesen; die Maschine stand offenbar vor den Neustarts. gofmt, vet und `cmd/gomail-ceremony` liefen auf 10b1783 (ohne 23b, nur ein Test in `client`).
+  - Abschluss-Volllauf auf 9ad24a5: 67 von 67, 23:12 bis 00:58 UTC.
+  - `internal/bench` mit den Testdateien aus 17 auf dem Branch (aa87a99): race, race mit Tags und 386 grün.
+  - `cmd/gomail-ceremony -v` (race, race mit Tags, 386): Die Stillstandserkennung hat keinen echten Teiltest übersprungen.
+  - Abdeckung am Endstand: jedes Paket unter `internal/` im Soll.
+  - Fuzzing: alle 25 Ziele je 10 Minuten ohne Fund. 22 und 23 ändern keine Parser.
+- **Zusammengeführt seit 03.11., 23:45 UTC:**
+  - 20q
+  - 17 mit 17b bis 17d (aed6ea4, MEASUREMENTS)
+  - 22 (afad8de)
+  - 23 mit 23b (fba4eb2)
+  - 22d (4a6e9c1)
+  - D94 (fd7b87f)
+  - 20r mit Nacharbeit (541a349)
+  - Ergebnis des Volllaufs in HANDOFF und AUDIT (5f0c088, mit Nacharbeit nach Prüfung)
+  - Abschlussbericht `docs/M1-ABSCHLUSSBERICHT.md`, Liste nach M1 `docs/tasks/backlog-nach-m1.md`, Zusammenfassungen der Abschlussläufe `docs/tasks/abschluss-laeufe/` (8422e9d)
+- **Laufend beim Anhalten:** kein Agent, kein Lauf.
+- **Nicht zusammengeführt:** nichts. Die Worktrees der Agenten unter `.claude/worktrees/` sind erledigt und können entfernt werden. `orch/m1-final` ist ein lokaler Zwischenbranch, nicht gepusht.
+- **Entscheidungen, die der Auftraggeber prüfen sollte:**
+  - D94: Einstufung eines Fundes mittel in `scripts/bench.sh` als niedrig, nach der dritten Prüfrunde von 17.
+  - Einstufung von R48 (Zertifikat zweimal gelesen) als mittel und Behebung mit 23.
+  - Merge von 22 und 23 vor M1. Das weicht von der Festlegung 03.11., 23:45 UTC ab und ist in diesem Verlauf begründet.
+  - Urteil A „erfüllt“ mit der Lesart „offener Haltepunkt = strengste Lesart oder nicht freigegeben“ (ORCHESTRATION Abschnitt 3).
+  - Auslegung B: Marken nur im Testdouble.
+- **Offene Fragen:**
+  - Q18, Q20: strengste Lesart gebaut.
+  - Q1, Q6, Q7: Befehle nicht freigegeben bzw. nicht gebaut.
+  - Q2: unverändert aus Phase 1.
+  - Q19 und Q8: entschieden (D93).
+- **Nächste Schritte nach M1:**
+  1. Zwei-Maschinen-Test über NFSv4 mit `scripts/two-host-test.sh` auf zwei echten Hosts. Damit wird E erfüllt.
+  2. Entscheidung des Auftraggebers zu D94 und zu den übrigen Punkten oben.
+  3. Liste nach M1: `docs/tasks/backlog-nach-m1.md`, dazu die niedrigen Punkte aus 22, 22d, 23/23b, 17c/17d und 20r in `docs/tasks/20-notes.md`. Darunter:
+     - `resolveExisting` mit `..` nach einem Symlink;
+     - Symlinks unter `data/platform/` in `publish`;
+     - `address add` ohne Signatur- und Logprüfung des Admin-Zertifikats;
+     - Testlücke M4 in `store`;
+     - Optionsprüfung von `bench.sh`.
+  4. Format-Restlücke F2 aus 21b: Version ≥ 2 der Metadaten hält den Signierer von Version 1 nicht fest. Braucht eine Formatänderung (Haltepunkt).
+  5. Offene Fragen Q1, Q2, Q6, Q7, Q18, Q20.
