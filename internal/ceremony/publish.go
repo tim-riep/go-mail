@@ -621,8 +621,9 @@ func runPublish(opts PublishOptions) error {
 	}
 
 	// Existing files: identical ones are skipped; one with other content
-	// is replaced only when its name is free in the log (freeName), and
-	// refused otherwise, before anything is written.
+	// is replaced only when its name is free in the log or its valid
+	// entry is the export's file (freeName), and refused otherwise,
+	// before anything is written.
 	names := make([]string, 0, len(files))
 	for n := range files {
 		names = append(names, n)
@@ -738,13 +739,22 @@ func runPublish(opts PublishOptions) error {
 // is invalid (such as the thief's certificate issued with a revoked
 // identity generation at or above its revoked_at_size, class "revoked")
 // or there is none (a file left by a crash before its log entry, which
-// gives nobody anything: translog doc.go "Platform generations"). The
-// public key <role>-<g>.pub of an admin or ingest generation is replaced
-// only together with its certificate: when <role>-<g>.cert of the data
-// directory differs from the export's and is replaced by this rule.
-// Everything else is refused; why completes the message (existsErr).
-// The caller has checked the export's files already (signature, pin,
-// field 7, prerequisites).
+// gives nobody anything: translog doc.go "Platform generations"). It is
+// also replaced when the valid entry of its name is exactly the export's
+// file: the file of the data directory is then foreign (written over the
+// logged one after an earlier publish, for example by a thief with write
+// access to data/platform/), and the export puts back what the log
+// holds, so that running the same publish again heals data/platform/
+// (attack review 21c R-low, task 22 point 1). The public key
+// <role>-<g>.pub of an admin or ingest generation is replaced together
+// with its certificate (when <role>-<g>.cert of the data directory
+// differs from the export's and is replaced by this rule), and when the
+// export's <role>-<g>.cert is the valid entry of the log: Publish has
+// checked that the export's public key is the one that certificate
+// names. Everything else is refused, above all a valid entry with other
+// content than the export's file; why completes the message
+// (existsErr). The caller has checked the export's files already
+// (signature, pin, field 7, prerequisites).
 func freeName(st *store.Store, log translog.Log, files map[string]platformFile, n string) (bool, string, error) {
 	f := files[n]
 	cert := n
@@ -753,20 +763,27 @@ func freeName(st *store.Store, log translog.Log, files map[string]platformFile, 
 			return false, "", nil
 		}
 		cert = store.PlatformFileName(f.role, f.gen, "cert")
-		have, err := readData(st, cert)
-		if err != nil {
-			return false, "", err
-		}
-		if have == nil || bytes.Equal(have, files[cert].data) {
-			return false, fmt.Sprintf(", while platform/%s is missing there or the same: a public key is replaced only together with its certificate", cert), nil
-		}
 	}
 	es, err := log.Lookup(translog.KindPlatform, []byte(cert))
 	if err != nil {
 		return false, "", fmt.Errorf("ceremony: looking up %s in the log: %w", cert, err)
 	}
 	if len(es) > 0 {
-		return false, fmt.Sprintf(", and %s is a valid entry of the log under this pin: a valid entry is never replaced", cert), nil
+		// files[cert] exists: Publish refuses a .pub of the export
+		// without its certificate.
+		if len(es) == 1 && bytes.Equal(es[0].Content, files[cert].data) {
+			return true, "", nil
+		}
+		return false, fmt.Sprintf(", and %s is a valid entry of the log under this pin with other content than the export's: a valid entry is never replaced", cert), nil
+	}
+	if f.ext == "pub" {
+		have, err := readData(st, cert)
+		if err != nil {
+			return false, "", err
+		}
+		if have == nil || bytes.Equal(have, files[cert].data) {
+			return false, fmt.Sprintf(", while platform/%s is missing there or the same and is no valid entry of the log: a public key is replaced only together with its certificate or under its logged certificate", cert), nil
+		}
 	}
 	return true, "", nil
 }
@@ -798,9 +815,11 @@ func existsErr(from string, st *store.Store, f platformFile, why string) error {
 // element's revoked_at_size (a mistyped generation would leave the
 // compromised one valid, and without such a certificate no certificate
 // of the role can become valid any more: translog doc.go "Reading for
-// the operator"), and its revoked_at_time must lie after the
-// certificate's valid_from unless that lies after the head's time (the
-// generation would never have been valid: attack review 21c F2). A
+// the operator"); for an ingest element, revoked_at_time must lie after
+// the certificate's valid_from unless that lies after the head's time
+// (the generation would never have been valid: attack review 21c F2;
+// for an admin element revoked_at_time has no meaning, D93 (2), and
+// only the lower bound minHeadTime applies, task 22 point 2). A
 // revoked identity generation is in the identity list of the pin by
 // store.CheckPinRevoked. Every failure is ErrRevocation.
 //
@@ -859,8 +878,16 @@ func checkRevocations(log translog.Log, pin *store.PlatformPin) (*translog.Head,
 			return nil, fmt.Errorf("%w: the pin revokes %s, whose certificate %s is no valid entry of the log below index %d: a mistyped generation, or one that locks the role for good (no %s certificate could become valid any more); check the generation",
 				ErrRevocation, what, name, r.AtSize, RoleName(r.Role))
 		}
-		// A revoked_at_time at or before valid_from of the generation
-		// leaves it no time at which it signs or assigns validly: a time in
+		// For an admin element revoked_at_time has no meaning (D93 (2):
+		// what an admin generation assigns is judged by log index, from
+		// revoked_at_size on), so only the lower bound minHeadTime above
+		// applies to it; a repair with an older head (attack review 21a
+		// F3) is not refused for it (spec review of 21c, task 22 point 2).
+		if r.Role != store.KeyRoleIngest {
+			continue
+		}
+		// A revoked_at_time at or before valid_from of the ingest
+		// generation leaves it no time at which it signs validly: a time in
 		// seconds, or a head older than the generation (attack review 21c
 		// F2). A generation not valid yet at the newest head (valid_from
 		// after its time) is revoked before it acts, which is allowed.

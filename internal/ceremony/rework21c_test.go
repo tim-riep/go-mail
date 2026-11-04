@@ -248,10 +248,11 @@ func mustOpenLog(t *testing.T, st *store.Store, pin *store.PlatformPin) translog
 
 // TestRevocationTimes (attack review 21c F2): a revocation time in
 // seconds is refused by the ceremony (checkBoundary, TestRevoke) and by
-// publish for every element of field 7; an admin or ingest element
-// whose revoked_at_time is not after valid_from of the generation's
+// publish for every element of field 7; an ingest element whose
+// revoked_at_time is not after valid_from of the generation's
 // certificate is refused when the generation was valid at the newest
-// head, and taken when it was not valid yet (revoked before it acts).
+// head, and taken when it was not valid yet (revoked before it acts);
+// for an admin element only the lower bound applies (task 22 point 2).
 func TestRevocationTimes(t *testing.T) {
 	f := newFixture(t)
 	st, h := f.published(t, "data")
@@ -287,7 +288,6 @@ func TestRevocationTimes(t *testing.T) {
 		{with(store.PlatformRevoked{Role: store.KeyRoleAdmin, Gen: 1, AtSize: h3.Size, AtTime: minHeadTime}), "seconds instead of milliseconds"},
 		// valid_from of ingest-1.cert is testNow, valid at the head.
 		{with(store.PlatformRevoked{Role: store.KeyRoleIngest, Gen: 1, AtSize: h3.Size, AtTime: testNow.UnixMilli()}), "would never have been valid"},
-		{with(store.PlatformRevoked{Role: store.KeyRoleAdmin, Gen: 1, AtSize: h3.Size, AtTime: minHeadTime + 1}), "would never have been valid"},
 	} {
 		before := listDir(t, st.Root)
 		err := Publish(PublishOptions{From: empty, Data: st, Pin: c.pin})
@@ -297,6 +297,17 @@ func TestRevocationTimes(t *testing.T) {
 		if fmt.Sprint(listDir(t, st.Root)) != fmt.Sprint(before) {
 			t.Fatalf("%d: written", i)
 		}
+	}
+	// An admin element: revoked_at_time has no meaning for it (D93 (2)),
+	// only the lower bound applies (spec review of 21c, task 22 point 2):
+	// a boundary of a head older than the admin generation (valid at the
+	// newest head) is taken, as a repair with an older head needs it.
+	adm1 := mustReadFile(t, st.Path("platform", "admin-1.cert"))
+	if c, err := keys.DecodePlatformCert(adm1); err != nil || c.ValidFrom <= minHeadTime || c.ValidFrom > h3.Time {
+		t.Fatalf("admin-1.cert: %v", err)
+	}
+	if err := Publish(PublishOptions{From: empty, Data: st, Pin: with(store.PlatformRevoked{Role: store.KeyRoleAdmin, Gen: 1, AtSize: h3.Size, AtTime: minHeadTime + 1})}); err != nil {
+		t.Fatalf("admin before valid_from: %v", err)
 	}
 	// One millisecond after valid_from: taken.
 	if err := Publish(PublishOptions{From: empty, Data: st, Pin: with(store.PlatformRevoked{Role: store.KeyRoleIngest, Gen: 1, AtSize: h3.Size, AtTime: testNow.UnixMilli() + 1})}); err != nil {

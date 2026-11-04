@@ -112,7 +112,8 @@ package ceremony
 //	              ingest)
 //	Publish       data/platform/<files of Out/platform> (exclusive; a
 //	              certificate or succession whose name has no valid log
-//	              entry, and its public key, replaced atomically;
+//	              entry or whose valid log entry is the export's file,
+//	              and its public key, replaced atomically;
 //	              witnesses.rec, the server's working copy, only when the
 //	              data directory has none, and it must equal the pin's
 //	              witnesses and quorum; replaced by the pin's only with
@@ -742,9 +743,15 @@ type PublishOptions struct {
 //     certificate that field 7 invalidates, or there is none): the name
 //     is free, and translog doc.go "Reading for the operator" reissues
 //     it under the same name (attack review 21c F1); the public key of
-//     an admin or ingest certificate is replaced together with it. Both
-//     are replaced atomically, under the server lock, after every other
-//     check. Any other file with other content is store.ErrExists (for
+//     an admin or ingest certificate is replaced together with it. It is
+//     also replaced when the valid entry of its name is exactly the
+//     export's file (a foreign file written over the logged one: running
+//     the same Publish again heals data/platform/; task 22 point 1), and
+//     the public key of an admin or ingest generation when the export's
+//     certificate of that name is the valid entry. All are replaced
+//     atomically, under the server lock, after every other check. A
+//     valid entry is never replaced by other content. Any other file
+//     with other content is store.ErrExists (for
 //     a certificate or succession also translog.ErrDuplicate), naming
 //     both files. A certificate <role>-<g>.cert with g > 1 whose
 //     predecessor <role>-<g-1>.cert is neither in the export nor a
@@ -778,9 +785,11 @@ type PublishOptions struct {
 //     revoked_at_size (a mistyped generation leaves the compromised one
 //     valid, and one without such a certificate locks the role for
 //     good: translog doc.go "Reading for the operator"), and the
-//     element's revoked_at_time must lie after valid_from of that
-//     certificate when the generation was valid at the head's time (else
-//     it would never have been valid). The newest published head is the
+//     revoked_at_time of an ingest element must lie after valid_from of
+//     that certificate when the generation was valid at the head's time
+//     (else it would never have been valid; for an admin element
+//     revoked_at_time has no meaning, D93 (2), and only the lower bound
+//     of 2025-01-01 applies). The newest published head is the
 //     one the operator log opens: with the log signature of any valid
 //     ingest certificate, also of a generation that field 7 revokes at
 //     the head's time; such a head is reported (RevokedHead);

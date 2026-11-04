@@ -169,13 +169,17 @@ func refreshUntil(t *testing.T, l translog.Log, logs func() string, check func()
 //     with pin 2; a second mail; a client log with pin 1 accepts the
 //     succession from the log (CheckPlatform on identity-2.succ after a
 //     head cosigned by the witness);
-//  3. succeed --compromised of identity 2 is refused (task 15f point 1,
-//     Q19): "gomail-ceremony succeed --compromised" is a usage error
-//     (exit code 2) with the fixed text, ceremony.Succeed returns
-//     ceremony.ErrCompromised; nothing is written. TODO(Q19): a mark
-//     "compromised" with which the predecessor identity is invalid from
-//     the log entry of the succession on has no record (ceremony.Succeed);
-//     until it has, the compromise case stays locked;
+//  3. succeed --compromised of identity 2 (D93, task 21c; Q19 and Q8
+//     are decided): without the boundary of the revocation
+//     (--revoke-at-size, --revoke-at-time) "gomail-ceremony succeed
+//     --compromised" is a usage error (exit code 2) with the fixed text,
+//     ceremony.Succeed returns ceremony.ErrCompromised, and nothing is
+//     written; with size and time of a confirmed head, the pin
+//     identity-3.pin revokes identity 2 in field 7 from that size and
+//     from the head's time + 1 ms (D93 addendum), and no succession is
+//     written. That export is not published: step 4 goes on with a
+//     regular succession of identity 2 (publish with field 7 and the
+//     reissue after a compromise are tested in package ceremony);
 //  4. instead a regular succession of identity 2 to 3 that replaces the
 //     witness on purpose (task 15f point 2: publish without
 //     --replace-witnesses refuses, with it witnesses.rec becomes the

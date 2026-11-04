@@ -198,12 +198,36 @@ func below(p, base string) bool {
 // resolveExisting returns the absolute path p with the symbolic links of
 // its longest prefix that filepath.EvalSymlinks resolves replaced; the
 // rest of p, which does not exist (or cannot be resolved), is appended as
-// it is.
+// it is. A prefix that is a dangling symbolic link (EvalSymlinks fails on
+// its missing target) is replaced by its target (os.Readlink, a relative
+// one taken relative to the directory of the link) and resolved further,
+// so that a dangling link into the data directory is inside it (review
+// of task 20o, task 22 point 3); at most maxHops links are followed that
+// way (a cycle of links), after that the prefix stays as it is.
 func resolveExisting(p string) string {
+	const maxHops = 40
 	rest := ""
+	hops := 0
 	for {
 		if r, err := filepath.EvalSymlinks(p); err == nil {
 			return filepath.Join(r, rest)
+		}
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 && hops < maxHops {
+			if target, err := os.Readlink(p); err == nil {
+				hops++
+				if !filepath.IsAbs(target) {
+					// Relative to the directory of the link as the system
+					// resolves it (a ".." in the target applies to the
+					// resolved directory).
+					dir := filepath.Dir(p)
+					if r, err := filepath.EvalSymlinks(dir); err == nil {
+						dir = r
+					}
+					target = filepath.Join(dir, target)
+				}
+				p = filepath.Clean(target)
+				continue
+			}
 		}
 		parent := filepath.Dir(p)
 		if parent == p {

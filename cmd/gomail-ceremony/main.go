@@ -190,7 +190,10 @@
 // after the boundary is invalid and its name free: publish replaces the
 // file (and its public key) in data/platform/ by the reissued one of the
 // same name; a certificate or succession that is a valid entry of the
-// log is never replaced. admin-rotate
+// log is never replaced by other content. A file of data/platform/
+// written over a logged one is put back by running the same publish
+// again (the export's file is that valid entry; likewise the public key
+// of a logged admin or ingest certificate). admin-rotate
 // alone does not end a leaked admin key (it can still assign with a
 // backdated valid_from): revoke does.
 //
