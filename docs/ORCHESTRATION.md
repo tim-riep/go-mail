@@ -298,6 +298,7 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   - 17e (`scripts/bench.sh` lehnt Werte ab, die mit `-` beginnen; behebt den Fund aus D94; 4f247c6)
   - 20s (niedrige Punkte aus den Prüfungen von 20r in HANDOFF und AUDIT, D94 als erledigt; e314241, Ersatztexte der Prüfung danach)
   - 22e (RUNBOOK 7.3/8.6: Symlinks und nur im Log stehende Zertifikate des Diebs bei `publish`, D93-Nachtrag 21e; a108683; Prüfung ohne Funde über niedrig, vier niedrige mit 22f eingesetzt, 14c49c7; Prüfung von 22f ohne Funde über niedrig)
+  - 22g (Ersatztexte F1 bis F3 aus der Prüfung von 22f: RUNBOOK 7.3.5 Schritt 2, 7.3 Fall 4, 8.6, AUDIT R17, D93 Nachtrag 22; 5beb290; Prüfung ohne Funde über niedrig, der eine niedrige Punkt mit dem Ersatztext des Prüfers eingesetzt)
   - 20r mit Nacharbeit (541a349)
   - Ergebnis des Volllaufs in HANDOFF und AUDIT (5f0c088, mit Nacharbeit nach Prüfung)
   - Abschlussbericht `docs/M1-ABSCHLUSSBERICHT.md`, Liste nach M1 `docs/tasks/backlog-nach-m1.md`, Zusammenfassungen der Abschlussläufe `docs/tasks/abschluss-laeufe/` (8422e9d)
@@ -325,3 +326,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
      - Optionsprüfung von `bench.sh`.
   4. Format-Restlücke F2 aus 21b: Version ≥ 2 der Metadaten hält den Signierer von Version 1 nicht fest. Braucht eine Formatänderung (Haltepunkt).
   5. Offene Fragen Q1, Q2, Q6, Q7, Q18, Q20.
+- 04.11., 04:45 UTC: Arbeit beendet. Keine Agenten und keine Läufe aktiv. Alles zusammengeführt und gepusht; offen sind nur die Punkte nach M1 in Abschnitt 7 und in `docs/tasks/20-notes.md`.
