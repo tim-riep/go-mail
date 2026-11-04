@@ -20,6 +20,11 @@ import (
 // the fixed cause of a warning is "Generation widerrufen" (warnCause).
 var ErrPlatformRevoked = fmt.Errorf("%w: generation revoked", ErrPlatform)
 
+// certReadHook is called by tests in ingestKeyFor right after
+// ingest-<gen>.cert was read, so that a test can replace the file before
+// anything else happens; nil in production.
+var certReadHook func(gen uint32)
+
 // ingestKeyFor returns the ingest key of generation gen (2.3, section 7):
 // ingest-<gen>.cert signed by the platform identity of its identity_gen
 // (the key of the pin's identity list, or above the list the key named
@@ -35,6 +40,8 @@ var ErrPlatformRevoked = fmt.Errorf("%w: generation revoked", ErrPlatform)
 // (created) before that revoked_at_time, whatever until is (revokedFor,
 // ErrPlatformRevoked). The cache is emptied whenever the reference head
 // changes (refreshLog).
+//
+// ingest-<gen>.cert is read once (store.ReadPlatformCertRaw, task 23).
 func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	c.mu.Lock()
 	k, ok := c.ingest[gen]
@@ -42,9 +49,16 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 	if ok {
 		return k, nil
 	}
-	cert, err := c.st.ReadPlatformCert(keys.RoleIngest, gen)
+	// One read of ingest-<gen>.cert (task 23): the signature, the key and
+	// the comparison with the log all work on raw. A second read for the
+	// log would let a file replaced in between pass the log with the
+	// logged certificate while the key came from another one.
+	cert, raw, err := c.st.ReadPlatformCertRaw(keys.RoleIngest, gen)
 	if err != nil {
 		return ingestKey{}, fmt.Errorf("%w: ingest-%d.cert: %v", ErrPlatform, gen, err)
+	}
+	if certReadHook != nil {
+		certReadHook(gen)
 	}
 	idKey, err := c.identityKey(cert.IdentityGen)
 	if err != nil {
@@ -54,10 +68,6 @@ func (c *Client) ingestKeyFor(gen uint32) (ingestKey, error) {
 		return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
 	}
 	name := store.PlatformFileName("ingest", gen, "cert")
-	raw, err := c.st.ReadPlatformFile(name)
-	if err != nil {
-		return ingestKey{}, fmt.Errorf("%w: %v", ErrPlatform, err)
-	}
 	// The certificate in the log (2.3, 7); a certificate of a revoked
 	// generation or by a revoked identity generation logged from
 	// revoked_at_size on is no valid entry (D93 (2)).

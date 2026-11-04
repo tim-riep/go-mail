@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/ed25519"
 	"fmt"
 
 	"github.com/tim-riep/go-mail/internal/store"
@@ -99,3 +100,16 @@ func SetDirLockHook(t interface{ Cleanup(func()) }, f func(attempt int)) {
 
 // LockAttempts bounds the attempts of lockClientDir.
 const LockAttempts = lockAttempts
+
+// SetCertReadHook sets the hook that ingestKeyFor calls right after it
+// read ingest-<gen>.cert (see certReadHook) until the test ends.
+func SetCertReadHook(t interface{ Cleanup(func()) }, f func(gen uint32)) {
+	certReadHook = f
+	t.Cleanup(func() { certReadHook = nil })
+}
+
+// IngestKeyFor returns the key ingestKeyFor takes for generation gen.
+func (c *Client) IngestKeyFor(gen uint32) (ed25519.PublicKey, error) {
+	k, err := c.ingestKeyFor(gen)
+	return k.pub, err
+}

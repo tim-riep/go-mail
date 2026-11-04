@@ -365,32 +365,44 @@ func (s *Store) ReadPlatformFile(name string) ([]byte, error) {
 
 // ReadPlatformCert reads and decodes <role>-<gen>.cert and checks that it
 // is a certificate of that role and generation and that <role>-<gen>.pub
-// holds the same key. The signature is checked by the caller with the
-// trusted identity.
+// holds the same key (ReadPlatformCertRaw). The signature is checked by
+// the caller with the trusted identity.
 func (s *Store) ReadPlatformCert(role keys.Role, gen uint32) (*keys.PlatformCert, error) {
+	c, _, err := s.ReadPlatformCertRaw(role, gen)
+	return c, err
+}
+
+// ReadPlatformCertRaw is ReadPlatformCert that also returns the bytes of
+// <role>-<gen>.cert it decoded and checked. The file is read once: a
+// caller that checks the signature, takes the key and compares the
+// certificate with the log (translog Log.CheckPlatform) must do all of it
+// on these bytes and never read the file again, or a file replaced
+// between two reads would let it take a key the log does not hold
+// (task 23).
+func (s *Store) ReadPlatformCertRaw(role keys.Role, gen uint32) (*keys.PlatformCert, []byte, error) {
 	name := "admin"
 	if role == keys.RoleIngest {
 		name = "ingest"
 	}
 	data, err := s.ReadPlatformFile(PlatformFileName(name, gen, "cert"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	c, err := keys.DecodePlatformCert(data)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if c.Role != role || c.Gen != gen {
-		return nil, fmt.Errorf("%w: %s-%d.cert certifies another key", ErrRecord, name, gen)
+		return nil, nil, fmt.Errorf("%w: %s-%d.cert certifies another key", ErrRecord, name, gen)
 	}
 	pub, err := s.ReadPlatformFile(PlatformFileName(name, gen, "pub"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ed25519.PublicKey(pub).Equal(c.Pub) {
-		return nil, fmt.Errorf("%w: %s-%d.pub differs from its certificate", ErrRecord, name, gen)
+		return nil, nil, fmt.Errorf("%w: %s-%d.pub differs from its certificate", ErrRecord, name, gen)
 	}
-	return c, nil
+	return c, data, nil
 }
 
 // -------------------------------------------------------------- mailboxes

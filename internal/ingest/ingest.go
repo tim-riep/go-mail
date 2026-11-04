@@ -138,6 +138,11 @@ var (
 	ErrRevoked = errors.New("ingest: the ingest generation is revoked by the pin")
 )
 
+// certReadHook is called by tests of this package in New right after
+// ingest-<gen>.cert was read, so that a test can replace the file before
+// anything else happens; nil in production.
+var certReadHook func()
+
 // New checks the ingest key against platform/ingest-<gen>.cert in the
 // data directory and returns the backend. The key file lives outside the
 // data directory (section 4). Call Recover before serving and Start to
@@ -172,6 +177,8 @@ var (
 // store.ErrLocked. With Config.PeerCheck it then requires the lock of a
 // running client (store.CheckPeerLock) and fails with store.ErrPeerLock
 // otherwise, releasing its own lock.
+//
+// ingest-<gen>.cert is read once (store.ReadPlatformCertRaw, task 23).
 func New(cfg Config) (*Ingest, error) {
 	if cfg.Store == nil || cfg.Log == nil {
 		return nil, fmt.Errorf("%w: store and log are required", ErrConfig)
@@ -185,9 +192,15 @@ func New(cfg Config) (*Ingest, error) {
 	if _, ok := translog.FindRevoked(cfg.Revoked, store.KeyRoleIngest, cfg.IngestGen); ok {
 		return nil, fmt.Errorf("%w: %w: generation %d", ErrConfig, ErrRevoked, cfg.IngestGen)
 	}
-	cert, err := cfg.Store.ReadPlatformCert(keys.RoleIngest, cfg.IngestGen)
+	// One read of ingest-<gen>.cert (task 23): the key compared with
+	// Config.IngestKey, identity_gen, valid_from and the comparison with
+	// the log all come from certData.
+	cert, certData, err := cfg.Store.ReadPlatformCertRaw(keys.RoleIngest, cfg.IngestGen)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ingest certificate: %v", ErrConfig, err)
+	}
+	if certReadHook != nil {
+		certReadHook()
 	}
 	// The cascade (D93, addendum on task 21a): revoking the identity
 	// generation that issued ingest-<gen>.cert revokes what generation
@@ -200,10 +213,6 @@ func New(cfg Config) (*Ingest, error) {
 		return nil, fmt.Errorf("%w: the ingest key does not match ingest-%d.cert", ErrConfig, cfg.IngestGen)
 	}
 	certName := store.PlatformFileName("ingest", cfg.IngestGen, "cert")
-	certData, err := cfg.Store.ReadPlatformFile(certName)
-	if err != nil {
-		return nil, fmt.Errorf("%w: ingest certificate: %v", ErrConfig, err)
-	}
 	// The own certificate is in the log (2.7, translog doc.go "Tasks"
 	// point 15): a certificate the log does not hold signs nothing a
 	// client accepts.
