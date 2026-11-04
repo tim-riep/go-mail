@@ -343,7 +343,7 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 
 ## Aus 20o und seiner Prüfung (für die Doku-Abstimmung nach Auftrag 21)
 - Doku: AUDIT R33 und DECISIONS (um Z. 560) nennen noch `writeClientDir`, jetzt `writeClientDirOutside`; RUNBOOK 8.6 braucht die Meldungen von `errIncompleteDir`, `errNotDurable` und die ErrLocked-Form von „not empty or in use by another client“; R33: ein Rest mit fremdem Eintrag bleibt jetzt ganz; Prüfung „nicht im Datenverzeichnis“ jetzt auch über Symlinks (D86-Nachtrag 20o).
-- Prüfung (niedrig): `resolveExisting` hält an einem hängenden Symlink an; Meldung dann `mkdir …: file exists` statt `ErrInsideDataDir` (sicher, nichts angelegt).
+- Prüfung (niedrig): `resolveExisting` hält an einem hängenden Symlink an; Meldung dann `mkdir …: file exists` statt `ErrInsideDataDir` (sicher, nichts angelegt). **Erledigt mit 22** (3cd9072: `resolveExisting` folgt hängenden Links, `TestClientDirDanglingLinkIntoDataDir`; D86 Nachtrag 22).
 
 ## Aus der Nachprüfung (Angriff) von 21a (keine Funde über niedrig)
 - doc.go („Platform generations“, um Z. 835/847) sagt noch `revoked_at_time` = Zeit des bestätigten Kopfes und dass dieser Kopf verschoben wird; Entscheidung ist T + 1 ms → angleichen.
@@ -362,8 +362,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - Hinweis: Client-Integrationstest für den Widerruf einer Identität (Kaskade bis zur Mail) fehlt noch; bisher Einheitstest und translog-Tests.
 
 ## Aus der Nachprüfung (Angriff) von 21c (keine Funde über niedrig)
-- R-low: `publish` heilt `data/platform/` nicht, wenn nach geloggter Neuausstellung ein Dieb die Datei überschreibt (Name mit gültigem Eintrag wird nie ersetzt, auch wenn die Exportdatei genau dieser Eintrag ist); ebenso einzelne fremde `.pub`. Abhilfe: Name gilt als frei, wenn die Exportdatei gleich dem gültigen Eintrag ist; `.pub` ersetzen, wenn das Zertifikat der gültige Eintrag ist. Tests im Scratchpad `verify21c-attack/internal/ceremony/replace21c_attack_test.go`.
-- Nachprüfung (Spezifikation) von 21c, niedrig: die Prüfung „wäre nie gültig gewesen“ (`revoked_at_time ≤ valid_from`) in `checkRevocations` greift auch für Admin-Elemente, für die `revoked_at_time` keine Bedeutung hat; kann eine gewollte F3-Reparatur mit älterem Kopf verweigern (fail closed). Abhilfe: nur für Ingest, für Admin nur die Untergrenze 2025.
+- R-low: `publish` heilt `data/platform/` nicht, wenn nach geloggter Neuausstellung ein Dieb die Datei überschreibt (Name mit gültigem Eintrag wird nie ersetzt, auch wenn die Exportdatei genau dieser Eintrag ist); ebenso einzelne fremde `.pub`. Abhilfe: Name gilt als frei, wenn die Exportdatei gleich dem gültigen Eintrag ist; `.pub` ersetzen, wenn das Zertifikat der gültige Eintrag ist. Tests im Scratchpad `verify21c-attack/internal/ceremony/replace21c_attack_test.go`. **Erledigt mit 22** (3cd9072: `freeName`, `TestPublishHealsPlatform`, `TestPublishHealsOverwrittenCert`, `TestPublishHealsForeignPub`; einzelne fremde `.pub` ohne geloggtes Zertifikat bleibt Handarbeit, RUNBOOK 7.3; D93 Nachtrag 22).
+- Nachprüfung (Spezifikation) von 21c, niedrig: die Prüfung „wäre nie gültig gewesen“ (`revoked_at_time ≤ valid_from`) in `checkRevocations` greift auch für Admin-Elemente, für die `revoked_at_time` keine Bedeutung hat; kann eine gewollte F3-Reparatur mit älterem Kopf verweigern (fail closed). Abhilfe: nur für Ingest, für Admin nur die Untergrenze 2025. **Erledigt mit 22** (3cd9072: `checkRevocations`, `TestRevocationTimes`; D93 Nachtrag 22).
 
 ### Fuzzing, vierter Teil (auf 56464da, nach 21a; `translog` und `store` geändert, 21b/21c ändern sie nicht)
 - 6 Ziele je 10 Minuten, zwei Bahnen: alle ohne Fund. Protokolle: Scratchpad `orch/fz4/`.
