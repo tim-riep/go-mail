@@ -399,3 +399,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 - L1 (niedrig, nach M1): „ein Link mit anderem Zielinhalt wird ersetzt“ gilt nur, wenn `freeName` den Namen freigibt und das Ziel eine lesbare reguläre Datei ist; ein Link als `identity-<g>.pub` oder auf FIFO/Verzeichnis wird verweigert (`store: file exists: … with other content than … of the export`, ohne Zeile in RUNBOOK 8.6).
 - L2 (niedrig): Liegt ein vor `<N>` geloggtes Zertifikat des Diebs nicht in `platform/`, schreibt `publish` die Neuausstellung gleichen Namens nach `platform/` und scheitert erst beim Loggen (`ceremony: logging <name>: translog: duplicate log entry: key taken by entry <k>`).
 - Hinweis: DECISIONS D93 Nachtrag 21e „Dateien des Diebs ersetzt `publish`“ gilt nur für Zertifikate ab `<N>`.
+
+## Läufe der Prüfungen von 23 (vom Orchestrator nach den Messungen ausgeführt, Protokolle im Scratchpad `orch/v23/`)
+- Angriffstests des Prüfers (`TestAttack23ClientFlipRace`, `TestAttack23ClientCacheNotPoisoned`, `TestAttack23ClientAfterRevocation`, `TestAttack23IngestFlipRace`): auf 9a9d6cb grün; auf der Mutante mit wiederhergestelltem zweitem Lesen scheitern `ClientFlipRace`, `ClientAfterRevocation` und `IngestFlipRace`.
+- Mutationen der Spezifikationsprüfung (M1–M9): getötet außer M4 (naive Doppel-Lese-Fassung in `store`; Testlücke niedrig, bekannt). Die Ergebnisse für `TestPlatformIngestCertSwapped` sind nicht aussagekräftig, solange der Test nicht deterministisch ist (scheitert auch ohne Mutation mit breitem `-run`, siehe 23b).
+- `TestPlatformIngestCertSwapped/forged_then_logged` (Fall `list`) scheitert unter 386 und unter amd64 ohne race mit breitem `-run`; Sicherheitseigenschaft hält (Mail des Angreifers nie angezeigt). → Nacharbeit 23b.
