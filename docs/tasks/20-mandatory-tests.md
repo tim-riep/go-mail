@@ -6,6 +6,8 @@ Grundlage: `docs/PLAN.md` 10.1 und 10.2, M1-Kriterium E (`docs/ORCHESTRATION.md`
 
 Zählung: Jeder Spiegelstrich von 10.1 ist ein Pflichttest; „Fuzzing“ zählt je Ziel (`.gml`-Parser, SMTP-Parser, Shamir-Anteile). Das sind 30 Pflichttests: Testvektoren T1 bis T3, kanonische Kodierung K1 und K2, `.gml` G1 bis G9, Schlüssel und Zustände S1 bis S9, Fuzzing F1 bis F3, Szenarien Z1 bis Z4.
 
+**Nachtrag am Endstand (Orchestrator, 04.11.):** S9 ist vollständig. `TestVerifyCompromisedIdentityStillIssues` (ceremony, ohne Skip seit 21c), `TestRevokedCompromise` (translog), `TestLogIngestRevoked` (client, nur mit Tags) und `TestRevokedIngestEndToEnd` (e2e, nur mit Tags) bestanden im Abschluss-Volllauf auf 9ad24a5 (Scratchpad `orch/fr-final/`). Damit sind 28 vollständig, 1 teilweise (Z3), 1 fehlt (S7, außerhalb M1). Die Abdeckung am Endstand fba4eb2 steht in `docs/HANDOFF.md`, „Testabdeckung“; die Tabellen unten sind der Stand von 20f bis 20h.
+
 Stand je Zeile:
 - **vollständig**: Die genannten Tests prüfen alles, was der Spiegelstrich verlangt. Ein „Hinweis“ in der Spalte „Lücke“ nennt nur eine Grenze des gebauten Umfangs, keine fehlende Prüfung.
 - **teilweise**: Ein Teil ist geprüft, der Rest steht unter „Lücke“.
