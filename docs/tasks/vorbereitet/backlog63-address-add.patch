@@ -1,7 +1,7 @@
 From 47d5342275275010cda8bab0ffab033d441e6893 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 4 Nov 2026 04:34:58 +0000
-Subject: [PATCH] gomail-server: address add verifies admin-<gen>.cert and
+Subject: [PATCH 1/2] gomail-server: address add verifies admin-<gen>.cert and
  checks it with the log
 
 Backlog item 63 (D93 addendum 23, AUDIT R48): "address add" read
@@ -214,6 +214,115 @@ index 2988626..dc223bf 100644
  	// Signed assignment for the log (2.3); addresses.json is the working copy.
  	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: time.Now().UnixMilli(), AdminGen: gen}
  	if err := a.Sign(admin); err != nil {
+-- 
+2.43.0
+
+
+From 4fa524a4bee0528d838e12484c70e1aeb7964ab0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 04:46:39 +0000
+Subject: [PATCH 2/2] gomail-server: address add test kills the unsigned-cert
+ mutant, cause in message
+
+TestAddressAddForgedCert gains a case with a wrong signature and the
+unchanged, revoked identity_gen 1 (without the signature check it ends
+with adminRevoked and exit status 2) and a case with identity_gen above
+the pin without a logged identity-<g>.succ. "address add" appends the
+cause from identityKey, Verify and CheckPlatform to adminCertInvalid;
+the test checks the message with strings.Contains.
+
+Task: docs/tasks/backlog-nach-m1.md (item 63, rework)
+---
+ cmd/gomail-server/backlog63_test.go | 23 +++++++++++++++++------
+ cmd/gomail-server/main.go           | 10 +++++++---
+ 2 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/cmd/gomail-server/backlog63_test.go b/cmd/gomail-server/backlog63_test.go
+index 5cd0293..d67482b 100644
+--- a/cmd/gomail-server/backlog63_test.go
++++ b/cmd/gomail-server/backlog63_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"crypto/ed25519"
+ 	"crypto/rand"
+ 	"path/filepath"
++	"strings"
+ 	"testing"
+ 	"time"
+ 
+@@ -22,7 +23,11 @@ import (
+ // cascade check; whether its signature is wrong or it is signed validly
+ // by identity generation 2 of the pin but not in the log, it is refused
+ // with adminCertInvalid before anything is logged or addresses.json
+-// changes.
++// changes. So is an admin-1.cert with a wrong signature and the
++// unchanged, revoked identity_gen 1: without the signature check it would
++// end with adminRevoked and exit status 2. An identity_gen above the pin
++// without a logged identity-<g>.succ is refused the same way. The
++// message carries the cause after adminCertInvalid (rework F3).
+ func TestAddressAddForgedCert(t *testing.T) {
+ 	s := newLogSetup(t)
+ 	size := s.treeSize(t)
+@@ -62,11 +67,15 @@ func TestAddressAddForgedCert(t *testing.T) {
+ 	for _, tc := range []struct {
+ 		name   string
+ 		signer ed25519.PrivateKey
++		idGen  uint32
++		cause  string
+ 	}{
+-		{"wrong signature", other},
+-		{"signed by identity 2, not in the log", priv2},
++		{"wrong signature", other, 2, ""},
++		{"signed by identity 2, not in the log", priv2, 2, ""},
++		{"wrong signature, identity_gen 1 revoked", other, 1, ""},
++		{"identity_gen 3 above the pin, no identity-3.succ", priv2, 3, "identity generation 3 not in the log"},
+ 	} {
+-		forged, err := keys.NewPlatformCert(tc.signer, 2, keys.RoleAdmin, 1, orig.Pub, orig.ValidFrom)
++		forged, err := keys.NewPlatformCert(tc.signer, tc.idGen, keys.RoleAdmin, 1, orig.Pub, orig.ValidFrom)
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+@@ -80,8 +89,10 @@ func TestAddressAddForgedCert(t *testing.T) {
+ 		var out, errb bytes.Buffer
+ 		args := []string{"address", "add", "info@example.org", "--mailbox", s.mbx.String(), "--data", s.data,
+ 			"--admin-key", filepath.Join(s.keys, ceremony.AdminKeyFile), "--pin", pin}
+-		if code := run(context.Background(), args, &out, &errb, nil); code != 1 || !hasLine(errb.String(), adminCertInvalid) {
+-			t.Fatalf("%s: exit status %d: %q", tc.name, code, errb.String())
++		code := run(context.Background(), args, &out, &errb, nil)
++		msg := errb.String()
++		if code != 1 || !strings.Contains(msg, "gomail-server: "+adminCertInvalid+": ") || !strings.Contains(msg, tc.cause) {
++			t.Fatalf("%s: exit status %d: %q", tc.name, code, msg)
+ 		}
+ 		if n := s.treeSize(t); n != size {
+ 			t.Fatalf("%s: logged: %d entries, before %d", tc.name, n, size)
+diff --git a/cmd/gomail-server/main.go b/cmd/gomail-server/main.go
+index dc223bf..325d5d4 100644
+--- a/cmd/gomail-server/main.go
++++ b/cmd/gomail-server/main.go
+@@ -725,9 +725,13 @@ func address(args []string, stdout, stderr io.Writer) int {
+ 	// list, above it the valid logged successions, as client/read.go
+ 	// identityKey): before it, identity_gen is not authenticated and the
+ 	// cascade check below could be bypassed by a forged identity_gen.
++	// The cause follows the fixed message (backlog item 63, rework F3).
+ 	idKey, err := identityKey(tl, ids, cert.IdentityGen)
+-	if err != nil || cert.Verify(idKey) != nil {
+-		return fail(stderr, errors.New(adminCertInvalid))
++	if err == nil {
++		err = cert.Verify(idKey)
++	}
++	if err != nil {
++		return fail(stderr, fmt.Errorf("%s: %w", adminCertInvalid, err))
+ 	}
+ 	// The cascade (D93, addendum on task 21a): an assignment logged from
+ 	// revoked_at_size of the identity generation that issued
+@@ -741,7 +745,7 @@ func address(args []string, stdout, stderr io.Writer) int {
+ 	// against the logged certificate (admitAddress) and would refuse
+ 	// later with a less clear error.
+ 	if err := tl.CheckPlatform(store.PlatformFileName("admin", gen, "cert"), raw); err != nil {
+-		return fail(stderr, errors.New(adminCertInvalid))
++		return fail(stderr, fmt.Errorf("%s: %w", adminCertInvalid, err))
+ 	}
+ 	// Signed assignment for the log (2.3); addresses.json is the working copy.
+ 	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: time.Now().UnixMilli(), AdminGen: gen}
 -- 
 2.43.0
 
