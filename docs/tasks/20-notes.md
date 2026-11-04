@@ -418,3 +418,10 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 ## Aus der Prüfung von 17e
 - Ohne Funde über niedrig: 43 Aufrufe über eine echo-Kopie, keiner misst mit `-render`; vier Rohdateien rendern mit rc=0; Messlogik unverändert; `nachtrag-17c.diff` byte-gleich. Niedrig: A, der Render-Befehl scheitert bei gesetztem `TMPDIR` (behoben in MEASUREMENTS mit `env -u TMPDIR`); B, Werte, die in den Rohdaten in Anführungszeichen stehen, stimmen nie überein (fail closed; Kommentar „empty or unset“ ungenau). Nach M1.
 - Prüfung von 20s (niedrige Punkte aus 20r, D94 erledigt): ohne Funde über niedrig; zwei niedrige (Q2 als Ausnahme zur Regel für offene Haltepunkte, Satz „spätere Commits ändern nur Dokumente“ seit 17e ungenau) mit den Ersatztexten des Prüfers vom Orchestrator eingesetzt.
+
+## Aus der Prüfung von 22e (RUNBOOK L1/L2, D93-Hinweis)
+- Ohne Funde über niedrig; alle Meldungen wörtlich am Code bestätigt, die Abhilfe zu L2 widerspricht keinem Verbot. Niedrig, nach M1 (Ersatztexte im Prüfbericht; Kurzfassung):
+  - N1: AUDIT R17 (b) und D93 Nachtrag 22 sagen weiter pauschal „ein Link mit anderem Zielinhalt wird ersetzt“; richtig nur, wenn das Ziel eine lesbare reguläre Datei ist und `freeName` den Namen freigibt.
+  - N2: Liegt nur die `.pub` des Diebs in `platform/`, lautet die Meldung `store: file exists: …/<role>-<g>.pub with other content than … of the export, and <role>-<g>.cert is a valid entry …: a valid entry is never replaced` (ohne `translog: duplicate log entry:`); ohne eigene Zeile in 8.6.
+  - N3: `is not a regular file` kommt auch bei `witnesses.rec` und einer im Export fehlenden Nachfolge; ein Link unter einem Namen, den `publish` nicht liest, fällt nicht auf.
+  - N4: RUNBOOK 7.3.5 Schritt 2 nennt nicht, dass ein nur im Log stehendes Zertifikat des Diebs sich erst in Schritt 5 zeigt (dann Rotation mit der Generation darüber wiederholen).
