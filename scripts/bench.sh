@@ -26,12 +26,15 @@
 #   -raw FILE    keep the raw go test output in FILE (benchstat format)
 #   -render FILE measure nothing: print the table of the raw output FILE
 #                of an earlier run (-raw); -count, -benchtime and
-#                GOMAIL_BENCH_MIN_FREE must be those of that run (checked
-#                against the command and env lines of FILE, exit 1
+#                GOMAIL_BENCH_MIN_FREE, GOMAIL_BENCH_SYNC_MAILS,
+#                GOMAIL_BENCH_MEM_MAILS, GOMAIL_BENCH_MEM_CONNS and TMPDIR
+#                must be those of that run (checked against the command and
+#                env lines of FILE, exactly one of each per group, exit 1
 #                otherwise), the table names no commit
 #
-# An option given with an empty value (-render=, -o "", ...) ends
-# bench.sh with 2 before anything runs.
+# An option given with an empty value (-render=, -o "", ...) or with a
+# value that starts with - (-o -render=F, -count -5, ...) ends bench.sh
+# with 2 before anything runs; a path that starts with - is written ./-...
 #
 # The table is fail closed: every group needs at least one benchmark line,
 # every number of a benchmark exactly N values (-count), no line may
@@ -67,14 +70,23 @@ abspath() {
 	esac
 }
 
-# need ends bench.sh with 2 if option $1 has an empty value: an empty
-# value would count as "not set" (no -render, no -o, ...) and start a
-# full measurement instead.
+# need ends bench.sh with 2 if option $1 has an empty value or one that
+# starts with -: an empty value would count as "not set" (no -render, no
+# -o, ...) and start a full measurement instead, and a value such as
+# -render=F in -o -render=F is most likely the next option, taken as the
+# value of an option whose value is missing.
 need() {
 	if [ -z "$2" ]; then
 		echo "bench.sh: $1 needs a non-empty value" >&2
 		exit 2
 	fi
+	case "$2" in
+	-*)
+		case "$1" in -count | -benchtime | -maxload) set -- "$1" "$2" "" ;; *) set -- "$1" "$2" " (write a path that starts with - as ./$2)" ;; esac
+		echo "bench.sh: $1 needs a value that does not start with -, not '$2'$3" >&2
+		exit 2
+		;;
+	esac
 }
 
 short=0
@@ -240,6 +252,10 @@ render() {
 	awk -v commit="$commit" -v date="$(date -u +%Y-%m-%dT%H:%MZ)" -v count="$count" -v render="$renderset" -v groups="${groups[*]}" \
 		-v envall="$(envof GOMAIL_BENCH_MIN_FREE TMPDIR)" -v minfree="${GOMAIL_BENCH_MIN_FREE:-}" -v envsync="$(envof GOMAIL_BENCH_SYNC_MAILS)" \
 		-v envmem="$(envof GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS)" '
+	# envchk are the variables the table names in its commands (envof
+	# above); with -render, every env line must carry the value of this
+	# call (empty or unset: not in the env line).
+	BEGIN { nchk = split("GOMAIL_BENCH_MIN_FREE GOMAIL_BENCH_SYNC_MAILS GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS TMPDIR", envchk, " ") }
 	function point(name) {
 		if (name ~ /^BenchmarkReceive/) return "1"
 		if (name ~ /^BenchmarkIndexSegments/) return "3"
@@ -304,14 +320,19 @@ render() {
 		if (!open || $2 != gname[ng]) fail("group-end of " $2 " in line " NR " without its group-start")
 		open = 0; gend[ng] = $3; gloadend[ng] = field($0, "loadavg"); gcpu1[ng] = field($0, "cpu"); next
 	}
-	# With -render, the command and env lines of the raw output must match
-	# -benchtime, -count and GOMAIL_BENCH_MIN_FREE of this call: the table
-	# names them in every command.
+	# With -render, every group has exactly one command and one env line,
+	# and they must match -benchtime, -count and the variables of envchk of
+	# this call: the table names them in every command.
+	render && /^(command|env): / {
+		if (!open) fail("line " NR " (" $1 ") outside a group")
+		if ((ng, $1) in hdr) fail("group " gname[ng] " has a second " $1 " line in line " NR)
+		hdr[ng, $1] = 1
+	}
 	render && /^command: / && (index($0 " ", " -benchtime=" bt " ") == 0 || index($0 " ", " -count=" count " ") == 0) {
 		fail("line " NR " (" $0 ") does not match -benchtime " bt " and -count " count " of this call")
 	}
-	render && /^env: / && field($0, "GOMAIL_BENCH_MIN_FREE") != minfree {
-		fail("line " NR " (" $0 ") does not match GOMAIL_BENCH_MIN_FREE=" minfree " of this call")
+	render && /^env: / {
+		for (ci = 1; ci <= nchk; ci++) if (field($0, envchk[ci]) != ENVIRON[envchk[ci]]) fail("line " NR " (" $0 ") does not match " envchk[ci] "=" ENVIRON[envchk[ci]] " of this call")
 	}
 	/^[a-z]+: / {
 		k = $1; sub(/:$/, "", k)
@@ -343,6 +364,7 @@ render() {
 		for (i = 1; i <= n; i++) {
 			if (gname[i] != want[i]) fail("group " i " is " gname[i] ", expected " want[i])
 			if (gnb[i] < 1) fail("group " gname[i] " has no benchmark line")
+			if (render && !((i, "command:") in hdr && (i, "env:") in hdr)) fail("group " gname[i] " has no command or no env line")
 		}
 		for (j = 1; j <= nnames; j++) {
 			s = names[j]

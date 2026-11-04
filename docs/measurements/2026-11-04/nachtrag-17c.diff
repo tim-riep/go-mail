@@ -23,7 +23,7 @@ index 730b739..bb09cf8 100644
  	if c.MaxMailsPerIP != math.MaxInt32 {
  		t.Fatalf("smtpConfig has MaxMailsPerIP %d, the table names no hourly limit", c.MaxMailsPerIP)
 diff --git a/scripts/bench.sh b/scripts/bench.sh
-index 042313b..2c7120f 100755
+index 042313b..4a3e73f 100755
 --- a/scripts/bench.sh
 +++ b/scripts/bench.sh
 @@ -5,6 +5,7 @@
@@ -34,7 +34,7 @@ index 042313b..2c7120f 100755
  # (every option with a value also as -option=value)
  #
  #   -short       quick run: 20 iterations, 500 mails for Sync, 100 for
-@@ -15,15 +16,29 @@
+@@ -15,15 +16,32 @@
  #                (default 1s); the memory and the segment size benchmarks
  #                always run once per -count (1x)
  #   -maxload L   before every group, wait until the load average of the
@@ -51,13 +51,16 @@ index 042313b..2c7120f 100755
  #   -raw FILE    keep the raw go test output in FILE (benchstat format)
 +#   -render FILE measure nothing: print the table of the raw output FILE
 +#                of an earlier run (-raw); -count, -benchtime and
-+#                GOMAIL_BENCH_MIN_FREE must be those of that run (checked
-+#                against the command and env lines of FILE, exit 1
++#                GOMAIL_BENCH_MIN_FREE, GOMAIL_BENCH_SYNC_MAILS,
++#                GOMAIL_BENCH_MEM_MAILS, GOMAIL_BENCH_MEM_CONNS and TMPDIR
++#                must be those of that run (checked against the command and
++#                env lines of FILE, exactly one of each per group, exit 1
 +#                otherwise), the table names no commit
  #
 -# Relative paths of -dir, -o and -raw are taken from the directory
-+# An option given with an empty value (-render=, -o "", ...) ends
-+# bench.sh with 2 before anything runs.
++# An option given with an empty value (-render=, -o "", ...) or with a
++# value that starts with - (-o -render=F, -count -5, ...) ends bench.sh
++# with 2 before anything runs; a path that starts with - is written ./-...
 +#
 +# The table is fail closed: every group needs at least one benchmark line,
 +# every number of a benchmark exactly N values (-count), no line may
@@ -68,24 +71,33 @@ index 042313b..2c7120f 100755
  # bench.sh is called from, not from the root of the repository.
  #
  # Environment: GOTOOLCHAIN (default go1.26.10), GOMAIL_BENCH_MIN_FREE
-@@ -52,6 +67,16 @@ abspath() {
+@@ -52,6 +70,25 @@ abspath() {
  	esac
  }
  
-+# need ends bench.sh with 2 if option $1 has an empty value: an empty
-+# value would count as "not set" (no -render, no -o, ...) and start a
-+# full measurement instead.
++# need ends bench.sh with 2 if option $1 has an empty value or one that
++# starts with -: an empty value would count as "not set" (no -render, no
++# -o, ...) and start a full measurement instead, and a value such as
++# -render=F in -o -render=F is most likely the next option, taken as the
++# value of an option whose value is missing.
 +need() {
 +	if [ -z "$2" ]; then
 +		echo "bench.sh: $1 needs a non-empty value" >&2
 +		exit 2
 +	fi
++	case "$2" in
++	-*)
++		case "$1" in -count | -benchtime | -maxload) set -- "$1" "$2" "" ;; *) set -- "$1" "$2" " (write a path that starts with - as ./$2)" ;; esac
++		echo "bench.sh: $1 needs a value that does not start with -, not '$2'$3" >&2
++		exit 2
++		;;
++	esac
 +}
 +
  short=0
  count=1
  benchtime=1s
-@@ -59,21 +84,26 @@ dir=""
+@@ -59,21 +96,26 @@ dir=""
  out=""
  raw=""
  maxload=""
@@ -124,7 +136,7 @@ index 042313b..2c7120f 100755
  	-h | -help | --help)
  		sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
  		exit 0
-@@ -85,8 +115,24 @@ while [ $# -gt 0 ]; do
+@@ -85,8 +127,24 @@ while [ $# -gt 0 ]; do
  	esac
  	shift
  done
@@ -151,7 +163,7 @@ index 042313b..2c7120f 100755
  if [ -n "$dir" ]; then export TMPDIR="$(abspath "$dir")"; fi
  if [ -n "$out" ]; then out="$(abspath "$out")"; fi
  if [ -n "$raw" ]; then raw="$(abspath "$raw")"; fi
-@@ -145,16 +191,39 @@ run() {
+@@ -145,16 +203,39 @@ run() {
  	echo "group-end: $re $(groupmark)" | tee -a "$rawfile" >&2
  }
  
@@ -200,7 +212,7 @@ index 042313b..2c7120f 100755
  
  # envof <names...> prints "NAME=value " for every variable that is set.
  envof() {
-@@ -165,8 +234,10 @@ envof() {
+@@ -165,10 +246,16 @@ envof() {
  	printf '%s' "$p"
  }
  
@@ -211,8 +223,14 @@ index 042313b..2c7120f 100755
 +	awk -v commit="$commit" -v date="$(date -u +%Y-%m-%dT%H:%MZ)" -v count="$count" -v render="$renderset" -v groups="${groups[*]}" \
  		-v envall="$(envof GOMAIL_BENCH_MIN_FREE TMPDIR)" -v minfree="${GOMAIL_BENCH_MIN_FREE:-}" -v envsync="$(envof GOMAIL_BENCH_SYNC_MAILS)" \
  		-v envmem="$(envof GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS)" '
++	# envchk are the variables the table names in its commands (envof
++	# above); with -render, every env line must carry the value of this
++	# call (empty or unset: not in the env line).
++	BEGIN { nchk = split("GOMAIL_BENCH_MIN_FREE GOMAIL_BENCH_SYNC_MAILS GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS TMPDIR", envchk, " ") }
  	function point(name) {
-@@ -216,9 +287,32 @@ render() {
+ 		if (name ~ /^BenchmarkReceive/) return "1"
+ 		if (name ~ /^BenchmarkIndexSegments/) return "3"
+@@ -216,9 +303,37 @@ render() {
  		for (i = 1; i <= n; i++) if (index(f[i], name "=") == 1) return substr(f[i], length(name) + 2)
  		return ""
  	}
@@ -235,19 +253,24 @@ index 042313b..2c7120f 100755
 +		if (!open || $2 != gname[ng]) fail("group-end of " $2 " in line " NR " without its group-start")
 +		open = 0; gend[ng] = $3; gloadend[ng] = field($0, "loadavg"); gcpu1[ng] = field($0, "cpu"); next
 +	}
-+	# With -render, the command and env lines of the raw output must match
-+	# -benchtime, -count and GOMAIL_BENCH_MIN_FREE of this call: the table
-+	# names them in every command.
++	# With -render, every group has exactly one command and one env line,
++	# and they must match -benchtime, -count and the variables of envchk of
++	# this call: the table names them in every command.
++	render && /^(command|env): / {
++		if (!open) fail("line " NR " (" $1 ") outside a group")
++		if ((ng, $1) in hdr) fail("group " gname[ng] " has a second " $1 " line in line " NR)
++		hdr[ng, $1] = 1
++	}
 +	render && /^command: / && (index($0 " ", " -benchtime=" bt " ") == 0 || index($0 " ", " -count=" count " ") == 0) {
 +		fail("line " NR " (" $0 ") does not match -benchtime " bt " and -count " count " of this call")
 +	}
-+	render && /^env: / && field($0, "GOMAIL_BENCH_MIN_FREE") != minfree {
-+		fail("line " NR " (" $0 ") does not match GOMAIL_BENCH_MIN_FREE=" minfree " of this call")
++	render && /^env: / {
++		for (ci = 1; ci <= nchk; ci++) if (field($0, envchk[ci]) != ENVIRON[envchk[ci]]) fail("line " NR " (" $0 ") does not match " envchk[ci] "=" ENVIRON[envchk[ci]] " of this call")
 +	}
  	/^[a-z]+: / {
  		k = $1; sub(/:$/, "", k)
  		v = $0; sub(/^[a-z]+: /, "", v)
-@@ -227,9 +321,13 @@ render() {
+@@ -227,9 +342,13 @@ render() {
  		next
  	}
  	/^Benchmark/ {
@@ -261,7 +284,7 @@ index 042313b..2c7120f 100755
  			unit = $(i + 1)
  			if (!keep(unit)) continue
  			key = name SUBSEP unit
-@@ -238,6 +336,22 @@ render() {
+@@ -238,6 +357,23 @@ render() {
  		}
  	}
  	END {
@@ -272,6 +295,7 @@ index 042313b..2c7120f 100755
 +		for (i = 1; i <= n; i++) {
 +			if (gname[i] != want[i]) fail("group " i " is " gname[i] ", expected " want[i])
 +			if (gnb[i] < 1) fail("group " gname[i] " has no benchmark line")
++			if (render && !((i, "command:") in hdr && (i, "env:") in hdr)) fail("group " gname[i] " has no command or no env line")
 +		}
 +		for (j = 1; j <= nnames; j++) {
 +			s = names[j]
@@ -284,7 +308,7 @@ index 042313b..2c7120f 100755
  		print "# Messwerte"
  		print ""
  		print "Erzeugt mit `scripts/bench.sh` am " date " auf Commit " commit "."
-@@ -298,7 +412,14 @@ render() {
+@@ -298,7 +434,14 @@ render() {
  	}' "$rawfile"
  }
  
