@@ -1,0 +1,219 @@
+From 47d5342275275010cda8bab0ffab033d441e6893 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 04:34:58 +0000
+Subject: [PATCH] gomail-server: address add verifies admin-<gen>.cert and
+ checks it with the log
+
+Backlog item 63 (D93 addendum 23, AUDIT R48): "address add" read
+admin-<gen>.cert once and trusted its identity_gen for the cascade check
+without verifying the signature or comparing the certificate with the
+log. It now reads it with store.ReadPlatformCertRaw, verifies the
+signature with the key of identity_gen (pin identity list, above it the
+valid logged successions, as client/read.go identityKey), runs the
+cascade check on the authenticated identity_gen and then
+Log.CheckPlatform on the same bytes. Failures are fail closed with the
+new message adminCertInvalid. Client check rules are unchanged.
+
+TestAddressAddForgedCert: admin-1.cert rewritten with identity_gen 2
+under a pin that revokes identity 1 is refused before anything is
+logged, both with a wrong signature and signed validly by identity 2
+but not in the log. Counter-proof: with the signature check and
+CheckPlatform disabled (and with CheckPlatform alone disabled) the test
+fails; the refusal then comes only later from Append (admitAddress).
+
+Prepared for after M1; to be merged after its own full run.
+
+Task: docs/tasks/backlog-nach-m1.md (item 63)
+---
+ cmd/gomail-server/backlog63_test.go | 93 +++++++++++++++++++++++++++++
+ cmd/gomail-server/main.go           | 57 +++++++++++++++++-
+ 2 files changed, 149 insertions(+), 1 deletion(-)
+ create mode 100644 cmd/gomail-server/backlog63_test.go
+
+diff --git a/cmd/gomail-server/backlog63_test.go b/cmd/gomail-server/backlog63_test.go
+new file mode 100644
+index 0000000..5cd0293
+--- /dev/null
++++ b/cmd/gomail-server/backlog63_test.go
+@@ -0,0 +1,93 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/tim-riep/go-mail/internal/ceremony"
++	"github.com/tim-riep/go-mail/internal/keys"
++	"github.com/tim-riep/go-mail/internal/store"
++)
++
++// TestAddressAddForgedCert (backlog item 63, D93 addendum 23, AUDIT R48):
++// "address add" checks admin-<gen>.cert with the key of its identity_gen
++// and against the log before it trusts identity_gen. With identity
++// generation 1 revoked (the cascade: it issued admin-1.cert), an
++// admin-1.cert rewritten with identity_gen 2 would otherwise pass the
++// cascade check; whether its signature is wrong or it is signed validly
++// by identity generation 2 of the pin but not in the log, it is refused
++// with adminCertInvalid before anything is logged or addresses.json
++// changes.
++func TestAddressAddForgedCert(t *testing.T) {
++	s := newLogSetup(t)
++	size := s.treeSize(t)
++	now := time.Now().UnixMilli()
++
++	// The pin of identity generation 2 that revokes identity 1
++	// (cascadePinFile with a known key for generation 2).
++	pub2, priv2, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	p := *s.p
++	p.Gen, p.Pub = 2, pub2
++	p.Identities = append(append([]store.PlatformIdentity(nil), s.p.Identities...), store.PlatformIdentity{Gen: 2, Pub: pub2})
++	p.Revoked = []store.PlatformRevoked{{Role: store.KeyRoleIdentity, Gen: 1, AtSize: size, AtTime: now}}
++	data, err := p.Encode()
++	if err != nil {
++		t.Fatal(err)
++	}
++	pin := filepath.Join(s.dir, "forged.pin")
++	if err := store.WriteFileAtomic(pin, data); err != nil {
++		t.Fatal(err)
++	}
++
++	orig, err := s.st.ReadPlatformCert(keys.RoleAdmin, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if orig.IdentityGen != 1 {
++		t.Fatalf("admin-1.cert issued by identity generation %d", orig.IdentityGen)
++	}
++	_, other, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	certPath := s.st.Path("platform", store.PlatformFileName("admin", 1, "cert"))
++	for _, tc := range []struct {
++		name   string
++		signer ed25519.PrivateKey
++	}{
++		{"wrong signature", other},
++		{"signed by identity 2, not in the log", priv2},
++	} {
++		forged, err := keys.NewPlatformCert(tc.signer, 2, keys.RoleAdmin, 1, orig.Pub, orig.ValidFrom)
++		if err != nil {
++			t.Fatal(err)
++		}
++		enc, err := forged.Encode()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := store.WriteFileAtomic(certPath, enc); err != nil {
++			t.Fatal(err)
++		}
++		var out, errb bytes.Buffer
++		args := []string{"address", "add", "info@example.org", "--mailbox", s.mbx.String(), "--data", s.data,
++			"--admin-key", filepath.Join(s.keys, ceremony.AdminKeyFile), "--pin", pin}
++		if code := run(context.Background(), args, &out, &errb, nil); code != 1 || !hasLine(errb.String(), adminCertInvalid) {
++			t.Fatalf("%s: exit status %d: %q", tc.name, code, errb.String())
++		}
++		if n := s.treeSize(t); n != size {
++			t.Fatalf("%s: logged: %d entries, before %d", tc.name, n, size)
++		}
++		if a, err := s.st.LoadAddresses(); err != nil || len(a) != 0 {
++			t.Fatalf("%s: addresses.json: %v %v", tc.name, a, err)
++		}
++	}
++}
+diff --git a/cmd/gomail-server/main.go b/cmd/gomail-server/main.go
+index 2988626..dc223bf 100644
+--- a/cmd/gomail-server/main.go
++++ b/cmd/gomail-server/main.go
+@@ -312,6 +312,43 @@ const ingestRevoked = "der Ingest-Schlüssel gehört zu einer Generation, die de
+ const adminRevoked = "der Admin-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); " +
+ 	"Zuordnungen nur mit dem Schlüssel einer neu ausgestellten Admin-Generation"
+ 
++// adminCertInvalid is the message of "address add" for an
++// admin-<gen>.cert that the platform identity of its identity_gen did not
++// sign or that is not a valid entry of the log (backlog item 63, D93
++// addendum 23, AUDIT R48).
++const adminCertInvalid = "admin-<gen>.cert ist nicht von der Plattformidentität seiner identity_gen signiert oder kein gültiger Eintrag des Logs"
++
++// identityKey returns the key of platform identity generation gen: from
++// the pin's identity list ids, or, above it, from the chain of valid
++// successions identity-<g>.succ in the log, each verified with the key
++// of generation g-1 (translog doc.go "Validity rules", "Pin"); never from
++// the data directory alone. It is the derivation of client/read.go
++// identityKey.
++func identityKey(tl translog.Log, ids []translog.Identity, gen uint32) (ed25519.PublicKey, error) {
++	if k, ok := translog.IdentityKey(ids, gen); ok {
++		return k, nil
++	}
++	if gen == 0 || len(ids) == 0 || uint64(gen) > uint64(len(ids))+translog.MaxIdentities {
++		return nil, fmt.Errorf("identity generation %d unknown", gen)
++	}
++	key := ids[len(ids)-1].Pub
++	for g := uint32(len(ids)) + 1; g <= gen; g++ {
++		ents, err := tl.Lookup(translog.KindPlatform, []byte(store.PlatformFileName("identity", g, "succ")))
++		if err != nil {
++			return nil, err
++		}
++		if len(ents) == 0 {
++			return nil, fmt.Errorf("succession to identity generation %d not in the log", g)
++		}
++		sc, err := keys.DecodePlatformSuccession(ents[0].Content)
++		if err != nil || sc.Gen != g || sc.Verify(key, g-1) != nil {
++			return nil, fmt.Errorf("succession to identity generation %d", g)
++		}
++		key = sc.Pub
++	}
++	return key, nil
++}
++
+ // devPinWarning is printed by a build with the development ceremony when
+ // it runs with a development pin.
+ const devPinWarning = "WARNUNG: Entwicklungs-Pin (gomail-ceremony init --dev), nur in einem Testbuild; nie mit echten Mails verwenden."
+@@ -677,10 +714,21 @@ func address(args []string, stdout, stderr io.Writer) int {
+ 	if _, ok := translog.FindRevoked(rev, store.KeyRoleAdmin, gen); ok {
+ 		return fail(stderr, usageError{adminRevoked})
+ 	}
+-	cert, err := st.ReadPlatformCert(keys.RoleAdmin, gen)
++	// One read of admin-<gen>.cert (store.ReadPlatformCertRaw, task 23,
++	// backlog item 63): the key, the signature, identity_gen for the
++	// cascade and the comparison with the log all work on raw.
++	cert, raw, err := st.ReadPlatformCertRaw(keys.RoleAdmin, gen)
+ 	if err != nil || !cert.Pub.Equal(admin.Public()) {
+ 		return fail(stderr, errors.New("der Admin-Schlüssel passt nicht zu admin-<gen>.cert"))
+ 	}
++	// The signature with the key of identity_gen (the pin's identity
++	// list, above it the valid logged successions, as client/read.go
++	// identityKey): before it, identity_gen is not authenticated and the
++	// cascade check below could be bypassed by a forged identity_gen.
++	idKey, err := identityKey(tl, ids, cert.IdentityGen)
++	if err != nil || cert.Verify(idKey) != nil {
++		return fail(stderr, errors.New(adminCertInvalid))
++	}
+ 	// The cascade (D93, addendum on task 21a): an assignment logged from
+ 	// revoked_at_size of the identity generation that issued
+ 	// admin-<gen>.cert on is invalid as well (translog
+@@ -688,6 +736,13 @@ func address(args []string, stdout, stderr io.Writer) int {
+ 	if _, ok := translog.FindRevoked(rev, store.KeyRoleIdentity, cert.IdentityGen); ok {
+ 		return fail(stderr, usageError{adminRevoked})
+ 	}
++	// The certificate in the log (2.3, translog doc.go "Platform
++	// generations"), on the same bytes: Append checks the assignment
++	// against the logged certificate (admitAddress) and would refuse
++	// later with a less clear error.
++	if err := tl.CheckPlatform(store.PlatformFileName("admin", gen, "cert"), raw); err != nil {
++		return fail(stderr, errors.New(adminCertInvalid))
++	}
+ 	// Signed assignment for the log (2.3); addresses.json is the working copy.
+ 	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: time.Now().UnixMilli(), AdminGen: gen}
+ 	if err := a.Sign(admin); err != nil {
+-- 
+2.43.0
+
