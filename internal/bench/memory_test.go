@@ -431,6 +431,40 @@ func TestMemConns(t *testing.T) {
 	}
 }
 
+// TestParseMinFree checks GOMAIL_BENCH_MIN_FREE: unset or empty is the
+// default of 1 %, a percentage above 0 and at most 10 is taken as a
+// fraction, anything else is refused.
+func TestParseMinFree(t *testing.T) {
+	for _, c := range []struct {
+		val  string
+		ok   bool
+		want float64
+		err  bool
+	}{
+		{"", false, benchMinFree, false},
+		{"", true, benchMinFree, false},
+		{"1", true, 0.01, false},
+		{"0.1", true, 0.001, false},
+		{"10", true, 0.1, false},
+		{"0", true, 0, true},
+		{"-1", true, 0, true},
+		{"10.5", true, 0, true},
+		{"NaN", true, 0, true},
+		{"x", true, 0, true},
+	} {
+		f, err := parseMinFree(c.val, c.ok)
+		if c.err {
+			if err == nil || !strings.Contains(err.Error(), minFreeEnv) {
+				t.Errorf("%q: %g, %v; want an error naming %s", c.val, f, err, minFreeEnv)
+			}
+			continue
+		}
+		if err != nil || math.Abs(f-c.want) > 1e-12 {
+			t.Errorf("%q: %g, %v; want %g", c.val, f, err, c.want)
+		}
+	}
+}
+
 // TestBenchScriptLimits checks that the table of scripts/bench.sh names
 // the limits of this package: MaxConns of the benchmark server, its
 // missing hourly mail limit per IP, MinFree of ingest, the discarded
@@ -441,10 +475,16 @@ func TestBenchScriptLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ic := (&rig{}).ingestConfig()
-	if ic.MinFree != benchMinFree {
-		t.Fatalf("ingestConfig has MinFree %g, the table names %g", ic.MinFree, benchMinFree)
+	// GOMAIL_BENCH_MIN_FREE reaches ingest: with another MinFree for the
+	// run, ingestConfig carries it, not the constant of the table.
+	saved := minFree
+	minFree = benchMinFree / 4
+	other := (&rig{}).ingestConfig().MinFree
+	minFree = saved
+	if other != benchMinFree/4 {
+		t.Fatalf("ingestConfig has MinFree %g with %g set for the run", other, benchMinFree/4)
 	}
+	ic := (&rig{}).ingestConfig()
 	c := smtpConfig()
 	if c.MaxMailsPerIP != math.MaxInt32 {
 		t.Fatalf("smtpConfig has MaxMailsPerIP %d, the table names no hourly limit", c.MaxMailsPerIP)

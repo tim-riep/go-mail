@@ -1,0 +1,256 @@
+group-start: ^BenchmarkReceive$ 2026-11-03T19:13:25Z loadavg=0.48/1.05/1.26 cpu=14791002/161971
+bench.sh: go test -tags gomail_dev -run '^$' -bench '^BenchmarkReceive$' -benchtime=1s -count=5 ./internal/bench
+command: go test '-run=^$' '-bench=^BenchmarkReceive$' -benchtime=1s -count=5 ./internal/bench
+env: GOTOOLCHAIN=go1.26.10 GOMAIL_BENCH_MIN_FREE=0.1
+goversion: go1.26.10
+numcpu: 4
+gomaxprocs: 4
+cpumodel: Intel(R) Xeon(R) Processor @ 2.80GHz
+memtotal: 16477348 kB
+kernel: Linux version 6.18.44-fc-v230
+benchdir: /tmp
+benchfs: ext4 on / (/dev/vda)
+goos: linux
+goarch: amd64
+pkg: github.com/tim-riep/go-mail/internal/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkReceive/mode=enc/size=4KiB/conns=1-4 	     100	  10184390 ns/op	   0.40 MB/s	         0.3836 MiB/s	        98.19 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=1-4 	     100	  11015627 ns/op	   0.37 MB/s	         0.3546 MiB/s	        90.78 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=1-4 	     100	  10949239 ns/op	   0.37 MB/s	         0.3568 MiB/s	        91.33 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=1-4 	     100	  12772202 ns/op	   0.32 MB/s	         0.3058 MiB/s	        78.30 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=1-4 	     100	  12660651 ns/op	   0.32 MB/s	         0.3085 MiB/s	        78.98 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=4-4 	     210	   5386237 ns/op	   0.76 MB/s	         0.7252 MiB/s	       185.7 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=4-4 	     252	   5326667 ns/op	   0.77 MB/s	         0.7333 MiB/s	       187.7 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=4-4 	     255	   5090405 ns/op	   0.80 MB/s	         0.7674 MiB/s	       196.4 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=4-4 	     246	   4914775 ns/op	   0.83 MB/s	         0.7948 MiB/s	       203.5 mails/s
+BenchmarkReceive/mode=enc/size=4KiB/conns=4-4 	     260	   5273220 ns/op	   0.78 MB/s	         0.7408 MiB/s	       189.6 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=1-4         	      78	  16511442 ns/op	   3.97 MB/s	         3.785 MiB/s	        60.56 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=1-4         	      72	  15869714 ns/op	   4.13 MB/s	         3.938 MiB/s	        63.01 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=1-4         	      73	  13885303 ns/op	   4.72 MB/s	         4.501 MiB/s	        72.02 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=1-4         	      79	  14634023 ns/op	   4.48 MB/s	         4.271 MiB/s	        68.33 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=1-4         	      72	  14964844 ns/op	   4.38 MB/s	         4.176 MiB/s	        66.82 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=4-4         	     162	   6186177 ns/op	  10.59 MB/s	        10.10 MiB/s	       161.7 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=4-4         	     220	   5991828 ns/op	  10.94 MB/s	        10.43 MiB/s	       166.9 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=4-4         	     205	   6043859 ns/op	  10.84 MB/s	        10.34 MiB/s	       165.5 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=4-4         	     212	   5667082 ns/op	  11.56 MB/s	        11.03 MiB/s	       176.5 mails/s
+BenchmarkReceive/mode=enc/size=64KiB/conns=4-4         	     210	   6118707 ns/op	  10.71 MB/s	        10.21 MiB/s	       163.4 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=1-4          	      33	  41898553 ns/op	  25.03 MB/s	        23.87 MiB/s	        23.87 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=1-4          	      34	  39686716 ns/op	  26.42 MB/s	        25.20 MiB/s	        25.20 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=1-4          	      37	  35996554 ns/op	  29.13 MB/s	        27.78 MiB/s	        27.78 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=1-4          	      28	  38022369 ns/op	  27.58 MB/s	        26.30 MiB/s	        26.30 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=1-4          	      32	  44168330 ns/op	  23.74 MB/s	        22.64 MiB/s	        22.64 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=4-4          	      40	  27173242 ns/op	  38.59 MB/s	        36.80 MiB/s	        36.80 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=4-4          	      68	  18588810 ns/op	  56.41 MB/s	        53.80 MiB/s	        53.80 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=4-4          	      69	  17775635 ns/op	  58.99 MB/s	        56.26 MiB/s	        56.26 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=4-4          	      62	  20727481 ns/op	  50.59 MB/s	        48.25 MiB/s	        48.25 mails/s
+BenchmarkReceive/mode=enc/size=1MiB/conns=4-4          	      63	  16773667 ns/op	  62.51 MB/s	        59.62 MiB/s	        59.62 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=1-4         	       6	 187545910 ns/op	  55.91 MB/s	        53.32 MiB/s	         5.332 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=1-4         	       6	 187669397 ns/op	  55.87 MB/s	        53.29 MiB/s	         5.329 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=1-4         	       6	 206548358 ns/op	  50.77 MB/s	        48.41 MiB/s	         4.841 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=1-4         	       6	 205955146 ns/op	  50.91 MB/s	        48.55 MiB/s	         4.855 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=1-4         	       5	 203092121 ns/op	  51.63 MB/s	        49.24 MiB/s	         4.924 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=4-4         	      13	 103586735 ns/op	 101.23 MB/s	        96.54 MiB/s	         9.654 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=4-4         	      14	 102191441 ns/op	 102.61 MB/s	        97.86 MiB/s	         9.786 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=4-4         	       9	 140493545 ns/op	  74.64 MB/s	        71.18 MiB/s	         7.118 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=4-4         	       9	 137794216 ns/op	  76.10 MB/s	        72.57 MiB/s	         7.257 mails/s
+BenchmarkReceive/mode=enc/size=10MiB/conns=4-4         	       9	 124824296 ns/op	  84.00 MB/s	        80.11 MiB/s	         8.011 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=1-4        	     109	  11745253 ns/op	   0.35 MB/s	         0.3326 MiB/s	        85.14 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=1-4        	      98	  13007244 ns/op	   0.31 MB/s	         0.3003 MiB/s	        76.88 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=1-4        	     100	  11356799 ns/op	   0.36 MB/s	         0.3440 MiB/s	        88.05 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=1-4        	     115	  10504235 ns/op	   0.39 MB/s	         0.3719 MiB/s	        95.20 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=1-4        	     100	  10726142 ns/op	   0.38 MB/s	         0.3642 MiB/s	        93.23 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=4-4        	     229	   5335317 ns/op	   0.77 MB/s	         0.7322 MiB/s	       187.4 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=4-4        	     250	   5172004 ns/op	   0.79 MB/s	         0.7553 MiB/s	       193.3 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=4-4        	     253	   5471791 ns/op	   0.75 MB/s	         0.7139 MiB/s	       182.8 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=4-4        	     248	   4333782 ns/op	   0.95 MB/s	         0.9014 MiB/s	       230.7 mails/s
+BenchmarkReceive/mode=proto/size=4KiB/conns=4-4        	     302	   4363892 ns/op	   0.94 MB/s	         0.8951 MiB/s	       229.2 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=1-4       	     120	  10534061 ns/op	   6.22 MB/s	         5.933 MiB/s	        94.93 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=1-4       	     100	  12913422 ns/op	   5.08 MB/s	         4.840 MiB/s	        77.44 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=1-4       	     100	  10731350 ns/op	   6.11 MB/s	         5.824 MiB/s	        93.19 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=1-4       	     100	  12199121 ns/op	   5.37 MB/s	         5.123 MiB/s	        81.97 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=1-4       	     100	  10900628 ns/op	   6.01 MB/s	         5.734 MiB/s	        91.74 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=4-4       	     200	   6014256 ns/op	  10.90 MB/s	        10.39 MiB/s	       166.3 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=4-4       	     187	   5496525 ns/op	  11.92 MB/s	        11.37 MiB/s	       181.9 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=4-4       	     225	   5811156 ns/op	  11.28 MB/s	        10.76 MiB/s	       172.1 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=4-4       	     205	   6192808 ns/op	  10.58 MB/s	        10.09 MiB/s	       161.5 mails/s
+BenchmarkReceive/mode=proto/size=64KiB/conns=4-4       	     189	   6210942 ns/op	  10.55 MB/s	        10.06 MiB/s	       161.0 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=1-4        	      45	  27273372 ns/op	  38.45 MB/s	        36.67 MiB/s	        36.67 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=1-4        	      58	  29497141 ns/op	  35.55 MB/s	        33.90 MiB/s	        33.90 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=1-4        	      43	  26069536 ns/op	  40.22 MB/s	        38.36 MiB/s	        38.36 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=1-4        	      66	  28102241 ns/op	  37.31 MB/s	        35.58 MiB/s	        35.58 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=1-4        	      42	  27100568 ns/op	  38.69 MB/s	        36.90 MiB/s	        36.90 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=4-4        	     128	   9923002 ns/op	 105.67 MB/s	       100.8 MiB/s	       100.8 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=4-4        	     132	   9107981 ns/op	 115.13 MB/s	       109.8 MiB/s	       109.8 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=4-4        	     127	   9916904 ns/op	 105.74 MB/s	       100.8 MiB/s	       100.8 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=4-4        	     124	  10679560 ns/op	  98.19 MB/s	        93.64 MiB/s	        93.64 mails/s
+BenchmarkReceive/mode=proto/size=1MiB/conns=4-4        	     116	  10422598 ns/op	 100.61 MB/s	        95.95 MiB/s	        95.95 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=1-4       	       9	 116487942 ns/op	  90.02 MB/s	        85.85 MiB/s	         8.585 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=1-4       	      10	 114728361 ns/op	  91.40 MB/s	        87.16 MiB/s	         8.716 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=1-4       	      12	 118543229 ns/op	  88.46 MB/s	        84.36 MiB/s	         8.436 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=1-4       	       9	 118823850 ns/op	  88.25 MB/s	        84.16 MiB/s	         8.416 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=1-4       	      10	 120154120 ns/op	  87.27 MB/s	        83.23 MiB/s	         8.323 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=4-4       	      21	  57907932 ns/op	 181.08 MB/s	       172.7 MiB/s	        17.27 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=4-4       	      22	  56139428 ns/op	 186.78 MB/s	       178.1 MiB/s	        17.81 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=4-4       	      19	  57823779 ns/op	 181.34 MB/s	       172.9 MiB/s	        17.29 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=4-4       	      20	  52583372 ns/op	 199.41 MB/s	       190.2 MiB/s	        19.02 mails/s
+BenchmarkReceive/mode=proto/size=10MiB/conns=4-4       	      24	  56772383 ns/op	 184.70 MB/s	       176.1 MiB/s	        17.61 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=1-4        	    1345	    914134 ns/op	   4.48 MB/s	         4.273 MiB/s	      1094 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=1-4        	    1492	    845797 ns/op	   4.84 MB/s	         4.618 MiB/s	      1182 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=1-4        	    1245	    867600 ns/op	   4.72 MB/s	         4.502 MiB/s	      1153 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=1-4        	    1191	    911496 ns/op	   4.49 MB/s	         4.286 MiB/s	      1097 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=1-4        	    1314	    984625 ns/op	   4.16 MB/s	         3.967 MiB/s	      1016 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=4-4        	    4227	    339994 ns/op	  12.05 MB/s	        11.49 MiB/s	      2941 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=4-4        	    3686	    337348 ns/op	  12.14 MB/s	        11.58 MiB/s	      2964 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=4-4        	    3561	    415172 ns/op	   9.87 MB/s	         9.409 MiB/s	      2409 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=4-4        	    3176	    364243 ns/op	  11.25 MB/s	        10.72 MiB/s	      2745 mails/s
+BenchmarkReceive/mode=plain/size=4KiB/conns=4-4        	    3848	    332695 ns/op	  12.31 MB/s	        11.74 MiB/s	      3006 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=1-4       	     602	   1889802 ns/op	  34.68 MB/s	        33.07 MiB/s	       529.2 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=1-4       	     636	   1810401 ns/op	  36.20 MB/s	        34.52 MiB/s	       552.4 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=1-4       	     679	   1693278 ns/op	  38.70 MB/s	        36.91 MiB/s	       590.6 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=1-4       	     667	   1849748 ns/op	  35.43 MB/s	        33.79 MiB/s	       540.6 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=1-4       	     675	   2212927 ns/op	  29.62 MB/s	        28.24 MiB/s	       451.9 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=4-4       	    1669	    810872 ns/op	  80.82 MB/s	        77.08 MiB/s	      1233 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=4-4       	    1518	    892894 ns/op	  73.40 MB/s	        70.00 MiB/s	      1120 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=4-4       	    1455	    799991 ns/op	  81.92 MB/s	        78.13 MiB/s	      1250 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=4-4       	    1707	    872406 ns/op	  75.12 MB/s	        71.64 MiB/s	      1146 mails/s
+BenchmarkReceive/mode=plain/size=64KiB/conns=4-4       	    1486	    756228 ns/op	  86.66 MB/s	        82.65 MiB/s	      1322 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=1-4        	      81	  15728094 ns/op	  66.67 MB/s	        63.58 MiB/s	        63.58 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=1-4        	      63	  16092388 ns/op	  65.16 MB/s	        62.14 MiB/s	        62.14 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=1-4        	     100	  15340895 ns/op	  68.35 MB/s	        65.19 MiB/s	        65.19 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=1-4        	      93	  15014569 ns/op	  69.84 MB/s	        66.60 MiB/s	        66.60 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=1-4        	      96	  17128214 ns/op	  61.22 MB/s	        58.38 MiB/s	        58.38 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=4-4        	     176	   7826230 ns/op	 133.98 MB/s	       127.8 MiB/s	       127.8 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=4-4        	     174	   7747529 ns/op	 135.34 MB/s	       129.1 MiB/s	       129.1 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=4-4        	     158	   6807351 ns/op	 154.04 MB/s	       146.9 MiB/s	       146.9 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=4-4        	     193	   6543512 ns/op	 160.25 MB/s	       152.8 MiB/s	       152.8 mails/s
+BenchmarkReceive/mode=plain/size=1MiB/conns=4-4        	     190	   6911682 ns/op	 151.71 MB/s	       144.7 MiB/s	       144.7 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=1-4       	       9	 112774900 ns/op	  92.98 MB/s	        88.67 MiB/s	         8.867 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=1-4       	      10	 130673194 ns/op	  80.24 MB/s	        76.53 MiB/s	         7.653 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=1-4       	      10	 114085380 ns/op	  91.91 MB/s	        87.65 MiB/s	         8.765 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=1-4       	      13	 109926418 ns/op	  95.39 MB/s	        90.97 MiB/s	         9.097 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=1-4       	      10	 104172360 ns/op	 100.66 MB/s	        95.99 MiB/s	         9.599 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=4-4       	      21	  53804621 ns/op	 194.89 MB/s	       185.9 MiB/s	        18.59 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=4-4       	      22	  53116029 ns/op	 197.41 MB/s	       188.3 MiB/s	        18.83 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=4-4       	      24	  57738815 ns/op	 181.61 MB/s	       173.2 MiB/s	        17.32 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=4-4       	      22	  58157501 ns/op	 180.30 MB/s	       171.9 MiB/s	        17.19 mails/s
+BenchmarkReceive/mode=plain/size=10MiB/conns=4-4       	      25	  45269115 ns/op	 231.63 MB/s	       220.9 MiB/s	        22.09 mails/s
+PASS
+ok  	github.com/tim-riep/go-mail/internal/bench	221.427s
+group-end: ^BenchmarkReceive$ 2026-11-03T19:17:07Z loadavg=2.85/1.89/1.54 cpu=14879125/162839
+group-start: ^BenchmarkSync$ 2026-11-03T19:18:57Z loadavg=0.45/1.30/1.37 cpu=14923156/162856
+bench.sh: go test -tags gomail_dev -run '^$' -bench '^BenchmarkSync$' -benchtime=1s -count=5 ./internal/bench
+command: go test '-run=^$' '-bench=^BenchmarkSync$' -benchtime=1s -count=5 ./internal/bench
+env: GOTOOLCHAIN=go1.26.10 GOMAIL_BENCH_MIN_FREE=0.1
+goversion: go1.26.10
+numcpu: 4
+gomaxprocs: 4
+cpumodel: Intel(R) Xeon(R) Processor @ 2.80GHz
+memtotal: 16477348 kB
+kernel: Linux version 6.18.44-fc-v230
+benchdir: /tmp
+benchfs: ext4 on / (/dev/vda)
+goos: linux
+goarch: amd64
+pkg: github.com/tim-riep/go-mail/internal/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkSync/mails=10000/index=off-4         	      56	  20221394 ns/op	         0.02022 s/sync
+BenchmarkSync/mails=10000/index=off-4         	      61	  22408822 ns/op	         0.02241 s/sync
+BenchmarkSync/mails=10000/index=off-4         	      70	  20263697 ns/op	         0.02026 s/sync
+BenchmarkSync/mails=10000/index=off-4         	      63	  21656284 ns/op	         0.02166 s/sync
+BenchmarkSync/mails=10000/index=off-4         	      42	  23854959 ns/op	         0.02385 s/sync
+BenchmarkSync/mails=10000/index=on-4          	       3	 429253424 ns/op	         0.4293 s/sync
+BenchmarkSync/mails=10000/index=on-4          	       3	 396573937 ns/op	         0.3966 s/sync
+BenchmarkSync/mails=10000/index=on-4          	       3	 399007318 ns/op	         0.3990 s/sync
+BenchmarkSync/mails=10000/index=on-4          	       3	 412808231 ns/op	         0.4128 s/sync
+BenchmarkSync/mails=10000/index=on-4          	       3	 411014505 ns/op	         0.4110 s/sync
+BenchmarkSync/mails=10000/list-4              	       1	3399207370 ns/op	         3.399 s/list
+BenchmarkSync/mails=10000/list-4              	       1	3008317325 ns/op	         3.008 s/list
+BenchmarkSync/mails=10000/list-4              	       1	3049683780 ns/op	         3.050 s/list
+BenchmarkSync/mails=10000/list-4              	       1	2769180592 ns/op	         2.769 s/list
+BenchmarkSync/mails=10000/list-4              	       1	3026220842 ns/op	         3.026 s/list
+PASS
+ok  	github.com/tim-riep/go-mail/internal/bench	85.171s
+group-end: ^BenchmarkSync$ 2026-11-03T19:20:23Z loadavg=1.70/1.57/1.46 cpu=14957241/163111
+group-start: ^BenchmarkServerMemory$ 2026-11-03T19:21:43Z loadavg=0.45/1.20/1.34 cpu=14989270/163133
+bench.sh: go test -tags gomail_dev -run '^$' -bench '^BenchmarkServerMemory$' -benchtime=1x -count=5 ./internal/bench
+command: go test '-run=^$' '-bench=^BenchmarkServerMemory$' -benchtime=1x -count=5 ./internal/bench
+env: GOTOOLCHAIN=go1.26.10 GOMAIL_BENCH_MIN_FREE=0.1
+goversion: go1.26.10
+numcpu: 4
+gomaxprocs: 4
+cpumodel: Intel(R) Xeon(R) Processor @ 2.80GHz
+memtotal: 16477348 kB
+kernel: Linux version 6.18.44-fc-v230
+benchdir: /tmp
+benchfs: ext4 on / (/dev/vda)
+goos: linux
+goarch: amd64
+pkg: github.com/tim-riep/go-mail/internal/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkServerMemory/size=64KiB/mails=1000/conns=20-4         	       1	8305800259 ns/op	         1.586 heapinuse-base-MiB	         4.406 heapinuse-peak-MiB	         1.297 heapinuse-rest-MiB	       191.2 mails/s	        11.15 rss-base-MiB	        17.15 rss-peak-MiB	        13.62 rss-rest-MiB	        12.52 sys-base-MiB	        13.37 sys-peak-MiB	        13.37 sys-rest-MiB
+BenchmarkServerMemory/size=64KiB/mails=1000/conns=20-4         	       1	8324458066 ns/op	         1.516 heapinuse-base-MiB	         4.484 heapinuse-peak-MiB	         1.242 heapinuse-rest-MiB	       191.4 mails/s	        11.07 rss-base-MiB	        17.51 rss-peak-MiB	        13.48 rss-rest-MiB	         8.280 sys-base-MiB	        13.12 sys-peak-MiB	        13.12 sys-rest-MiB
+BenchmarkServerMemory/size=64KiB/mails=1000/conns=20-4         	       1	8447245978 ns/op	         1.531 heapinuse-base-MiB	         4.461 heapinuse-peak-MiB	         1.281 heapinuse-rest-MiB	       185.8 mails/s	        11.11 rss-base-MiB	        17.59 rss-peak-MiB	        13.43 rss-rest-MiB	         8.272 sys-base-MiB	        13.37 sys-peak-MiB	        13.37 sys-rest-MiB
+BenchmarkServerMemory/size=64KiB/mails=1000/conns=20-4         	       1	9158190097 ns/op	         1.516 heapinuse-base-MiB	         4.430 heapinuse-peak-MiB	         1.281 heapinuse-rest-MiB	       168.5 mails/s	        11.11 rss-base-MiB	        17.23 rss-peak-MiB	        13.50 rss-rest-MiB	        12.27 sys-base-MiB	        17.12 sys-peak-MiB	        17.12 sys-rest-MiB
+BenchmarkServerMemory/size=64KiB/mails=1000/conns=20-4         	       1	9553935558 ns/op	         1.594 heapinuse-base-MiB	         4.312 heapinuse-peak-MiB	         1.352 heapinuse-rest-MiB	       155.4 mails/s	        11.18 rss-base-MiB	        17.30 rss-peak-MiB	        13.75 rss-rest-MiB	        12.52 sys-base-MiB	        17.43 sys-peak-MiB	        17.43 sys-rest-MiB
+BenchmarkServerMemory/size=1MiB/mails=1000/conns=20-4          	       1	20754329814 ns/op	         2.516 heapinuse-base-MiB	        10.32 heapinuse-peak-MiB	         1.312 heapinuse-rest-MiB	        60.12 mails/s	        12.09 rss-base-MiB	        23.18 rss-peak-MiB	        13.82 rss-rest-MiB	        12.28 sys-base-MiB	        21.37 sys-peak-MiB	        21.37 sys-rest-MiB
+BenchmarkServerMemory/size=1MiB/mails=1000/conns=20-4          	       1	18866867915 ns/op	         2.344 heapinuse-base-MiB	        10.07 heapinuse-peak-MiB	         1.234 heapinuse-rest-MiB	        67.04 mails/s	        11.88 rss-base-MiB	        23.80 rss-peak-MiB	        13.62 rss-rest-MiB	        12.27 sys-base-MiB	        21.37 sys-peak-MiB	        21.37 sys-rest-MiB
+BenchmarkServerMemory/size=1MiB/mails=1000/conns=20-4          	       1	20256318706 ns/op	         2.469 heapinuse-base-MiB	         9.906 heapinuse-peak-MiB	         1.188 heapinuse-rest-MiB	        62.23 mails/s	        12.06 rss-base-MiB	        23.76 rss-peak-MiB	        13.46 rss-rest-MiB	        12.52 sys-base-MiB	        25.37 sys-peak-MiB	        25.37 sys-rest-MiB
+BenchmarkServerMemory/size=1MiB/mails=1000/conns=20-4          	       1	20219691727 ns/op	         2.469 heapinuse-base-MiB	        11.20 heapinuse-peak-MiB	         1.188 heapinuse-rest-MiB	        62.12 mails/s	        12.06 rss-base-MiB	        24.65 rss-peak-MiB	        13.35 rss-rest-MiB	        12.53 sys-base-MiB	        21.12 sys-peak-MiB	        21.12 sys-rest-MiB
+BenchmarkServerMemory/size=1MiB/mails=1000/conns=20-4          	       1	18171237477 ns/op	         2.492 heapinuse-base-MiB	        10.84 heapinuse-peak-MiB	         1.258 heapinuse-rest-MiB	        70.93 mails/s	        12.04 rss-base-MiB	        24.07 rss-peak-MiB	        13.79 rss-rest-MiB	        12.27 sys-base-MiB	        25.37 sys-peak-MiB	        25.37 sys-rest-MiB
+PASS
+ok  	github.com/tim-riep/go-mail/internal/bench	142.085s
+group-end: ^BenchmarkServerMemory$ 2026-11-03T19:24:05Z loadavg=3.53/2.16/1.67 cpu=15044623/163590
+group-start: ^BenchmarkIndex$ 2026-11-03T19:26:06Z loadavg=0.47/1.44/1.47 cpu=15092644/163612
+bench.sh: go test -tags gomail_dev -run '^$' -bench '^BenchmarkIndex$' -benchtime=1s -count=5 ./internal/bench
+command: go test '-run=^$' '-bench=^BenchmarkIndex$' -benchtime=1s -count=5 ./internal/bench
+env: GOTOOLCHAIN=go1.26.10 GOMAIL_BENCH_MIN_FREE=0.1
+goversion: go1.26.10
+numcpu: 4
+gomaxprocs: 4
+cpumodel: Intel(R) Xeon(R) Processor @ 2.80GHz
+memtotal: 16477348 kB
+kernel: Linux version 6.18.44-fc-v230
+benchdir: /tmp
+benchfs: ext4 on / (/dev/vda)
+goos: linux
+goarch: amd64
+pkg: github.com/tim-riep/go-mail/internal/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkIndex/pending=terms-4         	      16	  67662130 ns/op	     11491 B/mail	       116.6 allocs/mail	        67.66 µs/mail	11491116 B/op	  116577 allocs/op
+BenchmarkIndex/pending=terms-4         	      18	  69455208 ns/op	     11506 B/mail	       116.6 allocs/mail	        69.46 µs/mail	11505596 B/op	  116585 allocs/op
+BenchmarkIndex/pending=terms-4         	      18	  70307907 ns/op	     11506 B/mail	       116.6 allocs/mail	        70.31 µs/mail	11506057 B/op	  116587 allocs/op
+BenchmarkIndex/pending=terms-4         	      15	  71717337 ns/op	     11500 B/mail	       116.6 allocs/mail	        71.72 µs/mail	11499863 B/op	  116575 allocs/op
+BenchmarkIndex/pending=terms-4         	      20	  67940391 ns/op	     11528 B/mail	       116.6 allocs/mail	        67.94 µs/mail	11527897 B/op	  116602 allocs/op
+BenchmarkIndex/pending=unprocessed-4   	       2	 982397494 ns/op	     70996 B/mail	       681.5 allocs/mail	       982.4 µs/mail	70996208 B/op	  681513 allocs/op
+BenchmarkIndex/pending=unprocessed-4   	       2	1063970743 ns/op	     70981 B/mail	       681.5 allocs/mail	      1064 µs/mail	70980844 B/op	  681507 allocs/op
+BenchmarkIndex/pending=unprocessed-4   	       1	1105356024 ns/op	     70987 B/mail	       681.5 allocs/mail	      1105 µs/mail	70987440 B/op	  681516 allocs/op
+BenchmarkIndex/pending=unprocessed-4   	       2	 962938365 ns/op	     70473 B/mail	       681.5 allocs/mail	       962.9 µs/mail	70472972 B/op	  681492 allocs/op
+BenchmarkIndex/pending=unprocessed-4   	       1	1072464789 ns/op	     70897 B/mail	       681.5 allocs/mail	      1072 µs/mail	70897064 B/op	  681506 allocs/op
+PASS
+ok  	github.com/tim-riep/go-mail/internal/bench	111.943s
+group-end: ^BenchmarkIndex$ 2026-11-03T19:27:58Z loadavg=2.18/1.73/1.56 cpu=15137274/164002
+group-start: ^BenchmarkIndexSegments$ 2026-11-03T19:29:28Z loadavg=0.48/1.27/1.41 cpu=15173295/164012
+bench.sh: go test -tags gomail_dev -run '^$' -bench '^BenchmarkIndexSegments$' -benchtime=1x -count=5 ./internal/bench
+command: go test '-run=^$' '-bench=^BenchmarkIndexSegments$' -benchtime=1x -count=5 ./internal/bench
+env: GOTOOLCHAIN=go1.26.10 GOMAIL_BENCH_MIN_FREE=0.1
+goversion: go1.26.10
+numcpu: 4
+gomaxprocs: 4
+cpumodel: Intel(R) Xeon(R) Processor @ 2.80GHz
+memtotal: 16477348 kB
+kernel: Linux version 6.18.44-fc-v230
+benchdir: /tmp
+benchfs: ext4 on / (/dev/vda)
+goos: linux
+goarch: amd64
+pkg: github.com/tim-riep/go-mail/internal/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkIndexSegments/mails=1000-4         	       1	6287845265 ns/op	    143600 B-merged	    193184 B-unmerged	     12074 B/segment	        16.00 segments	         1.000 segments-merged
+BenchmarkIndexSegments/mails=1000-4         	       1	6704898760 ns/op	    143600 B-merged	    193184 B-unmerged	     12074 B/segment	        16.00 segments	         1.000 segments-merged
+BenchmarkIndexSegments/mails=1000-4         	       1	6889466448 ns/op	    143600 B-merged	    193184 B-unmerged	     12074 B/segment	        16.00 segments	         1.000 segments-merged
+BenchmarkIndexSegments/mails=1000-4         	       1	6836536641 ns/op	    143600 B-merged	    193184 B-unmerged	     12074 B/segment	        16.00 segments	         1.000 segments-merged
+BenchmarkIndexSegments/mails=1000-4         	       1	7169909477 ns/op	    143600 B-merged	    193184 B-unmerged	     12074 B/segment	        16.00 segments	         1.000 segments-merged
+PASS
+ok  	github.com/tim-riep/go-mail/internal/bench	35.561s
+group-end: ^BenchmarkIndexSegments$ 2026-11-03T19:30:05Z loadavg=1.49/1.44/1.46 cpu=15187619/164122
+exit=0

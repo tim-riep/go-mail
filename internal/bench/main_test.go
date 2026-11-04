@@ -12,7 +12,7 @@ import (
 // ones that are set are printed with every benchmark run.
 var envNames = []string{
 	"GOTOOLCHAIN", "GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GODEBUG", "GOAMD64", "GOARM64",
-	"TMPDIR", "GOMAIL_BENCH_SYNC_MAILS", "GOMAIL_BENCH_MEM_MAILS", "GOMAIL_BENCH_MEM_CONNS",
+	"TMPDIR", "GOMAIL_BENCH_MIN_FREE", "GOMAIL_BENCH_SYNC_MAILS", "GOMAIL_BENCH_MEM_MAILS", "GOMAIL_BENCH_MEM_CONNS",
 }
 
 // shellQuote quotes s for a POSIX shell where needed.
@@ -56,6 +56,13 @@ func configLines() []string {
 
 func TestMain(m *testing.M) {
 	flag.Parse()
+	v, ok := os.LookupEnv(minFreeEnv)
+	f, err := parseMinFree(v, ok)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	minFree = f
 	if f := flag.Lookup("test.bench"); f != nil && f.Value.String() != "" {
 		for _, l := range configLines() {
 			fmt.Println(l)

@@ -290,13 +290,13 @@ func newProtoSink(root string, sizes protoSizes) (*protoSink, error) {
 }
 
 // Accepting is the space check of ingest (5.1) with the MinFree of the
-// benchmark (benchMinFree).
+// benchmark (minFree).
 func (s *protoSink) Accepting() error {
 	free, total, err := benchDiskSpace(s.st.Root)
 	if err != nil {
 		return smtpd.ErrTemporary
 	}
-	if total == 0 || float64(free) < benchMinFree*float64(total) {
+	if total == 0 || float64(free) < minFree*float64(total) {
 		return smtpd.ErrDiskFull
 	}
 	return nil

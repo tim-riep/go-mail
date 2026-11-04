@@ -27,8 +27,32 @@ import (
 // ingest.DefaultMinFree) in the benchmarks: a shared build machine often
 // has less free space than that, and the limit is not what is measured.
 // The file system's statistics are still read at MAIL and at DATA as in
-// production, by ingest and by the protocol sink.
+// production, by ingest and by the protocol sink. GOMAIL_BENCH_MIN_FREE
+// replaces it for a run (minFree).
 const benchMinFree = 0.01
+
+// minFreeEnv sets MinFree of a run in percent (0 < value <= 10): where
+// even 1 % is more than the file system has free, as on a container
+// whose disk keeps a large reserve, a run cannot take place otherwise.
+// The table of scripts/bench.sh names the value with every command.
+const minFreeEnv = "GOMAIL_BENCH_MIN_FREE"
+
+// minFree is MinFree of this run (a fraction): benchMinFree, or
+// GOMAIL_BENCH_MIN_FREE as TestMain read it.
+var minFree = benchMinFree
+
+// parseMinFree reads GOMAIL_BENCH_MIN_FREE (percent) as a fraction;
+// benchMinFree if the variable is unset or empty.
+func parseMinFree(v string, ok bool) (float64, error) {
+	if !ok || v == "" {
+		return benchMinFree, nil
+	}
+	p, err := strconv.ParseFloat(v, 64)
+	if err != nil || !(p > 0 && p <= 10) {
+		return 0, fmt.Errorf("%s must be a percentage above 0 and at most 10", minFreeEnv)
+	}
+	return p / 100, nil
+}
 
 // benchMaxConns is MaxConns and MaxConnsPerIP of the benchmark server.
 // It loosens 5.1: the default is 20 connections in total
@@ -41,7 +65,7 @@ const benchMaxConns = 64
 // MaxConns 64 instead of 20 in total, MaxConnsPerIP 64 instead of 5 and
 // no hourly mail limit per IP; the limits per IP would refuse a load
 // generator on 127.0.0.1. The fourth loosening of 5.1 is in ingestConfig:
-// MinFree 1 % instead of 10 % (benchMinFree).
+// MinFree 1 % instead of 10 % (benchMinFree, or GOMAIL_BENCH_MIN_FREE).
 func smtpConfig() smtpd.Config {
 	return smtpd.Config{
 		Hostname: "mx.bench.example", MaxConns: benchMaxConns, MaxConnsPerIP: benchMaxConns,
@@ -80,13 +104,14 @@ func newEnvRig(tb testing.TB, addrs ...string) *rig {
 
 // ingestConfig is the configuration of ingest in the benchmarks: the
 // defaults of 5.1 to 5.4 with one loosening, named in the table of
-// scripts/bench.sh: MinFree 1 % instead of 10 % (benchMinFree). The
+// scripts/bench.sh: MinFree 1 % instead of 10 % (benchMinFree, or
+// GOMAIL_BENCH_MIN_FREE: minFree). The
 // worker writes a term list every ingest.DefaultBatchSize mails, as in
 // production.
 func (r *rig) ingestConfig() ingest.Config {
 	return ingest.Config{
 		Store: r.st, Log: r.log, IngestKey: r.ingestKey, IngestGen: 1,
-		Now: r.now, Logger: slog.New(slog.DiscardHandler), MinFree: benchMinFree,
+		Now: r.now, Logger: slog.New(slog.DiscardHandler), MinFree: minFree,
 	}
 }
 

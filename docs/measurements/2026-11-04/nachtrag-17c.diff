@@ -1,0 +1,302 @@
+diff --git a/internal/bench/memory_test.go b/internal/bench/memory_test.go
+index 730b739..bb09cf8 100644
+--- a/internal/bench/memory_test.go
++++ b/internal/bench/memory_test.go
+@@ -475,10 +475,16 @@ func TestBenchScriptLimits(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	ic := (&rig{}).ingestConfig()
+-	if ic.MinFree != minFree {
+-		t.Fatalf("ingestConfig has MinFree %g, the run sets %g", ic.MinFree, minFree)
++	// GOMAIL_BENCH_MIN_FREE reaches ingest: with another MinFree for the
++	// run, ingestConfig carries it, not the constant of the table.
++	saved := minFree
++	minFree = benchMinFree / 4
++	other := (&rig{}).ingestConfig().MinFree
++	minFree = saved
++	if other != benchMinFree/4 {
++		t.Fatalf("ingestConfig has MinFree %g with %g set for the run", other, benchMinFree/4)
+ 	}
++	ic := (&rig{}).ingestConfig()
+ 	c := smtpConfig()
+ 	if c.MaxMailsPerIP != math.MaxInt32 {
+ 		t.Fatalf("smtpConfig has MaxMailsPerIP %d, the table names no hourly limit", c.MaxMailsPerIP)
+diff --git a/scripts/bench.sh b/scripts/bench.sh
+index 042313b..2c7120f 100755
+--- a/scripts/bench.sh
++++ b/scripts/bench.sh
+@@ -5,6 +5,7 @@
+ # command that measures it again.
+ #
+ # Usage: scripts/bench.sh [-short] [-count N] [-benchtime T] [-maxload L] [-dir DIR] [-o FILE] [-raw FILE]
++#        scripts/bench.sh -render FILE [-count N] [-benchtime T] [-o FILE]
+ # (every option with a value also as -option=value)
+ #
+ #   -short       quick run: 20 iterations, 500 mails for Sync, 100 for
+@@ -15,15 +16,29 @@
+ #                (default 1s); the memory and the segment size benchmarks
+ #                always run once per -count (1x)
+ #   -maxload L   before every group, wait until the load average of the
+-#                last minute is below L (polled every 10 s, at most 30
+-#                minutes); the load and the steal time of every group are
+-#                noted in the raw output and the table either way
++#                last minute is below L (a positive number such as 0.5;
++#                polled every 10 s, at most 30 minutes); the load and the
++#                steal time of every group are noted in the raw output and
++#                the table either way
+ #   -dir DIR     temporary directory of the benchmarks (TMPDIR); its file
+ #                system is part of the result
+ #   -o FILE      write the Markdown table to FILE as well
+ #   -raw FILE    keep the raw go test output in FILE (benchstat format)
++#   -render FILE measure nothing: print the table of the raw output FILE
++#                of an earlier run (-raw); -count, -benchtime and
++#                GOMAIL_BENCH_MIN_FREE must be those of that run (checked
++#                against the command and env lines of FILE, exit 1
++#                otherwise), the table names no commit
+ #
+-# Relative paths of -dir, -o and -raw are taken from the directory
++# An option given with an empty value (-render=, -o "", ...) ends
++# bench.sh with 2 before anything runs.
++#
++# The table is fail closed: every group needs at least one benchmark line,
++# every number of a benchmark exactly N values (-count), no line may
++# report a failure or a skipped benchmark; otherwise bench.sh prints what
++# is missing, writes no table (and no -raw file) and exits with 1.
++#
++# Relative paths of -dir, -o, -raw and -render are taken from the directory
+ # bench.sh is called from, not from the root of the repository.
+ #
+ # Environment: GOTOOLCHAIN (default go1.26.10), GOMAIL_BENCH_MIN_FREE
+@@ -52,6 +67,16 @@ abspath() {
+ 	esac
+ }
+ 
++# need ends bench.sh with 2 if option $1 has an empty value: an empty
++# value would count as "not set" (no -render, no -o, ...) and start a
++# full measurement instead.
++need() {
++	if [ -z "$2" ]; then
++		echo "bench.sh: $1 needs a non-empty value" >&2
++		exit 2
++	fi
++}
++
+ short=0
+ count=1
+ benchtime=1s
+@@ -59,21 +84,26 @@ dir=""
+ out=""
+ raw=""
+ maxload=""
++maxloadset=0
++renderin=""
++renderset=0
+ while [ $# -gt 0 ]; do
+ 	case "$1" in
+ 	-short) short=1 ;;
+-	-count) count="${2:?-count needs a value}"; shift ;;
+-	-count=*) count="${1#-count=}" ;;
+-	-benchtime) benchtime="${2:?-benchtime needs a value}"; shift ;;
+-	-benchtime=*) benchtime="${1#-benchtime=}" ;;
+-	-maxload) maxload="${2:?-maxload needs a value}"; shift ;;
+-	-maxload=*) maxload="${1#-maxload=}" ;;
+-	-dir) dir="${2:?-dir needs a value}"; shift ;;
+-	-dir=*) dir="${1#-dir=}" ;;
+-	-o) out="${2:?-o needs a value}"; shift ;;
+-	-o=*) out="${1#-o=}" ;;
+-	-raw) raw="${2:?-raw needs a value}"; shift ;;
+-	-raw=*) raw="${1#-raw=}" ;;
++	-count) need -count "${2-}"; count="$2"; shift ;;
++	-count=*) count="${1#-count=}"; need -count "$count" ;;
++	-benchtime) need -benchtime "${2-}"; benchtime="$2"; shift ;;
++	-benchtime=*) benchtime="${1#-benchtime=}"; need -benchtime "$benchtime" ;;
++	-maxload) need -maxload "${2-}"; maxload="$2"; maxloadset=1; shift ;;
++	-maxload=*) maxload="${1#-maxload=}"; maxloadset=1; need -maxload "$maxload" ;;
++	-dir) need -dir "${2-}"; dir="$2"; shift ;;
++	-dir=*) dir="${1#-dir=}"; need -dir "$dir" ;;
++	-o) need -o "${2-}"; out="$2"; shift ;;
++	-o=*) out="${1#-o=}"; need -o "$out" ;;
++	-raw) need -raw "${2-}"; raw="$2"; shift ;;
++	-raw=*) raw="${1#-raw=}"; need -raw "$raw" ;;
++	-render) need -render "${2-}"; renderin="$2"; renderset=1; shift ;;
++	-render=*) renderin="${1#-render=}"; renderset=1; need -render "$renderin" ;;
+ 	-h | -help | --help)
+ 		sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+ 		exit 0
+@@ -85,8 +115,24 @@ while [ $# -gt 0 ]; do
+ 	esac
+ 	shift
+ done
+-case "$count" in '' | *[!0-9]* | 0) echo "bench.sh: -count needs a positive number" >&2; exit 2 ;; esac
+-case "$maxload" in '' | [0-9]*) ;; *) echo "bench.sh: -maxload needs a number" >&2; exit 2 ;; esac
++case "$count" in '' | *[!0-9]* | 0*) echo "bench.sh: -count needs a positive number" >&2; exit 2 ;; esac
++if [ "$maxloadset" = 1 ]; then
++	if ! [[ "$maxload" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "$maxload" =~ ^0+([.]0+)?$ ]]; then
++		echo "bench.sh: -maxload needs a positive number such as 0.5, not '$maxload'" >&2
++		exit 2
++	fi
++fi
++if [ "$renderset" = 1 ]; then
++	if [ -n "$raw" ] || [ -n "$dir" ] || [ "$maxloadset" = 1 ] || [ "$short" = 1 ]; then
++		echo "bench.sh: -render measures nothing; only -count, -benchtime and -o go with it" >&2
++		exit 2
++	fi
++	renderin="$(abspath "$renderin")"
++	if [ ! -f "$renderin" ] || [ ! -r "$renderin" ]; then
++		echo "bench.sh: -render: cannot read $renderin" >&2
++		exit 2
++	fi
++fi
+ if [ -n "$dir" ]; then export TMPDIR="$(abspath "$dir")"; fi
+ if [ -n "$out" ]; then out="$(abspath "$out")"; fi
+ if [ -n "$raw" ]; then raw="$(abspath "$raw")"; fi
+@@ -145,16 +191,39 @@ run() {
+ 	echo "group-end: $re $(groupmark)" | tee -a "$rawfile" >&2
+ }
+ 
+-run "$benchtime" '^BenchmarkReceive$'
+-run "$benchtime" '^BenchmarkSync$'
+-run "$memtime" '^BenchmarkServerMemory$'
+-run "$benchtime" '^BenchmarkIndex$'
+-# One operation of BenchmarkIndexSegments is the whole procedure (sizes,
+-# not times), as one of BenchmarkServerMemory is the whole load.
+-run "$memtime" '^BenchmarkIndexSegments$'
++# groups are the -bench patterns of the groups in the order they run;
++# groupbt prints the benchtime of a group. One operation of
++# BenchmarkIndexSegments is the whole procedure (sizes, not times), as
++# one of BenchmarkServerMemory is the whole load.
++groups=('^BenchmarkReceive$' '^BenchmarkSync$' '^BenchmarkServerMemory$' '^BenchmarkIndex$' '^BenchmarkIndexSegments$')
++groupbt() {
++	case "$1" in
++	'^BenchmarkServerMemory$' | '^BenchmarkIndexSegments$') printf '%s' "$memtime" ;;
++	*) printf '%s' "$benchtime" ;;
++	esac
++}
+ 
+-commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+-if [ -n "$(git status --porcelain -- . 2>/dev/null)" ]; then commit="$commit (mit lokalen Änderungen)"; fi
++if [ "$renderset" = 1 ]; then
++	# The raw output of -raw has no group-benchtime lines; they come
++	# from groupbt, as in a run with the same -benchtime.
++	while IFS= read -r line || [ -n "$line" ]; do
++		case "$line" in
++		group-benchtime:*) continue ;;
++		group-start:*)
++			re="${line#group-start: }"
++			echo "group-benchtime: $(groupbt "${re%% *}")"
++			;;
++		esac
++		printf '%s\n' "$line"
++	done <"$renderin" >"$rawfile"
++	commit="unbekannt (nur dargestellt mit -render aus $(basename "$renderin"), nicht gemessen)"
++else
++	for re in "${groups[@]}"; do
++		run "$(groupbt "$re")" "$re"
++	done
++	commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
++	if [ -n "$(git status --porcelain -- . 2>/dev/null)" ]; then commit="$commit (mit lokalen Änderungen)"; fi
++fi
+ 
+ # envof <names...> prints "NAME=value " for every variable that is set.
+ envof() {
+@@ -165,8 +234,10 @@ envof() {
+ 	printf '%s' "$p"
+ }
+ 
++# render prints the table of $rawfile, or names what is missing on
++# stderr and fails (fail closed: no table from incomplete data).
+ render() {
+-	awk -v commit="$commit" -v date="$(date -u +%Y-%m-%dT%H:%MZ)" -v count="$count" \
++	awk -v commit="$commit" -v date="$(date -u +%Y-%m-%dT%H:%MZ)" -v count="$count" -v render="$renderset" -v groups="${groups[*]}" \
+ 		-v envall="$(envof GOMAIL_BENCH_MIN_FREE TMPDIR)" -v minfree="${GOMAIL_BENCH_MIN_FREE:-}" -v envsync="$(envof GOMAIL_BENCH_SYNC_MAILS)" \
+ 		-v envmem="$(envof GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS)" '
+ 	function point(name) {
+@@ -216,9 +287,32 @@ render() {
+ 		for (i = 1; i <= n; i++) if (index(f[i], name "=") == 1) return substr(f[i], length(name) + 2)
+ 		return ""
+ 	}
++	# fail names what is wrong with the raw output and ends awk with 1;
++	# END then prints nothing.
++	function fail(msg) {
++		print "bench.sh: no table: " msg > "/dev/stderr"
++		failed = 1
++		exit 1
++	}
++	/^(FAIL|--- FAIL|--- SKIP|panic: )/ { fail("line " NR " reports a failure or a skip: " $0) }
+ 	/^group-benchtime: / { bt = $2; next }
+-	/^group-start: / { ng++; gname[ng] = $2; gstart[ng] = $3; gload[ng] = field($0, "loadavg"); gcpu0[ng] = field($0, "cpu"); next }
+-	/^group-end: / { gend[ng] = $3; gloadend[ng] = field($0, "loadavg"); gcpu1[ng] = field($0, "cpu"); next }
++	/^group-start: / {
++		if (open) fail("group " gname[ng] " has no group-end")
++		ng++; open = 1; gname[ng] = $2; gstart[ng] = $3; gload[ng] = field($0, "loadavg"); gcpu0[ng] = field($0, "cpu"); next
++	}
++	/^group-end: / {
++		if (!open || $2 != gname[ng]) fail("group-end of " $2 " in line " NR " without its group-start")
++		open = 0; gend[ng] = $3; gloadend[ng] = field($0, "loadavg"); gcpu1[ng] = field($0, "cpu"); next
++	}
++	# With -render, the command and env lines of the raw output must match
++	# -benchtime, -count and GOMAIL_BENCH_MIN_FREE of this call: the table
++	# names them in every command.
++	render && /^command: / && (index($0 " ", " -benchtime=" bt " ") == 0 || index($0 " ", " -count=" count " ") == 0) {
++		fail("line " NR " (" $0 ") does not match -benchtime " bt " and -count " count " of this call")
++	}
++	render && /^env: / && field($0, "GOMAIL_BENCH_MIN_FREE") != minfree {
++		fail("line " NR " (" $0 ") does not match GOMAIL_BENCH_MIN_FREE=" minfree " of this call")
++	}
+ 	/^[a-z]+: / {
+ 		k = $1; sub(/:$/, "", k)
+ 		v = $0; sub(/^[a-z]+: /, "", v)
+@@ -227,9 +321,13 @@ render() {
+ 		next
+ 	}
+ 	/^Benchmark/ {
++		if (!open) fail("benchmark line " NR " outside a group: " $1)
++		if (NF < 4 || NF % 2 || $2 !~ /^[0-9]+$/) fail("benchmark line " NR " is not name, iterations and value-unit pairs: " $0)
++		gnb[ng]++
+ 		name = $1; sub(/-[0-9]+$/, "", name)
+ 		if (!(name in seen)) { seen[name] = 1; names[++nnames] = name; btof[name] = bt }
+ 		for (i = 3; i + 1 <= NF; i += 2) {
++			if ($i !~ /^-?[0-9]+([.][0-9]+)?$/) fail("benchmark line " NR ": value " $i " is not a number")
+ 			unit = $(i + 1)
+ 			if (!keep(unit)) continue
+ 			key = name SUBSEP unit
+@@ -238,6 +336,22 @@ render() {
+ 		}
+ 	}
+ 	END {
++		if (failed) exit 1
++		if (open) fail("group " gname[ng] " has no group-end")
++		n = split(groups, want, " ")
++		if (ng != n) fail(ng " groups in the raw output, " n " expected (" groups ")")
++		for (i = 1; i <= n; i++) {
++			if (gname[i] != want[i]) fail("group " i " is " gname[i] ", expected " want[i])
++			if (gnb[i] < 1) fail("group " gname[i] " has no benchmark line")
++		}
++		for (j = 1; j <= nnames; j++) {
++			s = names[j]
++			if (nu[s] < 1) fail(s " reports no number the table shows")
++			for (u = 1; u <= nu[s]; u++) {
++				key = s SUBSEP units[s, u]
++				if (cnt[key] != count + 0) fail(s ": " cnt[key] " values of " units[s, u] ", -count " count " expected")
++			}
++		}
+ 		print "# Messwerte"
+ 		print ""
+ 		print "Erzeugt mit `scripts/bench.sh` am " date " auf Commit " commit "."
+@@ -298,7 +412,14 @@ render() {
+ 	}' "$rawfile"
+ }
+ 
+-table="$(render)"
++if ! table="$(render)"; then
++	if [ "$renderset" = 1 ]; then
++		echo "bench.sh: no table written" >&2
++	else
++		echo "bench.sh: no table written; the go test output of the run is on stderr above" >&2
++	fi
++	exit 1
++fi
+ printf '%s\n' "$table"
+ if [ -n "$out" ]; then printf '%s\n' "$table" >"$out"; fi
+ if [ -n "$raw" ]; then grep -v '^group-benchtime: ' "$rawfile" >"$raw"; fi

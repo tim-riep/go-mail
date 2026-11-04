@@ -432,10 +432,11 @@ func BenchmarkIndexSegments(b *testing.B) {
 }
 
 // TestIndexSegments runs indexSegmentRuns briefly and checks it: one new
-// segment per run up to the merge, growing bytes, every mail in the
-// segments right before the merge, and after the merge fewer segments
-// with fewer bytes than the unmerged ones. TestSegmentStats checks the
-// sizes against the files and ReadIndexSegment.
+// segment per run up to the merge, growing bytes, client.Index took n
+// entries over all runs, and after the merge fewer segments with fewer
+// bytes than the unmerged ones. Which mails a segment holds is not read
+// here. TestSegmentStats checks the sizes against the files and
+// ReadIndexSegment.
 func TestIndexSegments(t *testing.T) {
 	n := 160
 	if !testing.Short() {
