@@ -296,6 +296,7 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   - 22d (4a6e9c1)
   - D94 (fd7b87f)
   - 17e (`scripts/bench.sh` lehnt Werte ab, die mit `-` beginnen; behebt den Fund aus D94; 4f247c6)
+  - 20s (niedrige Punkte aus den Prüfungen von 20r in HANDOFF und AUDIT, D94 als erledigt; e314241, Ersatztexte der Prüfung danach)
   - 20r mit Nacharbeit (541a349)
   - Ergebnis des Volllaufs in HANDOFF und AUDIT (5f0c088, mit Nacharbeit nach Prüfung)
   - Abschlussbericht `docs/M1-ABSCHLUSSBERICHT.md`, Liste nach M1 `docs/tasks/backlog-nach-m1.md`, Zusammenfassungen der Abschlussläufe `docs/tasks/abschluss-laeufe/` (8422e9d)

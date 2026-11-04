@@ -417,3 +417,4 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 
 ## Aus der Prüfung von 17e
 - Ohne Funde über niedrig: 43 Aufrufe über eine echo-Kopie, keiner misst mit `-render`; vier Rohdateien rendern mit rc=0; Messlogik unverändert; `nachtrag-17c.diff` byte-gleich. Niedrig: A, der Render-Befehl scheitert bei gesetztem `TMPDIR` (behoben in MEASUREMENTS mit `env -u TMPDIR`); B, Werte, die in den Rohdaten in Anführungszeichen stehen, stimmen nie überein (fail closed; Kommentar „empty or unset“ ungenau). Nach M1.
+- Prüfung von 20s (niedrige Punkte aus 20r, D94 erledigt): ohne Funde über niedrig; zwei niedrige (Q2 als Ausnahme zur Regel für offene Haltepunkte, Satz „spätere Commits ändern nur Dokumente“ seit 17e ungenau) mit den Ersatztexten des Prüfers vom Orchestrator eingesetzt.
