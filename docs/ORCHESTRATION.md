@@ -328,4 +328,4 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
   5. Offene Fragen Q1, Q2, Q6, Q7, Q18, Q20.
 - 04.11., 04:24 UTC: Hauptarbeit beendet; bis 05:00 UTC nur noch eine lesende Konsistenzprüfung der Dokumente. Keine Läufe aktiv. Alles zusammengeführt und gepusht; offen sind nur die Punkte nach M1 in Abschnitt 7 und in `docs/tasks/20-notes.md`.
 - 04:35 UTC: Konsistenzprüfung der Abschlussdokumente (12 veraltete Stellen, vor allem D94 als Vorbehalt im Abschlussbericht) mit den Ersatztexten des Prüfers berichtigt (f0b80e8, cdc1220). gofmt, vet (drei Varianten), Build und `bash -n` der Skripte auf dem Branch grün; Code unverändert gegenüber fba4eb2; Vektoren unverändert. Liste nach M1 um die niedrigen Punkte vom 04.11. ergänzt (Nr. 54 bis 63, `docs/tasks/backlog-nach-m1.md`). Keine Agenten und keine Läufe aktiv; Ende der Sitzung.
-- 04:55 UTC: Punkt 63 als Patch-Serie gesichert (`docs/tasks/vorbereitet/`), nicht zusammengeführt. Stopp; keine Agenten und keine Läufe aktiv.
+- 04:47 UTC: Punkt 63 als Patch-Serie gesichert (`docs/tasks/vorbereitet/`), nicht zusammengeführt. Stopp; keine Agenten und keine Läufe aktiv.
