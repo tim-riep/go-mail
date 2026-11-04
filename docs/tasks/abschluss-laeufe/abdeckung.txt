@@ -1,0 +1,30 @@
+Abdeckung am Endstand 9ad24a5b888810b1de55d516a4293de897a921b8, go test -count=1 -cover, ohne race, nice -n 19, neben dem Volllauf
+| Paket | ohne Tags | mit Tags |
+| internal/bench | 92.1% | 92.8% |
+| internal/ceremony | 89.8% | 88.9% |
+| internal/client | 3.2% | 88.2% |
+| internal/e2e | – | – |
+| internal/envelope | 94.0% | 94.0% |
+| internal/ingest | 5.1% | 90.3% |
+| internal/keys | 93.9% | 93.9% |
+| internal/loghttp | 93.9% | 93.9% |
+| internal/rec | 99.6% | 99.6% |
+| internal/shamir | 100.0% | 100.0% |
+| internal/smtpd | 91.9% | 91.9% |
+| internal/store | 89.5% | 89.6% |
+| internal/terms | 100.0% | 100.0% |
+| internal/testenv | 15.1% | 96.3% |
+| internal/translog | 93.6% | 93.6% |
+| internal/translog/translogtest | 100.0% | 100.0% |
+| internal/witness | 95.2% | 95.2% |
+| internal/words | 100.0% | 100.0% |
+
+# Endstand (cov-m1): ceremony rev 10b1783be7579dc03ebbdb6c7a990466113dcea4, client/ingest/store rev 121749663f5166ddf0a30d62ab02e5d3bf357958
+plain-internal_ceremony: coverage: 89.8%
+plain-internal_client: coverage: 3.6%
+plain-internal_ingest: coverage: 5.1%
+plain-internal_store: coverage: 89.5%
+tags-internal_ceremony: coverage: 88.9%
+tags-internal_client: coverage: 88.3%
+tags-internal_ingest: coverage: 90.4%
+tags-internal_store: coverage: 89.6%

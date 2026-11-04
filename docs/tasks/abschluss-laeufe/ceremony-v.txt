@@ -1,0 +1,13 @@
+# cmd/gomail-ceremony -v, rev 10b1783be7579dc03ebbdb6c7a990466113dcea4
+## race: ok  	github.com/tim-riep/go-mail/cmd/gomail-ceremony	435.001s
+PASS-Zeilen: 325
+759:--- SKIP: TestStallChild (0.00s)
+881:        --- SKIP: TestStallDetect/retry_stalled_twice/inner (4.07s)
+## racetag: ok  	github.com/tim-riep/go-mail/cmd/gomail-ceremony	445.499s
+PASS-Zeilen: 325
+759:--- SKIP: TestStallChild (0.00s)
+882:        --- SKIP: TestStallDetect/retry_stalled_twice/inner (4.22s)
+## 386: ok  	github.com/tim-riep/go-mail/cmd/gomail-ceremony	304.939s
+PASS-Zeilen: 325
+759:--- SKIP: TestStallChild (0.00s)
+877:        --- SKIP: TestStallDetect/retry_stalled_twice/inner (4.14s)

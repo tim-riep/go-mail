@@ -1,0 +1,4 @@
+# fr-head-bench (internal/bench mit den Testdateien aus 17), rev aa87a9904d4d758001f68d22ec442af32f03b344
+386-internal_bench: ok  	github.com/tim-riep/go-mail/internal/bench	58.992s
+race-internal_bench: ok  	github.com/tim-riep/go-mail/internal/bench	7.040s
+racetag-internal_bench: ok  	github.com/tim-riep/go-mail/internal/bench	98.153s
