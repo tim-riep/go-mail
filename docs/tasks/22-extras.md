@@ -1,6 +1,6 @@
 # Auftrag 22: Ergänzungen nach Auftrag 21 (Funde niedrig und kleine Härtungen)
 
-Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Läuft erst nach den Messungen (Auftrag 17), weil die Messungen eine ruhige Maschine brauchen.
+Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Läuft parallel zum Abschluss-Volllauf. Jeder `go`-Befehl läuft mit `nice -n 19`. Die Messungen (Auftrag 17) brauchen eine ruhige Maschine: Vor jedem `go test`/`go vet`/`go build` prüfen, ob `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/orch/QUIET` existiert. Existiert sie, keinen solchen Befehl mehr starten, den erreichten Stand committen und im Bericht nennen, welche Läufe fehlen. Zusammengeführt wird 22 erst nach einem eigenen Volllauf, also nach M1.
 - Basis: Arbeitsbranch `claude/quirky-keller-hjsl5i` (aktueller Stand), eigener Worktree.
 - Darf ändern: `internal/ceremony/**`, `cmd/gomail-ceremony/**`, `internal/client/client.go` (nur `resolveExisting`), `internal/e2e/succession_test.go` (nur Kommentar), Tests dazu.
 - Quelle: `docs/tasks/20-notes.md` (Abschnitte zu 21c-Nachprüfungen, 20o-Prüfung, 21e-Prüfung).
