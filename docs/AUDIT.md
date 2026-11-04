@@ -44,7 +44,7 @@ M1 ist in `docs/ORCHESTRATION.md` Abschnitt 1, „M1-Kriterien A–F“, festgel
 | Suche und Flags | Indexsegmente je Gerät, Zusammenfassen, wenn es mindestens 15 Segmente einspart (D91 (5), S94), Lesegrenze je Lauf, Suche mit den Operatoren aus 5.4 (Begriffe über `internal/terms`), Flags mit Versionsregel (K4) | `client`, `terms` |
 | Transparenzlog | `tlog`-Kacheln, Gültigkeitsregeln je Eintragsart, Audit-Index, signierte Köpfe mit Zeitzeile, Zeugenquorum, zurückgehaltene Einträge, Vermerke der Clients, 24-Stunden-Regel, Reparatur | `translog`, `loghttp`, `client`, `ingest` |
 | Zeuge | acht Regeln, Fork-Nachweis, Pull über HTTP | `witness`, `cmd/gomail-witness` |
-| Zeremonie | `init --shares`, Probe-Rekonstruktion, `ingest-rotate`, `reshare`, `succeed` (ohne Kompromissfall), `publish` über das Log, Terminalregeln (D85 mit Nachträgen 15i bis 15n und 20a), Commit-Fenster | `ceremony`, `cmd/gomail-ceremony` |
+| Zeremonie | `init --shares`, Probe-Rekonstruktion, `ingest-rotate`, `reshare`, `succeed` (seit 21c auch `--compromised`), `revoke`, `admin-rotate`, `publish` über das Log, Terminalregeln (D85 mit Nachträgen 15i bis 15n und 20a), Commit-Fenster | `ceremony`, `cmd/gomail-ceremony` |
 | Betrieb | Zwei-Maschinen-Skript (lokaler Modus durchgelaufen, NFSv4-Pfad nur vorbereitet, D83), Messumgebung, `docs/RUNBOOK.md` mit `TestRunbook` (Produktionsbinaries, Zeremonie 3 aus 5, Zeuge, drei Benutzer; D89) | `scripts/two-host-test.sh`, `internal/bench`, `internal/e2e` |
 
 ### 1.3 Was M1 nicht abdeckt
@@ -496,4 +496,4 @@ Die Linie 09b (3e06f23) und die Nacharbeiten 20b, 20e und 20h sind im Code-Stand
 - **`ingest` und `gomail-server`, unverändert:** Die 84 Zeilen für Feld 7 (Annahme, `address add`, `log repair`) passen in die bisherigen Spannen der Schwerpunkte 2 und 6.
 - **Einarbeitung und Bericht:** unverändert; der Ablauf der neuen Befehle steht in RUNBOOK 7.3.
 
-Mit zwei Prüfern parallel bleibt es bei etwa drei bis gut vier Wochen (31 bis 41 Personentage, also etwa 16 bis 21 Tage je Prüfer). Die Schätzung setzt voraus, dass die Testläufe aus 6.1 einmal vollständig grün mit Protokoll vorliegen (Abschluss-Volllauf: wird mit Auftrag 20 eingetragen).
+Mit zwei Prüfern parallel bleibt es bei etwa drei bis gut vier Wochen (31 bis 41 Personentage, also etwa 16 bis 21 Tage je Prüfer). Die Schätzung setzt voraus, dass die Testläufe aus 6.1 einmal vollständig grün mit Protokoll vorliegen (Abschluss-Volllauf auf 9ad24a5 und Volllauf `fr-m1` auf dem Endstand fba4eb2: je 67 von 67 Schritten grün, 6.1).

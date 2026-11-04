@@ -1,6 +1,6 @@
 # Abschlussbericht M1 „PoC abgeschlossen“
 
-Stand: 04.11.2026, gegen 02:45 UTC; das Ergebnis des Volllaufs `fr-m1` und der Abschluss von 20r sind gegen 04:00 UTC nachgetragen. Arbeitsbranch `claude/quirky-keller-hjsl5i`, gelesen bei fd7b87f („docs: D94, notes on the reviews of 17, ORCHESTRATION merges“).
+Stand: 04.11.2026, gegen 02:45 UTC; das Ergebnis des Volllaufs `fr-m1` und der Abschluss von 20r sind gegen 04:00 UTC nachgetragen. Arbeitsbranch `claude/quirky-keller-hjsl5i`, gelesen bei fd7b87f („docs: D94, notes on the reviews of 17, ORCHESTRATION merges“), Nachträge bis 4f247c6 (Nachtrag 04:15 UTC).
 
 > **Nachtrag 04.11., 04:15 UTC (Orchestrator):** Nach Redaktionsschluss ist Auftrag 17e zusammengeführt (4f247c6). `scripts/bench.sh` lehnt jetzt Optionswerte ab, die mit `-` beginnen. Das ist der Fund, den D94 als niedrig eingestuft hatte. Die Prüfung von 17e ergab keine Funde über niedrig. **Damit entfällt der Vorbehalt D94: Kriterium D ist ohne Vorbehalt erfüllt.** Wo dieser Bericht unten „erfüllt mit Vorbehalt D94“ oder den Vorbehalt des Auftraggebers zu D94 nennt, gilt das als erledigt (DECISIONS D94, Nachtrag 17e). Das Urteil bleibt **bedingt erreicht**, allein wegen E (NFSv4 auf zwei Maschinen).
 
@@ -11,7 +11,7 @@ Stand: 04.11.2026, gegen 02:45 UTC; das Ergebnis des Volllaufs `fr-m1` und der A
 - 4a6e9c1: 22d (Dokumentation zu 22 und 23);
 - fd7b87f: D94, Notizen zu den Prüfungen von 17, ORCHESTRATION.
 
-Danach zusammengeführt: 541a349, Auftrag 20r mit Nacharbeit 94190c6 (HANDOFF und AUDIT endgültig auf dem Endstand fba4eb2). Das Ergebnis von `fr-m1` trägt ein weiterer Commit nach (Commit siehe ORCHESTRATION, „Stand beim Anhalten“).
+Danach zusammengeführt: 541a349 (Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6); HANDOFF und AUDIT endgültig auf dem Endstand fba4eb2. Das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088.
 
 Gegenüber 9ad24a5 ändert der Endstand außerhalb von `internal/bench` 18 Dateien unter `internal/` und `cmd/` (+953/−65 Zeilen, davon 9 Testdateien). Der Code gleicht der Quelle des Volllaufs `fr-m1` (1217496 im Scratchpad unter `orch/m1-final`) bis auf die Testdateien in `internal/bench` aus 17 (`git diff --stat 1217496 fba4eb2 -- internal cmd`: nur 5 Dateien unter `internal/bench`). Beim Merge waren gofmt, vet (ohne Tags, mit Tags, `GOOS=openbsd`) und Build grün, die Vektoren unverändert (ORCHESTRATION, 02:35 UTC). Bis 6d35472 waren alle Commits nach 7cde738 (Auftrag 21b) im Code nur Kommentare in `internal/translog` (dcd14d9).
 
@@ -38,12 +38,12 @@ Seit dem 26.10.2026 wurde Phase 2 nach Spezifikation 1.4 gebaut. Dazu kamen:
 Zusammengeführt sind alle Arbeitspakete der Wellen 1 bis 4. Aus Welle 5 sind es 18, 19, die Abnahmeaufträge 20a bis 20q, der Auftrag 21 (21a bis 21e), 17 mit 17b bis 17d (MEASUREMENTS), 22, 23 mit 23b, 22d und 20r (Abschnitt 3). Seit dem Entwurf vom 03.11., 23:40 UTC, abgeschlossen:
 - Abschluss-Volllauf auf 9ad24a5: grün, 67 von 67 Schritten, 23:12 bis 00:58 UTC (ORCHESTRATION, 00:58 UTC).
 - Abdeckung am Endstand: kein Paket unter `internal/` unter dem Soll (ORCHESTRATION, 00:35 und 02:35 UTC; `orch/cov-final/`, `orch/cov-m1/`).
-- Messungen: zwei Läufe am 04.11., 01:00 bis 01:33 UTC, auf 14bf604 (Produktivcode gleich 9ad24a5 bis auf Kommentare); `docs/MEASUREMENTS.md` nach drei Prüfrunden zusammengeführt (aed6ea4). Der letzte Fund mittel ist nach **D94** als niedrig eingestuft, eine Entscheidung des Orchestrators unter Vorbehalt des Auftraggebers (Abschnitt 7a).
+- Messungen: zwei Läufe am 04.11., 01:00 bis 01:33 UTC, auf 14bf604 (Produktivcode gleich 9ad24a5 bis auf Kommentare); `docs/MEASUREMENTS.md` nach drei Prüfrunden zusammengeführt (aed6ea4). Der letzte Fund mittel ist nach **D94** als niedrig eingestuft, eine Entscheidung des Orchestrators; mit 17e behoben (4f247c6).
 - 22, 23 und 23b: geprüft, Fund mittel R48 aus der Prüfung von 22 mit 23 behoben, zusammengeführt (afad8de, fba4eb2).
 
 Nach Redaktionsschluss (gegen 02:45 UTC) abgeschlossen:
 - Volllauf `fr-m1` auf dem Endstand fba4eb2 (`orch/fr-m1/`; Quellen 1217496 und 10b1783, im Code gleich dem Endstand außerhalb von `internal/bench`): **grün, 67 von 67 Schritten, kein Fehler**, 01:32:49 bis 03:40:59 UTC (Abschnitt 2, E).
-- HANDOFF und AUDIT in endgültiger Fassung auf dem Endstand fba4eb2: Auftrag 20r, Merge 541a349 mit Nacharbeit 94190c6. Das Ergebnis von `fr-m1` trägt ein weiterer Commit nach (Commit siehe ORCHESTRATION, „Stand beim Anhalten“).
+- HANDOFF und AUDIT in endgültiger Fassung auf dem Endstand fba4eb2: 541a349 (Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6). Das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088.
 
 Stand je Kriterium (Einzelheiten in Abschnitt 2; die Urteile stimmen mit HANDOFF seit 20r überein):
 
@@ -52,17 +52,17 @@ Stand je Kriterium (Einzelheiten in Abschnitt 2; die Urteile stimmen mit HANDOFF
 | A Phase 2 | **erfüllt** in der Lesart „offene Haltepunkte = strengste Lesart oder nicht freigegeben“ | an Q1, Q2, Q6, Q7, Q18 und Q20 strengste Lesart bzw. nicht freigegebene Befehle; Betriebsvoraussetzung D92; die Lesart prüft der Auftraggeber (Abschnitt 7a, Nr. 9) |
 | B Transparenzlog | **erfüllt** (Marken nur im Testdouble) | 11 veraltete Marken `TODO(phase3-translog)` im Testdouble `translogtest`, auch am Endstand; ob B sie einschließt, ist auszulegen (Anhang B, Nr. 2) |
 | C Zeremonie | **erfüllt**: gebaut, seit 21c mit Kompromissfall (D93); im Abschluss-Volllauf auf 9ad24a5 und im Volllauf `fr-m1` auf dem Endstand bestätigt | Abläufe RUNBOOK 7.3.3 bis 7.3.5 ohne Gesamttest (vom Kriterium nicht verlangt, Abschnitt 2, C) |
-| D MEASUREMENTS | **erfüllt mit Vorbehalt D94**: gemessen, `docs/MEASUREMENTS.md` nach drei Prüfrunden zusammengeführt (aed6ea4) | letzter Fund mittel nach D94 als niedrig eingestuft (Entscheidung des Orchestrators, Abschnitt 7a); 22 und 23 nicht gemessen |
+| D MEASUREMENTS | **erfüllt**: gemessen, `docs/MEASUREMENTS.md` nach drei Prüfrunden zusammengeführt (aed6ea4); der nach D94 als niedrig eingestufte Fund ist mit 17e behoben (4f247c6) | 22 und 23 nicht gemessen |
 | E Abnahme 10.2 | **bedingt** | Volllauf auf 9ad24a5 und Volllauf `fr-m1` auf dem Endstand grün (je 67 von 67), Abdeckung am Endstand über dem Soll; zwei Maschinen über NFSv4 nur „bedingt“ (D83, R36) |
-| F HANDOFF, AUDIT, RUNBOOK | **erfüllt** | HANDOFF und AUDIT endgültig mit 20r (541a349); das Ergebnis von `fr-m1` folgt mit einem weiteren Commit (Commit siehe ORCHESTRATION, „Stand beim Anhalten“) |
+| F HANDOFF, AUDIT, RUNBOOK | **erfüllt** | HANDOFF und AUDIT endgültig mit 20r (541a349); das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088 |
 
 **Urteil: M1 ist bedingt erreicht.**
 
 Begründung:
 - Zwei Maschinen über NFSv4 sind in dieser Umgebung nicht möglich: Es gibt weder NFS noch eine zweite Maschine (D83, AUDIT R36). Kriterium E ist deshalb nach ORCHESTRATION Abschnitt 1 nur bedingt erfüllt. Es ist das einzige bedingte Kriterium.
-- Alle anderen Kriterien sind erfüllt; der Volllauf `fr-m1` auf dem Endstand ist grün (67 von 67 Schritten). HANDOFF urteilt seit 20r ebenso: A erfüllt, B erfüllt (Marken nur im Testdouble), C erfüllt, D erfüllt mit Vorbehalt D94, E bedingt (NFSv4), F erfüllt.
+- Alle anderen Kriterien sind erfüllt; der Volllauf `fr-m1` auf dem Endstand ist grün (67 von 67 Schritten). HANDOFF urteilt ebenso: A erfüllt, B erfüllt (Marken nur im Testdouble), C erfüllt, D erfüllt (D94 mit 17e erledigt, 4f247c6), E bedingt (NFSv4), F erfüllt.
 - Für A gilt die Lesart „offene Haltepunkte = strengste Lesart oder nicht freigegeben“ (Abschnitt 7a, Nr. 9).
-- Für D gilt D94: Der Orchestrator hat den letzten Fund mittel der Nachprüfung von 17d als niedrig eingestuft. Stößt der Auftraggeber das um, ist der Fund vor dem Urteil zu beheben (D94, „Vorbehalt“).
+- Für D galt D94 (Einstufung des letzten Fundes mittel von 17d als niedrig). Der Fund ist mit 17e behoben (4f247c6, D94 Nachtrag 17e); ein Vorbehalt besteht nicht mehr.
 - Für B gilt die Auslegung aus Anhang B, Nr. 2: Die 11 Marken stehen nur im Testdouble.
 
 Der frühere Vorbehalt „S9 offen bis zur Entscheidung zu Q19 und Q8“ ist entfallen. Der Auftraggeber hat am 03.11. Option A gewählt („A bauen“, D93). Auftrag 21 hat sie gebaut; die Tests zu S9 enthalten kein `t.Skip`, und ihre Pakete sind im Abschluss-Volllauf und im Volllauf `fr-m1` auf dem Endstand grün (Abschnitt 2, E).
@@ -71,7 +71,7 @@ Der frühere Vorbehalt „S9 offen bis zur Entscheidung zu Q19 und Q8“ ist ent
 
 ## 2. Stand je M1-Kriterium
 
-Die Kriterien stehen in `docs/ORCHESTRATION.md` Abschnitt 1. Als erfüllt gilt nur, was gebaut und durch Tests oder Dokumente belegt ist. Hauptquelle ist die Tabelle in HANDOFF „Stand je M1-Kriterium“. Seit 20q hat HANDOFF einen Nachtrag für 20o und Auftrag 21 (Code-Stand 9ad24a5); AUDIT hat die Nachträge 21e und 20q. Was 22, 23 und 23b ändern, steht in den Dokumenten aus 22d (4a6e9c1: AUDIT „Nachtrag 22d“ und R48, D86/D93-Nachträge, RUNBOOK); HANDOFF trägt es seit 20r (Merge 541a349) und steht damit endgültig auf dem Endstand fba4eb2.
+Die Kriterien stehen in `docs/ORCHESTRATION.md` Abschnitt 1. Als erfüllt gilt nur, was gebaut und durch Tests oder Dokumente belegt ist. Hauptquelle ist die Tabelle in HANDOFF „Stand je M1-Kriterium“. Seit 20q hat HANDOFF einen Nachtrag für 20o und Auftrag 21 (Code-Stand 9ad24a5); AUDIT hat die Nachträge 21e und 20q. Was 22, 23 und 23b ändern, steht in den Dokumenten aus 22d (4a6e9c1: AUDIT „Nachtrag 22d“ und R48, D86/D93-Nachträge, RUNBOOK); HANDOFF trägt es seit 20r (541a349) und steht damit endgültig auf dem Endstand fba4eb2.
 
 ### A: Phase 2 vollständig (2.2, 2.4, 2.5, 6, 7, 9)
 
@@ -202,10 +202,10 @@ Aussagen von MEASUREMENTS dazu:
   - Der Fund betrifft nur das Einlesen der Optionen eines Entwicklerwerkzeugs und greift nur bei einem Tippfehler.
   - Er erzeugt keine falschen oder still unvollständigen Zahlen und berührt weder MEASUREMENTS noch Produktivcode, Sicherheit oder fail closed beim Darstellen.
   - Mit 17b, 17c und 17d ist die dritte Prüfrunde erreicht; eine vierte Runde nur für diesen Punkt ändert am Kriterium D nichts.
-  - **Vorbehalt** (D94): Der Auftraggeber kann die Einstufung umstoßen; dann ist der Fund vor dem Urteil zu beheben. Abhilfe nach M1: `need` lehnt auch Werte ab, die mit `-` beginnen; dazu N1 und N2. Siehe Abschnitt 7a.
+  - Erledigt mit 17e (4f247c6, D94 Nachtrag 17e).
 - Zusammenführung: aed6ea4, vor 22 und 23. So trägt der Commit, der MEASUREMENTS einführt, außerhalb von `internal/bench` und `scripts` die Bäume des gemessenen Stands (ORCHESTRATION, 02:05 und 02:35 UTC).
 
-**Stand:** Kriterium D ist erfüllt. Die Einstufung des letzten Fundes beruht auf D94 (Vorbehalt des Auftraggebers). Die Teilergebnisse des gestoppten Laufs vom 03.11. sind nur als Vergleich verwendet, nicht als Kennzahlen.
+**Stand:** Kriterium D ist erfüllt. Der nach D94 eingestufte Fund ist mit 17e behoben (4f247c6). Die Teilergebnisse des gestoppten Laufs vom 03.11. sind nur als Vergleich verwendet, nicht als Kennzahlen.
 
 ### E: Abnahme nach 10.2
 
@@ -222,7 +222,7 @@ S9 ist seit Auftrag 21 so belegt:
 - Ingest: `TestLogIngestRevoked` und `TestRevokedIngestEndToEnd` (`internal/client/revoke21b_test.go`, `internal/e2e/revoke21b_test.go`; 21b).
 - Regeln: `TestRevokedCompromise` und die übrigen Tests in `internal/translog/revoke21a_test.go` und `rework21a_test.go` (21a).
 - Im Abschluss-Volllauf auf 9ad24a5 sind alle Schritte von `internal/ceremony`, `internal/client`, `internal/e2e` und `internal/translog` grün. Der Lauf lief ohne `-v`; dass diese Tests einzeln liefen und sich nicht überspringen, zeigen deshalb nicht die Protokolle, sondern der Code: kein `t.Skip` in `TestVerifyCompromisedIdentityStillIssues`, die Tests in `client` und `e2e` laufen mit Tags. Damit sind es 28 von 30 vollständig; die zwei übrigen liegen außerhalb von M1.
-- Im Volllauf `fr-m1` auf dem Endstand sind die S9-Tests ebenfalls bestanden, die mit `testenv` in den Schritten mit Tags. HANDOFF steht seit 20r endgültig auf dem Endstand; das Ergebnis von `fr-m1` trägt ein weiterer Commit nach (Commit siehe ORCHESTRATION, „Stand beim Anhalten“).
+- Im Volllauf `fr-m1` auf dem Endstand sind die S9-Tests ebenfalls bestanden, die mit `testenv` in den Schritten mit Tags. HANDOFF steht seit 20r endgültig auf dem Endstand; das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088.
 
 Seit 374f499 sind 56 Testfunktionen hinzugekommen und eine entfallen (20o, 21a bis 21c; gezählt mit `git diff 374f499 HEAD -- '*_test.go'`).
 
@@ -364,16 +364,16 @@ Zwischen dem vorletzten grünen Volllauf (b674ae3 ohne 20m-Tests) und 9ad24a5 la
 - `docs/AUDIT.md` mit R1 bis R47, Prüfpfaden, 25 Fuzz-Zielen und einer Empfehlung von 31 bis 41 Personentagen (AUDIT 8.2, seit 20q am Stand 9ad24a5; vorher 29 bis 38). Code-Stand 858b2f1 mit den Nachträgen 20n (b674ae3), 21e (9ad24a5) und dem Vermerk zu 20q. Mit 22d (4a6e9c1) kamen der „Nachtrag 22d“ und R48 dazu; AUDIT zählt seitdem R1 bis R48.
 - `docs/HANDOFF.md`, Entwurf, seit 20q mit dem „Nachtrag 20o und Auftrag 21 (Code-Stand 9ad24a5)“. Fuzzing (vierter Teil), TODO-Inventar und die Spalte „Code gemessen“ der Abdeckung sind an 9ad24a5 nachgeführt (547603e).
 
-**Endgültig mit Auftrag 20r** (`docs/tasks/20r-handoff-final.md`; Merge 541a349 mit Nacharbeit 94190c6): HANDOFF und AUDIT stehen endgültig auf dem Endstand fba4eb2.
+**Endgültig mit Auftrag 20r** (`docs/tasks/20r-handoff-final.md`): HANDOFF und AUDIT stehen endgültig auf dem Endstand fba4eb2, Commit 541a349 (Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6).
 - Auftrag: in HANDOFF Messungen (Kriterium D), Ergebnis des Abschluss-Volllaufs mit Laufzeiten und SKIP-Nachweis, Abdeckung am Endstand, Auftrag 22 in „Bekannte Grenzen“ und der Commit-Zuordnung, Stand je Kriterium A bis F; in AUDIT das Ergebnis des Abschluss-Volllaufs (Kopf, 6.1). Die Zahlen der Prüfungen („wird mit Auftrag 20 eingetragen“) liefert Abschnitt 4 dieses Berichts; 20r trägt sie nach seinem Auftrag nicht ein (Anhang B, Nr. 6).
 - Erste Prüfung: alle Zahlen bestätigt, drei Funde mittel:
   - Das Urteil „bedingt“ für A war nicht belegt. A ist jetzt erfüllt, mit strengster Lesart bzw. nicht freigegebenen Befehlen an Q1, Q2, Q6, Q7, Q18 und Q20 (Abschnitt 7a, Nr. 9).
   - R48 nannte einen Test mit Haken, der den Haken nicht nutzt.
   - Der Urteilsspalte fehlte der Vorbehalt.
 - Nachprüfung: alle Funde behoben, nur noch niedrige; diese stehen in `docs/tasks/20-notes.md`.
-- Urteile in HANDOFF: A erfüllt, B erfüllt (Marken nur im Testdouble), C erfüllt, D erfüllt mit Vorbehalt D94, E bedingt (NFSv4), F erfüllt.
+- Urteile in HANDOFF (seit e314241): A erfüllt, B erfüllt (Marken nur im Testdouble), C erfüllt, D erfüllt (kein Vorbehalt mehr), E bedingt (NFSv4), F erfüllt.
 
-Commit der endgültigen HANDOFF und AUDIT: 541a349 (20r mit Nacharbeit 94190c6). Das Ergebnis von `fr-m1` trägt ein weiterer Commit nach (Commit siehe ORCHESTRATION, „Stand beim Anhalten“).
+Commit der endgültigen HANDOFF und AUDIT: 541a349 (Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6). Das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088.
 
 **Stand:** F ist erfüllt.
 
@@ -439,7 +439,7 @@ Commits auf dem Arbeitsbranch nach `git log`. Zu Worktree-Commits siehe die Zuor
 | 5 | 22 | Ergänzungen nach 21: `publish` heilt `data/platform/`, Admin-Widerruf, `resolveExisting`, Kommentar in `succession_test.go` | afad8de (Worktree 3cd9072) | D86, D93 Nachträge 22 (4a6e9c1) | 1 (Spezifikation und Angriff) |
 | 5 | 23 (23b) | Plattformzertifikat einmal lesen (R48); 23b: Test unabhängig von der Reihenfolge | fba4eb2 (Worktree 9a9d6cb, c6fa0b3) | D93 Nachtrag 23 (4a6e9c1) | 2 (23 nach Code-Lesung, Läufe vom Orchestrator nachgeholt; Nachprüfung 23b) |
 | 5 | 22d | Doku zu 22 und 23: RUNBOOK 1.5, 7.3, 8.6; D86/D93-Nachträge; AUDIT R17, R33, R48 | 4a6e9c1 (Worktree 446d27c, Nacharbeit 5d88c4b) | – | 2 |
-| 5 | 20r | HANDOFF und AUDIT endgültig; Ergebnis von `fr-m1` folgt mit einem weiteren Commit (Commit siehe ORCHESTRATION, „Stand beim Anhalten“) | 541a349 (Nacharbeit 94190c6) | – | 2 (erste Prüfung, Nachprüfung) |
+| 5 | 20r | HANDOFF und AUDIT endgültig; das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088 | 541a349 (Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6) | – | 2 (erste Prüfung, Nachprüfung) |
 
 **Umfang:**
 - Seit dem Orchestrierungsplan (5aa3b0f, 26.10.2026) hat der Branch 274 Commits, Stand fd7b87f (`git rev-list --count 5aa3b0f..fd7b87f`). Von den 25 Commits nach 1b7bd05 ändern drei Code oder Tests: aed6ea4 (nur `internal/bench` und `scripts`), afad8de und fba4eb2.
@@ -519,7 +519,7 @@ Commits auf dem Arbeitsbranch nach `git log`. Zu Worktree-Commits siehe die Zuor
 | 23 | Spezifikation und Angreifer nach Code-Lesung: nichts über niedrig, 2 niedrig (Testhaken greift erst nach `ReadPlatformCertRaw`; `address add` prüft `cert.IdentityGen` ohne Logabgleich, folgenlos). Läufe vom Orchestrator nachgeholt: Angriffstests scheitern auf der Mutante; Mutationen M1–M9 getötet außer M4 (Testlücke niedrig, bekannt) | ORCH 6 (01:10 UTC), 20-notes „Läufe der Prüfungen von 23“ |
 | 23b | Nachprüfung: nichts über niedrig, 1 niedrig (jeder Lauf deckt zufällig nur eine Prüfreihenfolge ab); je 5/5 Mutationen getötet unter amd64 und 386 | 20-notes |
 | 22d | R1: 0 / 1 / 5 (RUNBOOK 8.6 ohne den Fall eines vor `<N>` geloggten Zertifikats des Diebs); R2: alles behoben, 2 neue niedrig (L1, L2) | ORCH 6 (01:33 UTC), 20-notes |
-| 20r | R1: alle Zahlen bestätigt, 0 / 3 / – (Urteil A „bedingt“ nicht belegt; R48 nannte einen Test mit Haken, der den Haken nicht nutzt; Vorbehalt fehlte in der Urteilsspalte); R2: alles behoben, nur noch niedrige | 20-notes; Merge 541a349 |
+| 20r | R1: alle Zahlen bestätigt, 0 / 3 / – (Urteil A „bedingt“ nicht belegt; R48 nannte einen Test mit Haken, der den Haken nicht nutzt; Vorbehalt fehlte in der Urteilsspalte); R2: alles behoben, nur noch niedrige | 20-notes; 541a349 |
 
 **Prüfungen ohne Umsetzung** (nur lesend, Ergebnisse im Scratchpad des Orchestrators unter `final/`; im Repository nur über die Fund-Kennungen in den Aufträgen 20o und 20p belegt):
 
@@ -753,7 +753,7 @@ Diese Entscheidungen hat der Orchestrator selbst getroffen, oder sie legen eine 
    - Fund: `scripts/bench.sh` nimmt einen Optionswert an, der mit `-` beginnt; `-o -render=F` startet eine Messung statt der Darstellung. Die Prüfung stufte ihn als mittel ein.
    - Entscheidung des Orchestrators: niedrig. Begründung: Der Fund betrifft nur das Einlesen der Optionen eines Entwicklerwerkzeugs bei einem Tippfehler. Er erzeugt keine falschen oder still unvollständigen Zahlen und berührt weder MEASUREMENTS noch Produktivcode oder Sicherheit. Mit 17b, 17c und 17d war die dritte Prüfrunde erreicht.
    - Damit wich der Orchestrator vom Haltepunkt 3 ab: Statt nach drei Runden zu fragen, stufte er selbst ein.
-   - **Vorbehalt** (D94): Stößt der Auftraggeber die Einstufung um, ist der Fund vor dem Urteil zu beheben. Abhilfe nach D94: `need` lehnt Werte ab, die mit `-` beginnen.
+   - **Erledigt:** Die Abhilfe ist mit 17e umgesetzt (4f247c6, D94 Nachtrag 17e). Ein Umstoßen der Einstufung hätte keine Folge mehr für das Urteil.
 2. **Nachträge zu D93 im Rahmen von Option A**, gekennzeichnet als „Entscheidung des Orchestrators“ (DECISIONS D93; Abschnitt 6, Nr. 9): Kaskade über die Identitätsgeneration, Verschieben der Köpfe einer ungültig gewordenen Generation durch `log repair`, `revoked_at_time` = Kopfzeit + 1 ms. Mit 22 dazu: Admin-Widerruf nur mit Untergrenze, die Prüfung „wäre nie gültig gewesen“ nur für Ingest (D93 Nachtrag 22). Sie ändern Prüfregeln ohne neues Format.
 3. **R48 als mittel eingestuft und vor M1 behoben** (ORCHESTRATION, 00:50 UTC): Die Prüfung meldete den Fund nur als Nebenbeobachtung. Die Einstufung brachte den Auftrag 23 und verschob den Endstand. Umstoßen hieße hier nur: Die strengere Einstufung war nicht nötig.
 4. **Zusammenführung von 22 und 23 vor dem Ende ihres Volllaufs** (ORCHESTRATION, 02:35 UTC; Abschnitt 6, Nr. 11). Wäre ein Schritt von `fr-m1` gescheitert, hätte im Branch ein Code-Stand ohne grünen Volllauf gelegen. Das ist nicht eingetreten: `fr-m1` ist grün, 67 von 67 Schritten. Zu prüfen bleibt nur die Reihenfolge, also der Merge vor dem Ende des Volllaufs.
@@ -846,9 +846,9 @@ AUDIT Abschnitt 5 führt R1 bis R48 mit Belegen (R48 seit 22d), ordnet sie aber 
 ## 9. Nächste Schritte
 
 **Vor dem Abschluss von M1** (ORCHESTRATION, 04.11., 02:35 UTC):
-1. Erledigt: Volllauf `fr-m1` auf dem Endstand grün, 67 von 67 Schritten, 01:32:49 bis 03:40:59 UTC (Abschnitt 2, E). Das Ergebnis trägt ein weiterer Commit nach (Commit siehe ORCHESTRATION, „Stand beim Anhalten“).
-2. Erledigt: HANDOFF und AUDIT endgültig auf dem Endstand fba4eb2 (Auftrag 20r, Merge 541a349 mit Nacharbeit 94190c6). Die Zahlen der Prüfungen aus Abschnitt 4 trägt 20r nach seinem Auftrag nicht ein; sie stehen in diesem Bericht (Anhang B, Nr. 6).
-3. Bestätigung oder Umstoßen der Entscheidungen in Abschnitt 7a durch den Auftraggeber, vor allem D94 und die Lesart für A (Nr. 9).
+1. Erledigt: Volllauf `fr-m1` auf dem Endstand grün, 67 von 67 Schritten, 01:32:49 bis 03:40:59 UTC (Abschnitt 2, E). Das Ergebnis steht in HANDOFF und AUDIT seit 5f0c088.
+2. Erledigt: HANDOFF und AUDIT endgültig auf dem Endstand fba4eb2 (541a349: Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6). Die Zahlen der Prüfungen aus Abschnitt 4 trägt 20r nach seinem Auftrag nicht ein; sie stehen in diesem Bericht (Anhang B, Nr. 6).
+3. Bestätigung oder Umstoßen der Entscheidungen in Abschnitt 7a durch den Auftraggeber, vor allem die Lesart für A (Nr. 9); D94 nur zur Kenntnis (mit 17e erledigt).
 
 Erledigt seit dem Entwurf vom 03.11., 23:40 UTC: Abschluss-Volllauf auf 9ad24a5, Volllauf `fr-m1` auf dem Endstand, HANDOFF und AUDIT endgültig (20r), Abdeckung am Endstand, Messung und MEASUREMENTS (aed6ea4), Zusammenführung von 22, 23 mit 23b und 22d, Urteil (Abschnitt 1). Der frühere Schritt „`store`-Fuzzing nach 20l“ ist mit dem vierten Fuzzing-Teil (56464da) erledigt.
 
@@ -895,7 +895,7 @@ Auftrag 22 ist zusammengeführt (afad8de); der frühere Punkt „Auftrag 22, fal
 - 23b: Jeder Lauf von `TestPlatformIngestCertSwapped` deckt zufällig nur eine Prüfreihenfolge ab. Vorschlag: ein zweiter Aufruf von `IngestKeyFor(1)` im Schlüssel-Zweig.
 
 *Aus den Prüfungen von 17c und 17d und aus MEASUREMENTS* („Aus den Prüfungen von 17“; D94; MEASUREMENTS „Grenzen der Messung“):
-- D94: `need` in `scripts/bench.sh` lehnt auch Werte ab, die mit `-` beginnen (der Fund mittel der Nachprüfung von 17d, als niedrig eingestuft).
+- D94: erledigt mit 17e (4f247c6); offen niedrig nur Werte in Anführungszeichen in den Rohdaten und `-render` mit gesetztem `TMPDIR`.
 - 17d N1: Kopfzeilen `command:` und `env:` je Gruppe verlangen; N2: weitere Umgebungsvariablen abgleichen.
 - 17c F3: fehlender Unter-Benchmark und eingerücktes `--- SKIP` beim Darstellen erkennen.
 - Messungen nachholen: Empfang mit `testenv.NewLogged`, also mit den Prüfungen von D93 im Messpfad; 374f499 und Endstand abwechselnd im selben Zeitfenster; der Endstand mit 22 und 23.
@@ -920,7 +920,7 @@ Die Platzhalter P1 bis P9 des Entwurfs sind eingetragen oder entfallen:
 
 Die Stellen, die auf laufende Arbeiten warteten, sind eingetragen:
 - Volllauf `fr-m1` auf dem Endstand (grün, 67 von 67 Schritten): in Abschnitt 1 (Abgeschlossen, Tabelle C und E, Begründung), 2 C, 2 E (Tabelle der Volläufe, Volllauf auf dem Endstand, nach dem Abschluss-Volllauf, Zusammenfassung), 5 (Laufzeiten), 6 Nr. 10 und 11, 7a Nr. 4 und 9;
-- HANDOFF und AUDIT endgültig (20r, 541a349 mit Nacharbeit 94190c6): in Abschnitt 1 (Abgeschlossen, Tabelle F), 2 (Einleitung, A, E: S9 und Abdeckung, F), 3, 4, 5 (TODO-Inventar), 7a Nr. 9, 9 und Anhang B Nr. 6.
+- HANDOFF und AUDIT endgültig (541a349: Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6): in Abschnitt 1 (Abgeschlossen, Tabelle F), 2 (Einleitung, A, E: S9 und Abdeckung, F), 3, 4, 5 (TODO-Inventar), 7a Nr. 9, 9 und Anhang B Nr. 6.
 - Offen ist nur der Hash des Commits, der das Ergebnis von `fr-m1` nachträgt; im Text steht dafür „Commit siehe ORCHESTRATION, ‚Stand beim Anhalten‘“.
 
 Es bleiben die Stellen mit `[OHNE BELEG: …]`:
@@ -958,7 +958,7 @@ Bei fd7b87f erneut gegen die Dokumente geprüft. Die Nummern des Entwurfs sind b
 5. **AUDIT 7.2 gegen SPEC-ISSUES:** entfallen. Seit 20q nennen beide 18 offene Punkte; SPEC-ISSUES kennzeichnet die Zeilen „Stand M1“ in S24, S25 und S28 als „vor Auftrag 21, Verlauf“.
 6. **HANDOFF nicht durchgehend auf dem Endstand** (Rest nach 20q):
    - Bereinigt mit 20q: Nachtrag für 20o und Auftrag 21 im Kopf, vierter Fuzzing-Teil, Spalte „Code gemessen“, TODO-Inventar an 9ad24a5, Einleitung „Offene Fragen“.
-   - Mit 20r (541a349, Nacharbeit 94190c6) nachgeführt: HANDOFF und AUDIT stehen endgültig auf dem Endstand fba4eb2 (Messungen, Abschluss-Volllauf, Laufzeit des Volllaufs, Abdeckung am Endstand, Aufträge 22 und 23). Die erste Prüfung von 20r bestätigte alle Zahlen. Das Ergebnis von `fr-m1` trägt ein weiterer Commit nach (Commit siehe ORCHESTRATION, „Stand beim Anhalten“).
+   - Mit 20r nachgeführt (541a349: Auftrag 20r mit Nacharbeit, im Worktree als ee1b579 und 94190c6): HANDOFF und AUDIT stehen endgültig auf dem Endstand fba4eb2 (Messungen, Abschluss-Volllauf, Laufzeit des Volllaufs, Abdeckung am Endstand, Aufträge 22 und 23). Die erste Prüfung von 20r bestätigte alle Zahlen. Das Ergebnis von `fr-m1` steht in HANDOFF und AUDIT seit 5f0c088.
    - HANDOFF „Unabhängige Prüfungen bis M1“ verweist für die Zahlen der Prüfungen auf „Auftrag 20“. `docs/tasks/20r-handoff-final.md` nennt diesen Abschnitt nicht. Die Zahlen stehen in Abschnitt 4 dieses Berichts; HANDOFF sollte darauf verweisen oder sie übernehmen.
    - Das TODO-Inventar von HANDOFF nannte vor 20r am Stand 9ad24a5 einen `TODO(Q19)`. Am Endstand gibt es keinen mehr (22, Punkt 4).
 7. **AUDIT 8.2, Umfang:** entfallen. Seit 20q nennt AUDIT 8.2 45.117 Zeilen bei 9ad24a5 und schätzt 31 bis 41 Personentage. Die 94 Zeilen aus 22 und 23 bewertet es nicht (Abschnitt 9).

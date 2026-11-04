@@ -281,7 +281,7 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 
 - **Ergebnis:** M1 „PoC abgeschlossen“ ist **bedingt erreicht**. Bedingt ist E wegen der Zwei-Maschinen-Prüfung über NFSv4: Es gibt hier weder NFS noch eine zweite Maschine; vorbereitet ist nur `scripts/two-host-test.sh` (D83, AUDIT R36). Der Vorbehalt aus D94 bei D ist mit 17e (4f247c6) erledigt. A, B, C, D, F sind erfüllt; Belege in `docs/HANDOFF.md`, „Stand je M1-Kriterium“.
 - **Endstand des Codes:** fba4eb2 (9ad24a5 + Auftrag 22 + Auftrag 23 mit 23b).
-  - Abschluss-Volllauf auf der gemeinsamen Quelle `orch/m1-final` (1217496, im Code gleich fba4eb2 außer `internal/bench`): **67 von 67 Schritten grün**, 01:32 bis 03:41 UTC, über drei Container-Neustarts fortgesetzt.
+  - Volllauf auf dem Endstand (`fr-m1`, gemeinsame Quelle `orch/m1-final`, 1217496, im Code gleich fba4eb2 außer `internal/bench`): **67 von 67 Schritten grün**, 01:32 bis 03:40 UTC, über drei Container-Neustarts fortgesetzt.
     Vor den Neustarts um 03:26 und 03:40 UTC hing der laufende Schritt ungewöhnlich lange (`386-internal_ingest` etwa 19 Minuten statt etwa 67 s, `386-internal_translog` etwa 10 Minuten statt etwa 22 s); nach dem Neustart liefen beide in der gewohnten Zeit grün. Eine Ursache im Code ist daraus nicht abzulesen; die Maschine stand offenbar vor den Neustarts. gofmt, vet und `cmd/gomail-ceremony` liefen auf 10b1783 (ohne 23b, nur ein Test in `client`).
   - Abschluss-Volllauf auf 9ad24a5: 67 von 67, 23:12 bis 00:58 UTC.
   - `internal/bench` mit den Testdateien aus 17 auf dem Branch (aa87a99): race, race mit Tags und 386 grün.
@@ -323,7 +323,7 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
      - Symlinks unter `data/platform/` in `publish`;
      - `address add` ohne Signatur- und Logprüfung des Admin-Zertifikats;
      - Testlücke M4 in `store`;
-     - Optionsprüfung von `bench.sh`.
+     - `bench.sh`: Werte in Anführungszeichen in den Rohdaten, `-render` braucht ein nicht gesetztes `TMPDIR` (aus der Prüfung von 17e).
   4. Format-Restlücke F2 aus 21b: Version ≥ 2 der Metadaten hält den Signierer von Version 1 nicht fest. Braucht eine Formatänderung (Haltepunkt).
   5. Offene Fragen Q1, Q2, Q6, Q7, Q18, Q20.
 - 04.11., 04:24 UTC: Hauptarbeit beendet; bis 05:00 UTC nur noch eine lesende Konsistenzprüfung der Dokumente. Keine Läufe aktiv. Alles zusammengeführt und gepusht; offen sind nur die Punkte nach M1 in Abschnitt 7 und in `docs/tasks/20-notes.md`.
