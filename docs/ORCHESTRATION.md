@@ -329,3 +329,9 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 - 04.11., 04:24 UTC: Hauptarbeit beendet; bis 05:00 UTC nur noch eine lesende Konsistenzprüfung der Dokumente. Keine Läufe aktiv. Alles zusammengeführt und gepusht; offen sind nur die Punkte nach M1 in Abschnitt 7 und in `docs/tasks/20-notes.md`.
 - 04:35 UTC: Konsistenzprüfung der Abschlussdokumente (12 veraltete Stellen, vor allem D94 als Vorbehalt im Abschlussbericht) mit den Ersatztexten des Prüfers berichtigt (f0b80e8, cdc1220). gofmt, vet (drei Varianten), Build und `bash -n` der Skripte auf dem Branch grün; Code unverändert gegenüber fba4eb2; Vektoren unverändert. Liste nach M1 um die niedrigen Punkte vom 04.11. ergänzt (Nr. 54 bis 63, `docs/tasks/backlog-nach-m1.md`). Keine Agenten und keine Läufe aktiv; Ende der Sitzung.
 - 04:47 UTC: Punkt 63 als Patch-Serie gesichert (`docs/tasks/vorbereitet/`), nicht zusammengeführt. Stopp; keine Agenten und keine Läufe aktiv.
+
+## 8. Fortsetzung nach M1 (09.11.2026, 23:12 Uhr MEZ, bis 10.11.2026, 09:00 Uhr MEZ)
+
+Anweisung des Auftraggebers: „Fahre fort bis morgen 9 Uhr“. M1 ist bedingt erreicht (Abschnitt 7). Gearbeitet wird an der Liste nach M1 (`docs/tasks/backlog-nach-m1.md`), nur an Punkten ohne offene Frage, ohne Entscheidung des Auftraggebers und ohne Format- oder Spezifikationsänderung. Es gelten die Regeln aus Abschnitt 1 bis 3 unverändert: zwei Prüfer für sicherheitskritische Pakete, Nacharbeit in neuem Kontext, Zusammenführen nur ohne offene Funde über niedrig und nur nach einem Volllauf. Stopp um 08:00 UTC (geplante Aufgabe).
+
+- 22:13 UTC: Plattenplatz aufgeräumt (Scratch-Worktrees, alte Protokolle der Prüfungen; die Zusammenfassungen liegen in `docs/tasks/abschluss-laeufe/`). Gestartet: die Einordnung der Liste nach M1 für heute Nacht und die Nachprüfung der Patch-Serie zu Punkt 63 (Spezifikation und Angriff in einem, mit Mutationen und Läufen).
