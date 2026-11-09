@@ -335,3 +335,11 @@ Siehe `docs/QUESTIONS.md`. Pakete, die von einer offenen Frage abhängen, bauen 
 Anweisung des Auftraggebers: „Fahre fort bis morgen 9 Uhr“. M1 ist bedingt erreicht (Abschnitt 7). Gearbeitet wird an der Liste nach M1 (`docs/tasks/backlog-nach-m1.md`), nur an Punkten ohne offene Frage, ohne Entscheidung des Auftraggebers und ohne Format- oder Spezifikationsänderung. Es gelten die Regeln aus Abschnitt 1 bis 3 unverändert: zwei Prüfer für sicherheitskritische Pakete, Nacharbeit in neuem Kontext, Zusammenführen nur ohne offene Funde über niedrig und nur nach einem Volllauf. Stopp um 08:00 UTC (geplante Aufgabe).
 
 - 22:13 UTC: Plattenplatz aufgeräumt (Scratch-Worktrees, alte Protokolle der Prüfungen; die Zusammenfassungen liegen in `docs/tasks/abschluss-laeufe/`). Gestartet: die Einordnung der Liste nach M1 für heute Nacht und die Nachprüfung der Patch-Serie zu Punkt 63 (Spezifikation und Angriff in einem, mit Mutationen und Läufen).
+- 22:45 UTC: Einordnung der Liste nach M1: 2 Punkte erledigt (Nr. 1 und 2 mit D93), 15 heute machbar, 25 hängen an einer Frage oder Entscheidung, 2 sind Formatänderungen, 19 liegen außerhalb (Audit, Betrieb, zweite Maschine, große Umbauten). Auftrag 24 (`docs/tasks/24-nach-m1-nacht1.md`) mit fünf parallelen Paketen ohne gemeinsame Dateien:
+  - A: `publish` und Symlinks, Kommentare, Testlücke (Nr. 54–56, 58);
+  - B: `resolveExisting` mit `..`, Test beider Prüfreihenfolgen, Tests zu S88/S89 (Nr. 57, 60, 52);
+  - C: `address add` mit Patch 63 und nachgehender Uhr (Nr. 63, 41);
+  - D: `loghttp`-Grenzen (Nr. 7, Teil);
+  - E: veraltete Marken, Testhaken in `store`, `bench.sh -render` (Nr. 53, 59, 61, 62).
+  Alle fünf Implementierer laufen.
+- Nachprüfung der Patch-Serie 63 (auf dem Branch angewendet): keine Funde über niedrig, Mutationen „ohne Signatur“ und „ohne `CheckPlatform`“ getötet. Niedrig bleiben: kein Test für den Weg mit geloggter Nachfolge, und `ReadPlatformCertRaw` meldet keine Ursache. Beides ging als optionaler Zusatz an Paket C.
