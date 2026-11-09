@@ -92,3 +92,26 @@ Dateien:
 - **Sicherheitsregel bei `bench.sh`:** Rufe das Skript nie ohne gültiges `-render <datei>` auf; jeder andere Aufruf misst (D94). Fehlfälle testest du in einer Kopie im Scratchpad, in der `run()` nur `echo` ausgibt. Die vier Rohdateien unter `docs/measurements/2026-11-0{3,4}/` müssen weiter rc=0 ergeben, mit `env -u TMPDIR GOMAIL_BENCH_MIN_FREE=0.1 scripts/bench.sh -render <f> -count 5 -o <tmp>`, und dieselbe Tabelle wie bisher erzeugen.
 - **52, Vet-Teil:** `GOOS=solaris go vet ./...` und `GOOS=illumos go vet ./...` nur ausführen und das Ergebnis berichten, nicht korrigieren.
 - **Läufe:** `internal/translog`, `internal/translog/translogtest` und `internal/store` unter race mit und ohne Tags und unter 386 mit Tags; `bash -n` für beide Skripte.
+
+## Paket F: R41-Rest, `os.ReadDir` über `OpenDir` (Nr. 37). Ein Prüfer, dazu eine Robustheitsprüfung.
+
+Basis: die lokale Quelle `orch/n24` (Arbeitsbranch mit A, B, C, E), weil E `internal/store/store.go` ändert.
+
+Ein Helfer `store.ReadDir(path) ([]fs.DirEntry, error)` öffnet das Verzeichnis mit `store.OpenDir` (`O_DIRECTORY|O_NONBLOCK`; ein FIFO oder eine Datei ergeben einen Fehler statt eines Hängers) und liest sortiert wie `os.ReadDir`. Er ersetzt `os.ReadDir` an den Fundstellen aus der Liste nach M1, Nr. 37. Prüfe die Fundstellen am heutigen Code mit `grep -rn 'os.ReadDir' --include='*.go' internal cmd | grep -v _test`:
+- `internal/store`: `store.go`, `checkpoint.go`, `fs.go`
+- `internal/client`: `devicelost.go`, `mailbox.go`, `restore.go`, nicht `client.go`
+- `internal/ingest/ingest.go`
+- `internal/translog/impl.go`
+- `cmd/gomail-server/checks.go`
+
+Bedingungen:
+- Die Fehlerklassen bleiben erhalten. Aufrufer, die `fs.ErrNotExist` oder `errors.Is(err, os.ErrNotExist)` prüfen, müssen sich gleich verhalten. Prüfe jede Fundstelle einzeln.
+- Fundstellen in `internal/ceremony` (Paket A) und `internal/client/client.go` (Paket B) sind ausgenommen.
+- Fehlt eine Fundstelle der Liste oder ist eine neu, nennst du das im Bericht.
+
+Tests: Je Fundstellenklasse ein Test, bei dem ein FIFO statt des Verzeichnisses einen Fehler ergibt statt eines Hängers, nach dem Muster von `TestFIFONewestHeadSize`. Dazu ein Test des Helfers für die Sortierung, für ein fehlendes Verzeichnis (`fs.ErrNotExist`) und für eine Datei statt eines Verzeichnisses. Gegenbelege: Mutante „Helfer mit `os.ReadDir`“.
+
+Läufe:
+- race mit und ohne Tags und 386 mit Tags für `internal/store`, `internal/ingest` und `internal/translog`;
+- `cmd/gomail-server` unter race mit Tags;
+- `internal/client` nur gezielt mit `-run` für die neuen Tests und die Tests der geänderten Funktionen (`DeviceLost`, `Restore`, Postfachliste).
