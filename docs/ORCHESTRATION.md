@@ -377,3 +377,48 @@ Anweisung des Auftraggebers: „Fahre fort bis morgen 9 Uhr“. M1 ist bedingt e
 - 03:10 UTC: **25g3** (0c4d1a9) fertig: die Ersatztexte der Nachprüfung von 25g2, je am Code geprüft, zwei kleine begründete Abweichungen. Ich habe den Diff durchgesehen: 5 Dateien, je 10 Zeilen, kein Modellname. Keine eigene Nachprüfung, weil nur niedrige Befunde mit vorgegebenem Ersatztext umgesetzt sind. 25g ist damit für den Merge fertig.
 - 03:15 UTC: **25A4** fertig (49c98e6, nur Tests): Reihenfolge der Callbacks ohne Root belegt, Ausgabe bei Erfolg exakt geprüft (auch Widerruf und Ersatz zusammen), der chattr-Test ersetzt durch eine Sperre über ein nicht leeres Verzeichnis im Log, `%q` getestet. R1 bis R5 scheitern, auch ohne Capabilities. In `orch/n25` übernommen (3ea40f0). Nach dem Ende von `fr-n25` laufen die Schritte für `internal/ceremony` und `cmd/gomail-ceremony` sowie gofmt und vet darauf neu. Nachprüfung läuft.
 - 03:27 UTC: **25A4** nachgeprüft ohne Funde über niedrig. Damit sind alle vier Pakete von Auftrag 25 geprüft: 25A 49c98e6, 25B 23fc312, 25C 4f4535f, 25D 79bd462, Doku 25g 0c4d1a9. Es fehlt nur noch der Volllauf.
+- 03:28 bis 08:00 UTC: Der Container stand. Der Volllauf `fr-n25` blieb nach `racetag-internal_e2e` (03:28 UTC) stehen, kein Agent lief. Um 08:00 UTC startete der Container neu, gleichzeitig kam der Auftrag zum Anhalten. Danach ist nichts mehr gestartet worden.
+
+## 9. Stand beim Anhalten (10.11.2026, 09:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+- **Ergebnis M1:** unverändert **bedingt erreicht** (Abschnitt 7). A, B, C und F sind erfüllt, D ist erfüllt mit dem Vorbehalt aus D94. E ist bedingt, weil die Zwei-Maschinen-Prüfung über NFSv4 fehlt (D83, AUDIT R36). Auftrag 24 ändert an den Urteilen nichts. Er beseitigt bei B die letzten Marken `TODO(phase3-translog)` im Testdouble; die Auslegung „Marken nur im Testdouble“ ist damit hinfällig.
+- **Zusammengeführt seit dem Anhalten am 04.11.:** Auftrag 24 (Liste nach M1, Nr. 7 Teil, 37, 41, 52, 53, 54 bis 63), nach dem Volllauf `fr-n24` mit **67 von 67 Schritten grün** (00:14 bis 02:02 UTC, über einen Container-Neustart fortgesetzt). Der Code gleicht der Quelle des Volllaufs.
+  - A 12f86fe: `publish` nimmt keinen Link und keinen harten Link als Datei des Exports.
+  - B 049d478: `resolveExisting` Stück für Stück, fail closed.
+  - C bc3edd3: `address add` prüft `admin-<gen>.cert` und setzt `valid_from` nachgehend.
+  - D ba8434d: `loghttp`, Inhaltstyp vor dem Körper, `MaxVerifying` mit `SlotWait`.
+  - E 89fd0d5: Marken, einmaliges Lesen, `bench.sh -render`.
+  - F 8a58052: `store.ReadDir` über `OpenDir`.
+  - Doku 24g d8f474c: RUNBOOK, DECISIONS, AUDIT, HANDOFF, Liste nach M1.
+- **Geprüft, aber nicht zusammengeführt: Auftrag 25** (niedrige Reste aus den Prüfungen von 24, `docs/tasks/25-nach-m1-nacht1-runde2.md`). Jedes Paket hat alle Prüfungen ohne Fund über niedrig bestanden. Nicht zusammengeführt ist es, weil der Volllauf darüber unvollständig ist:
+  | Paket | Commits (Worktree unter `.claude/worktrees/`) | Endstand |
+  |---|---|---|
+  | 25A `publish` | f6420a6 (agent-a002b0ede8de56482), 25A2 4b37e6d (agent-a5fe04ac4944b1303), 25A3 9fd2156 (agent-ad9cd3a0106dbc571), 25A4 49c98e6, nur Tests (agent-a606bf7cf48135802) | 49c98e6 |
+  | 25B Client-Verzeichnis | 704ff09 (agent-ae37ac82f4cc2dea2), 25B2 23fc312, nur Tests (agent-a9a48d5aa34faafce) | 23fc312 |
+  | 25C `loghttp` | aaf2bd8 (agent-a50d47748ec03238e), 25C2 4f4535f (agent-af9b25847d846a836) | 4f4535f |
+  | 25D `bench.sh` | 8270349 (agent-aa55b3c74b7bd7adb), 25D2 3beee11 (agent-a7e2a64f4290819fd), 25D3 79bd462 (agent-a2b587024ee0a5291) | 79bd462 |
+  | 25g Doku | aa13f9e (agent-a964bd9ebd313e8f8), 25g2 3c9e491 (agent-a4b35091157eeb8ed), 25g3 0c4d1a9 (agent-af189c8239bd0a882) | 0c4d1a9 |
+
+  Jede Kette baut auf 7dfd935 (25A bis 25D) bzw. auf b01c0e5 (25g) auf. Die Funde aller Prüfungen stehen in `docs/tasks/20-notes.md`, Abschnitt „Auftrag 25 … Prüfungen“.
+- **Gemeinsame Quelle und Volllauf:**
+  - Quelle `orch/n25` (lokaler Branch, Worktree im Scratchpad `orch/src-n25`, 3ea40f0): Arbeitsbranch 4276b87 plus alle Commits oben außer 25g, ohne Konflikt.
+  - Volllauf `orch/fr-n25`: **25 von 67 Schritten grün, keiner rot**.
+  - Grün sind `cmd/*` und `internal/bench`, `internal/ceremony` und `internal/client` je mit race, race mit Tags und 386, sowie `internal/e2e` mit race und race mit Tags.
+  - gofmt und vet liefen auf aa4ad46, also vor 25D3 und 25A4.
+  - `internal/ceremony` und `cmd/gomail-ceremony` liefen auf dem Stand vor 25A4 (nur Tests).
+- **Laufend beim Anhalten:** kein Agent, kein Lauf. Nichts ist halb zusammengeführt. Die Worktrees der Agenten bleiben unverändert.
+- **Entscheidungen, die der Auftraggeber prüfen sollte (neu):**
+  - **25A:** `publish` lehnt `data/platform/` als Symlink jetzt fail closed ab. Im Repository ist ein solcher Link nirgends als erlaubt beschrieben.
+  - **25A:** `publish` entfernt Reste `.tmp-*` in `platform/` unter der Serversperre und meldet jeden Namen. Bisher wurden solche Reste nur übergangen.
+  - **25C:** `SlotWait` steigt von 1 s auf 5 s, mit einer Flood-Messung als Begründung (AUDIT R8).
+  - **24D:** Meine Vorgabe „503 ohne Lesen des Körpers“ erzeugte einen Fund hoch und ist aufgehoben (Abschnitt 8, 22:58 UTC).
+  - **25D:** `bench.sh` ist nach drei Nacharbeiten bei 25D3 belassen; die restlichen niedrigen Punkte stehen in der Liste nach M1.
+  - **Doku-Aufträge:** Sie dürfen DECISIONS (nur Nachträge) und HANDOFF ändern, obwohl `00-vorgaben.md` das Implementierern verbietet. So ist es seit 20r gehandhabt.
+  - Die offenen Punkte aus Abschnitt 7 gelten weiter: D94, R48, Merge von 22 und 23 vor M1, Lesart A.
+- **Offene Fragen:** unverändert Q1, Q2, Q6, Q7, Q18 und Q20. Neue Fragen an den Auftraggeber sind nicht entstanden.
+- **Nächste Schritte:**
+  1. Volllauf von 25 fortsetzen: `nohup orch/fullrun2.sh orch/src-n25 orch/fr-n25 &`. Danach die Marken `gofmt`, `vet`, `*-internal_ceremony` und `*-cmd_gomail-ceremony` löschen und noch einmal fortsetzen, damit sie auf 3ea40f0 laufen (etwa 1,5 Stunden insgesamt).
+  2. Bei 67 von 67 Auftrag 25 zusammenführen: je Paket ein Squash-Commit (25A 49c98e6, 25B 23fc312, 25C 4f4535f, 25D 79bd462), dann 25g 0c4d1a9. Danach prüfen, dass der Code `orch/n25` gleicht und die Vektoren unverändert sind. Die Hashes kommen in HANDOFF, Nachtrag 25g, an die Stelle von „Arbeitsbranch nach Auftrag 25“; den Satz zu 25A4 in HANDOFF bestätigen.
+  3. Zwei-Maschinen-Test über NFSv4 mit `scripts/two-host-test.sh`. Damit wird E erfüllt.
+  4. Liste nach M1: jetzt 83 Nummern, nach dem Merge von 25 die neuen Nr. 72 bis 83. Größere Punkte daraus: `platform/` über `os.Root` (Nr. 72), Verbindungsgrenze und Rate je Quelle in `loghttp` (Nr. 7, Rest).
+  5. Format-Restlücke F2 aus 21b (Haltepunkt) und die offenen Fragen.
