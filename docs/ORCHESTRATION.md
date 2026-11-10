@@ -509,3 +509,4 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 18:18 UTC: 28D abnahmefähig mit 3a9b333 (zwei Nachprüfungen ohne Fund über niedrig); keine dritte Runde, die niedrigen Reste gehen über den Doku-Nachzug 28g in die Liste.
 - 18:25 UTC: 28B ohne Fund über niedrig; kleine Nacharbeit 28B2 (Marke `testing.MainStart`, `TestReleaseSwitches` strenger). 28C Prüfer 1 mit einem Fund mittel im Zusammenspiel mit 28D2; Nacharbeit 28C2 auf Basis 28D, sobald Prüfer 2 berichtet. Reihenfolge beim Zusammenführen dann 28A, 28B, 28D, 28C.
 - 18:33 UTC: 28C Prüfer 2: Produktivcode annehmbar, F1 mittel (Wettlauf im Test) bestätigt. Nacharbeit 28C2 auf Basis 3a9b333 (28D) + 838c2d5 gestartet; F4/F6 (checkMeta still, Zwischenspeicher in `indexEpoch`) gehen in die Liste.
+- 18:55 UTC: 28A abnahmefähig mit 8f15bbf (Nachprüfung beider Prüfer ohne Fund über Hinweis). 28D abnahmefähig mit 3a9b333. Offen: 28B2, 28C2.
