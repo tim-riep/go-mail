@@ -453,3 +453,9 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 
   Begründung: Lokal schützen Grenzen je Quelle nicht, weil ein lokaler Prozess beliebige Adressen aus 127/8 nutzen kann; sie träfen nur die Zeugen hinter dem Tunnel. Die Entscheidung kommt als Nachtrag zu D80 in den Doku-Nachzug, zur Prüfung durch den Auftraggeber. **26B**: beide Prüfungen ohne Funde über niedrig. Nacharbeit 26B2 für die niedrigen Punkte (Inode-Wiederverwendung, Pfade in Meldungen, Testlücken) läuft.
 - 09:41 UTC: Prüfung **26C** ohne Funde über niedrig. Ausdrücklich belegt: Der Messcode ist unverändert. Eine kleine Nacharbeit 26C2 für die niedrigen Punkte läuft (Hänger bei angehaltenem Prozess, Signale an die ganze Gruppe, Socket als Ziel, Namenstest).
+- 09:43 UTC: **26E** fertig (422fcde, nur Tests): sechs Fuzz-Ziele, je 5 Minuten ohne Fund im Produktivcode.
+  - `store.FuzzChain`
+  - `client.FuzzVerifyChain`, `client.FuzzCheckpoint`, `client.FuzzState`
+  - `ceremony.FuzzReadExport`, `ceremony.FuzzCheckDataPlatform`
+
+  Gegenbelege: In Kopien eingebaute Mutanten findet der Fuzzer, die meisten sofort. Die Eingaben der Client-Ziele sind relativ zu den echten Dateien angelegt, weil jeder Fuzz-Prozess eine eigene Plattform mit eigenen Zufallsschlüsseln baut. Die Prüfung läuft.
