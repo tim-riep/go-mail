@@ -341,17 +341,21 @@ const incompleteMarker = ".incomplete"
 // a symbolic link at dir or at one of its parents may have changed since.
 // After its own resolution createClientDir checks dir once more against
 // the data directory dataRoot (insideDataDir, task 20o point 3) and fails
-// with errInsideDataDir before anything is created; an empty dataRoot
-// skips the check. A link changed after this check is not caught (the
-// rename is not relative to a descriptor).
+// with its error before anything is created: errInsideDataDir, or an
+// error naming why the check was not possible that errors.Is matches
+// with errInsideDataDir (uncheckedDirError, task 25 package B). An empty
+// dataRoot skips the check. A link changed after this check is not
+// caught (the rename is not relative to a descriptor).
 func createClientDir(dir, dataRoot, kind string, write func(root *os.Root) error) (err error) {
 	if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if dir, err = filepath.EvalSymlinks(dir); err != nil {
 			return err
 		}
 	}
-	if dataRoot != "" && insideDataDir(dir, dataRoot) {
-		return errInsideDataDir
+	if dataRoot != "" {
+		if err := insideDataDir(dir, dataRoot); err != nil {
+			return err
+		}
 	}
 	parent, name := filepath.Dir(dir), filepath.Base(dir)
 	if err := os.MkdirAll(parent, 0o700); err != nil {

@@ -34,9 +34,11 @@ func dirNames(t *testing.T, dir string) []string {
 // than PATH_MAX, reached through a link L with a short path, holds a
 // link M to the data directory. <B>/L/<rest>/M/client is in the data
 // directory for the system; resolved as a string it is too long for
-// Lstat (ENAMETOOLONG). insideDataDir reports it inside, and
-// createClientDir refuses it with errInsideDataDir and creates nothing in
-// the data directory (finding 1 of the robustness review of package B).
+// Lstat (ENAMETOOLONG). insideDataDir and createClientDir refuse it with
+// an uncheckedDirError caused by ENAMETOOLONG, which errors.Is matches
+// with errInsideDataDir (task 25 package B), and createClientDir creates
+// nothing in the data directory (finding 1 of the robustness review of
+// package B).
 func TestInsideDataDirLongRealPath(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("builds the deep directory through /proc/self/fd")
@@ -84,15 +86,13 @@ func TestInsideDataDirLongRealPath(t *testing.T) {
 	if _, err := resolveExisting(dir); !errors.Is(err, syscall.ENAMETOOLONG) {
 		t.Errorf("resolveExisting: %v, want ENAMETOOLONG", err)
 	}
-	if !insideDataDir(dir, data) {
-		t.Error("insideDataDir: false")
+	if err := insideDataDir(dir, data); !errors.Is(err, errInsideDataDir) {
+		t.Errorf("insideDataDir: %v", err)
 	}
 	err = createClientDir(dir, data, "keygen", func(r *os.Root) error {
 		return r.WriteFile("marker", []byte("x"), 0o600)
 	})
-	if !errors.Is(err, errInsideDataDir) {
-		t.Errorf("createClientDir: %v, want errInsideDataDir", err)
-	}
+	wantUnchecked(t, "createClientDir", err, syscall.ENAMETOOLONG, syscall.ENAMETOOLONG.Error(), comps[0], b)
 	if got := dirNames(t, data); len(got) != 0 {
 		t.Errorf("data directory: %v", got)
 	}
@@ -101,8 +101,9 @@ func TestInsideDataDirLongRealPath(t *testing.T) {
 // TestInsideDataDirRelative: insideDataDir makes both paths absolute
 // (Store.Root is an exported field) and resolveExisting refuses a
 // relative path instead of reading it from the root (finding 3 of the
-// robustness review of package B). An empty data directory is inside
-// everything.
+// robustness review of package B). An empty data directory gives an
+// unchecked error (uncheckedDirError) with the cause errNoDataDir, which
+// errors.Is matches with errInsideDataDir.
 func TestInsideDataDirRelative(t *testing.T) {
 	b, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -135,7 +136,7 @@ func TestInsideDataDirRelative(t *testing.T) {
 		{filepath.Join(b, "other", "client"), "", true},
 		{filepath.Join(elsewhere, "client"), "", true},
 	} {
-		if got := insideDataDir(c.dir, c.root); got != c.want {
+		if got := insideDataDir(c.dir, c.root) != nil; got != c.want {
 			t.Errorf("insideDataDir(%q, %q): %v, want %v", c.dir, c.root, got, c.want)
 		}
 	}
@@ -172,8 +173,8 @@ func TestInsideDataDirUnexaminable(t *testing.T) {
 	if _, err := resolveExisting(long); !errors.Is(err, syscall.ENAMETOOLONG) {
 		t.Errorf("resolveExisting(<300 bytes>/client): %v, want ENAMETOOLONG", err)
 	}
-	if !insideDataDir(long, data) {
-		t.Error("insideDataDir(<300 bytes>/client): false")
+	if err := insideDataDir(long, data); !errors.Is(err, errInsideDataDir) {
+		t.Errorf("insideDataDir(<300 bytes>/client): %v", err)
 	}
 	for _, d := range []string{"nox", "nor"} {
 		if err := os.Symlink(data, filepath.Join(b, d, "L")); err != nil {
@@ -207,7 +208,7 @@ func TestInsideDataDirUnexaminable(t *testing.T) {
 		{"nor/sub/client", false},
 	} {
 		p := filepath.Join(b, c.dir)
-		if got := insideDataDir(p, data); got != c.want {
+		if got := insideDataDir(p, data) != nil; got != c.want {
 			t.Errorf("insideDataDir(%s): %v, want %v", c.dir, got, c.want)
 		}
 	}

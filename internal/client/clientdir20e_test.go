@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -196,7 +197,12 @@ func TestClientDirLeftovers(t *testing.T) {
 	foreign := os.Geteuid() == 0
 	if foreign {
 		mkdir(at(".alice.keygen-1008"), past)
-		if err := os.Chown(at(".alice.keygen-1008"), 4242, 4242); err != nil {
+		if err := os.Chown(at(".alice.keygen-1008"), 4242, 4242); errors.Is(err, syscall.EPERM) {
+			// Root without CAP_CHOWN (setpriv --inh-caps=-all
+			// --bounding-set=-all): the directory of another user
+			// cannot be made.
+			t.Skipf("uid 0 without CAP_CHOWN: %v", err)
+		} else if err != nil {
 			t.Fatal(err)
 		}
 	}

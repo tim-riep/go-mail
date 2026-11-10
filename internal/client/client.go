@@ -170,8 +170,8 @@ func (cfg *Config) check() error {
 	if err != nil {
 		return err
 	}
-	if insideDataDir(dir, cfg.Store.Root) {
-		return errInsideDataDir
+	if err := insideDataDir(dir, cfg.Store.Root); err != nil {
+		return err
 	}
 	cfg.Dir = dir
 	return nil
@@ -181,40 +181,83 @@ func (cfg *Config) check() error {
 // (Config.Dir).
 var errInsideDataDir = errors.New("client: the client directory must not be inside the data directory")
 
-// insideDataDir reports whether the path dir is root or lies below it,
-// compared as given and with symbolic links resolved as far as the paths
-// exist (resolveExisting; L3 of the review of the client directories,
-// task 20o point 3): a client directory named through a symbolic link
-// into the data directory, at dir itself or at one of its parents, is
-// inside it. Both paths are made absolute first (filepath.Abs; root is
-// Store.Root, an exported field that may hold a relative path). It fails
-// closed (task 24 package B, follow-up B2): an empty root, a path that
-// cannot be made absolute, and a path whose resolution fails
-// (resolveExisting returns an error) count as inside, so the caller
-// refuses the client directory with errInsideDataDir.
-func insideDataDir(dir, root string) bool {
+// Fixed causes of an uncheckedDirError that is not an errno.
+var (
+	errNoDataDir    = errors.New("no data directory")
+	errRelativePath = errors.New("relative path")
+	errUnexaminable = errors.New("a path component cannot be examined")
+)
+
+// uncheckedDirError rejects a client directory that cannot be checked
+// against the data directory (task 25 package B, N1 of the review of
+// follow-up B2). errors.Is matches it with errInsideDataDir, as the
+// check fails closed, and with its cause. Its message names the cause
+// instead of claiming the directory is inside the data directory, so an
+// operator who names a directory below one without search permission
+// reads "permission denied". The cause is the errno of the failure
+// (syscall.Errno: EACCES, ENAMETOOLONG, ELOOP and others) or one of the
+// fixed errors above, never the error of resolveExisting itself, which
+// may name parts of the path.
+type uncheckedDirError struct{ cause error }
+
+func (e *uncheckedDirError) Error() string {
+	return "client: cannot check that the client directory is outside the data directory: " + e.cause.Error()
+}
+
+func (e *uncheckedDirError) Unwrap() []error { return []error{errInsideDataDir, e.cause} }
+
+// unchecked returns the uncheckedDirError for the failure err.
+func unchecked(err error) error {
+	var errno syscall.Errno
+	switch {
+	case errors.As(err, &errno):
+		return &uncheckedDirError{errno}
+	case errors.Is(err, errNoDataDir), errors.Is(err, errRelativePath):
+		return &uncheckedDirError{err}
+	}
+	return &uncheckedDirError{errUnexaminable}
+}
+
+// insideDataDir returns errInsideDataDir if the path dir is root or lies
+// below it, compared as given and with symbolic links resolved as far as
+// the paths exist (resolveExisting; L3 of the review of the client
+// directories, task 20o point 3): a client directory named through a
+// symbolic link into the data directory, at dir itself or at one of its
+// parents, is inside it. Both paths are made absolute first
+// (filepath.Abs; root is Store.Root, an exported field that may hold a
+// relative path). It fails closed (task 24 package B, follow-up B2): an
+// empty root, a path that cannot be made absolute, and a path whose
+// resolution fails (resolveExisting returns an error) count as inside.
+// For these it returns an uncheckedDirError naming the cause, which
+// errors.Is also matches with errInsideDataDir (task 25 package B). A
+// path found inside as given is errInsideDataDir before any resolution.
+// It returns nil for a client directory outside the data directory.
+func insideDataDir(dir, root string) error {
 	if root == "" {
-		return true
+		return unchecked(errNoDataDir)
 	}
 	dir, err := filepath.Abs(dir)
 	if err != nil {
-		return true
+		return unchecked(err)
 	}
 	if root, err = filepath.Abs(root); err != nil {
-		return true
+		return unchecked(err)
 	}
 	if below(dir, root) {
-		return true
+		return errInsideDataDir
 	}
 	rd, err := resolveExisting(dir)
 	if err != nil {
-		return true
+		return unchecked(err)
 	}
 	rr, err := resolveExisting(root)
 	if err != nil {
-		return true
+		return unchecked(err)
 	}
-	return below(rd, rr)
+	if below(rd, rr) {
+		return errInsideDataDir
+	}
+	return nil
 }
 
 // below reports whether the absolute path p is base or lies below it.
@@ -251,12 +294,13 @@ func below(p, base string) bool {
 // could not create one below a directory it may not search either. At
 // most maxHops links are followed in all, as by the system (40 on
 // Linux); the link met after that is an error wrapping syscall.ELOOP, as
-// for a cycle of links. The error is for insideDataDir only and never
-// shown: it may name parts of p.
+// for a cycle of links. A relative p is errRelativePath. The error is for
+// insideDataDir only and never shown, as it may name parts of p;
+// insideDataDir reports only its errno (uncheckedDirError).
 func resolveExisting(p string) (string, error) {
 	const maxHops = 40
 	if !filepath.IsAbs(p) {
-		return "", errors.New("client: resolve a relative path")
+		return "", errRelativePath
 	}
 	split := func(s string) []string {
 		return strings.FieldsFunc(s, func(r rune) bool { return r == '/' || r == filepath.Separator })
