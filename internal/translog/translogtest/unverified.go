@@ -2,7 +2,8 @@
 // everything. It was translog.Unverified until task 07, which moved it
 // here: it is for tests and testenv only (the server side of testenv,
 // for ingest). No command uses it: task 15 built the real log into
-// server, ingest and ceremony, task 14 into the client, and the switch
+// server and ingest, tasks 15 (InitDev) and 15b (publish) into the
+// ceremony, task 14 into the client, and the switch
 // --insecure-no-log is a usage error everywhere. NewUnverified keeps
 // translog.ErrNoLog for a caller that did not accept running without a
 // log.
@@ -21,10 +22,12 @@ import (
 const NoIndex int64 = -1
 
 // Unverified accepts everything: every Append and Check method returns
-// nil without looking at its arguments, and the reading methods report
-// that there is no log. It comes from phase 1, when the programs ran
-// before the log was built. Since task 15 (server, ingest, ceremony) and
-// task 14 (client) every command runs with the verifying log of
+// nil without looking at its arguments. Head, Entry, InclusionProof and
+// ConsistencyProof report that there is no log (translog.ErrNoLog);
+// Refresh returns no head and Lookup no entries, both without an error.
+// It comes from phase 1, when the programs ran before the log was built.
+// Since tasks 15 and 15b (server, ingest, ceremony) and task 14 (client)
+// every command runs with the verifying log of
 // translog.Open, and no production build links this package
 // (cmd/gomail-ceremony build_test.go checks that for the ceremony). It
 // stays for tests that need a translog.Log where the log is not what

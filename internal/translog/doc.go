@@ -1389,7 +1389,10 @@
 // turns these 11 marks into comments: 0 sites.
 //
 // The column "check" is the call of phase 1 that each site made; every
-// replacement is built (rows without "(done)" by task 14).
+// replacement is built, by the task in the last column (the rows with
+// 14 alone by task 14; in the row of translogtest, tasks 14, 15 and 15b
+// removed the switch from gomailctl, gomail-server and gomail-ceremony,
+// and task 24 turned the marks into comments).
 //
 //	file, function                         check (phase 1)        replaced by (new interface)                          task
 //	client/client.go Open                  CheckFresh             Refresh(now), head into state.json, CheckFresh       14
@@ -1410,7 +1413,7 @@
 //	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc) (done by task 11)            11
 //	ceremony/initdev_dev.go InitDev        AppendPlatform         Append(KindPlatform, data) to the operator log        15 (done)
 //	ceremony/publish.go Publish            AppendPlatform         AppendPlatform to the operator log (OpenLog, D80)    15b (done)
-//	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15, 24 (marks)
+//	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   14, 15, 15b; 24 (marks)
 //
 // Not a tagged site, but changed by this design:
 //

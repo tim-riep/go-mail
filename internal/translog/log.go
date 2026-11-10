@@ -110,7 +110,10 @@ type Operator interface {
 	// note unopenable, see OpenHead).
 	//
 	// Built by task 11, under log/lock: the text of h.Note must be the
-	// text of h (ErrHead) with Options.Origin (ErrHead); its size at most
+	// text of h (ErrHead) with Options.Origin (ErrHead); no
+	// entries/<n+1>.rec and no head in heads/ above the committed size n
+	// (ErrConsistency, the refusal of SignHead step 1, backlog item 74:
+	// no head of a rolled-back tree.rec is published); its size at most
 	// the committed size and its hash the root of that size of the
 	// committed tree (ErrConsistency: the server publishes only heads of
 	// its own tree); no larger head in heads/ (ErrConsistency) and a time

@@ -13,10 +13,11 @@
 // witnesses) is Open (task 07, impl.go). The accepting placeholder of
 // phase 1, Unverified, lives in package translogtest for tests only; no
 // command uses it. The switch --insecure-no-log is gone (task 14 for
-// gomailctl, task 15 for gomail-server and gomail-ceremony): every
-// command runs with the log, and the switch is a usage error. ErrNoLog
-// and Warning remain for Unverified; no command returns ErrNoLog or
-// prints Warning, whose text still names the old switch.
+// gomailctl, task 15 for gomail-server, task 15b for gomail-ceremony):
+// every command runs with the log, and the switch is a usage error.
+// ErrNoLog remains for Unverified, which returns it; Warning is used by
+// nothing outside a test (see there). No command returns ErrNoLog or
+// prints Warning.
 //
 // The interface for milestone M1 (task 03) is laid out in doc.go: the
 // file format of data/log/, the entries and their duplicate keys, the
@@ -38,15 +39,19 @@ import (
 
 // ErrNoLog is returned when no verifying log is available and the caller
 // did not explicitly accept running without one: by
-// translogtest.NewUnverified without its switch, and by the reading
-// methods of Unverified. No command has a way to run without the log.
+// translogtest.NewUnverified without its switch, and by Head, Entry,
+// InclusionProof and ConsistencyProof of Unverified (its Refresh returns
+// no head and its Lookup no entries, both without an error). No command
+// has a way to run without the log.
 var ErrNoLog = errors.New("translog: no transparency log available; refusing to start")
 
-// Warning is the warning of a start without the log. No command prints
-// it: every command runs with the log, and the switch --insecure-no-log
-// that it names is a usage error everywhere. It remains, with ErrNoLog,
-// for translogtest.Unverified.
-const Warning = "WARNUNG: Ohne Transparenzlog (--insecure-no-log). Generationen, Widerrufe, Epochen, " +
+// Warning is the warning of a start without the log. Nothing prints it:
+// every command runs with the log, and the switch --insecure-no-log is a
+// usage error everywhere, so the text no longer names it.
+// translogtest.Unverified does not use it either (it returns ErrNoLog);
+// only the test of translogtest checks that it is not empty. It is kept
+// as the text for a start without the log, should one come back.
+const Warning = "WARNUNG: Ohne Transparenzlog. Generationen, Widerrufe, Epochen, " +
 	"Zertifikate und Adresszuordnungen werden NICHT gegen ein Log geprüft. Ein Server kann " +
 	"unbemerkt abweichende Zustände zeigen. Nur für die Entwicklung, nie mit echten Mails."
 

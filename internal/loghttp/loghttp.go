@@ -40,7 +40,7 @@
 // MinGap) or drops it (SignHead refuses), the head with the quorum gets
 // this one more try first; a new candidate has no cosignatures yet. Only
 // when that try fails as well is the head not published; the witnesses
-// then cosign the next candidate.
+// then cosign the next candidate, once SignHead yields one.
 //
 // # HTTP (package witness, "Protocol")
 //

@@ -647,6 +647,12 @@ func (o *operatorLog) PublishHead(h *Head) error {
 	if err != nil {
 		return err
 	}
+	// The same refusal as SignHead (backlog item 74): an entry or a head
+	// beyond the committed size means a rolled-back tree.rec, and a head
+	// of that tree is not published either.
+	if err := l.refuse(tree); err != nil {
+		return err
+	}
 	cur, err := l.getCur(tree)
 	if err != nil {
 		return err

@@ -74,6 +74,24 @@
 //	          head of that size (the witness fetches again)
 //	     405  wrong method on any path; 404 any other path
 //
+// 503 is no status of this protocol, but the server of package loghttp
+// answers it, with Connection: close, to POST /cosign and to GET /head
+// and GET /consistency without a candidate when it finds no free slot
+// of loghttp.MaxVerifying within loghttp.SlotWait. The witness treats a
+// 503 like every other unexpected status (ErrProtocol): the round
+// fails, is logged, and Serve tries again in the next round
+// (Config.Interval). A request whose connection the server closes (a
+// restart, a timeout of loghttp.NewHTTPServer) fails like every network
+// failure (ErrUnavailable), with the same retry in the next round. A
+// keep-alive connection closed while idle (loghttp.IdleTimeout) is
+// usually noticed by net/http before the next request, which then goes
+// on a new connection; after an answer with Connection: close net/http
+// does not reuse the connection at all. When the request meets the
+// close instead, http.Transport sends it again on a new connection if
+// nothing of it was written yet, or if it is a GET (GET /head,
+// GET /consistency) that got no byte of an answer; a POST /cosign that
+// was written fails the round like any other closed connection.
+//
 // Reading: the witness pulls and posts back (the server needs no route
 // to the witness and the witness opens no port). The alternative, the
 // server pushing heads to a witness endpoint as in the C2SP witness
