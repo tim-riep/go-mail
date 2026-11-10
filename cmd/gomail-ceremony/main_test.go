@@ -1149,8 +1149,12 @@ func TestPublishReplaceWitnesses(t *testing.T) {
 	if code := tt.run("publish", "--from", succ, "--data", dataDir, "--pin", pin2Path, "--replace-witnesses"); code != 0 {
 		t.Fatal(tt.msgs.String())
 	}
-	if o := tt.out.String(); !strings.Contains(o, "bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3)") {
-		t.Fatalf("message %q", o)
+	// Exactly, the line once and before the closing lines (review of task
+	// 25 A3, N2).
+	if o, want := tt.out.String(), "platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
+		succ+" in "+dataDir+" veröffentlicht und ins Log eingetragen.\n"+
+		"Den Server jetzt mit diesem Pin starten: gomail-server serve --pin "+pin2Path+" ...\n"; o != want {
+		t.Fatalf("stdout\n%q, want\n%q", o, want)
 	}
 	w, err := witness.DecodeWitnesses(mustRead(t, filepath.Join(dataDir, "platform", "witnesses.rec")))
 	if err != nil || w.Min != 2 || len(w.List) != 3 {

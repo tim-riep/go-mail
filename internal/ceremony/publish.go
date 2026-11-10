@@ -122,34 +122,59 @@ func readExport(from string) (map[string]platformFile, []byte, error) {
 	return files, wrec, nil
 }
 
-// readData reads platform/<name> of the data directory; a missing file
-// is (nil, nil).
-func readData(st *store.Store, name string) ([]byte, error) {
-	b, err := st.ReadPlatformFile(name)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
-	return b, err
-}
+// errChanged reports an entry of data/platform/ that another process
+// replaced while readEntry read it (review of task 24 A, F3): Publish
+// refuses instead of taking it for the export's file.
+var errChanged = errors.New("ceremony: an entry of platform/ changed while publish read it")
 
 // readEntry reads platform/<name> of the data directory for the
-// comparison with the export's file of that name (backlog 54 and 55): it
-// looks at the entry itself first (os.Lstat). A missing entry is
-// (nil, "", nil). A symbolic link, a dangling one as well, is
-// (nil, "a symbolic link", nil) and is never read; a regular file with
-// another name besides (a hard link, Nlink > 1, not counting temporary
-// files of store in platform/ that a crash left) is
-// (nil, "a hard link", nil). Whatever such an entry points to, it is
-// never taken for the export's file (its target, or the file under its
-// other name, can change after publish, and with it what server and
-// clients read); it is replaced by the export's file when freeName frees
-// the name and refused otherwise (linkErr), before anything is written.
-// Every other entry is read by readData: a regular file, or
-// store.ErrNotRegular for a FIFO, a device or a directory, refused
-// before anything is written (none of them is replaced: a directory
-// cannot be renamed over). witnesses.rec is not looked at here.
+// comparison with the export's file of that name (backlog 54 and 55),
+// platform/witnesses.rec for the comparison with the pin, and a
+// succession that succChain.need relogs from data/platform/ (review of
+// task 25 A, H5): it looks at the entry itself first (os.Lstat). A
+// missing entry is (nil, "", nil). A symbolic link, a dangling one as
+// well, is (nil, linkSymbolic, nil) and is never read; a regular file
+// with another name besides (a hard link, Nlink > 1) is (nil, linkHard,
+// nil). Temporary files of store that a crash left in platform/ are no
+// other names here: Publish removes them under the server lock before
+// (runPublish), so any name besides counts (review of task 24 A2, N1).
+// Whatever such an entry
+// points to, it is never taken for the export's file (its target, or the
+// file under its other name, can change after publish, and with it what
+// server and clients read); it is replaced by the export's file when
+// freeName frees the name and refused otherwise (linkErr), before
+// anything is written. Every other entry is opened with
+// store.OpenRegular and read from that descriptor: a regular file, or
+// store.ErrNotRegular for a FIFO, a device or a directory, refused before
+// anything is written (none of them is replaced: a directory cannot be
+// renamed over). The descriptor must be the file os.Lstat saw, and after
+// the read the name must still be that file and no link (os.SameFile on
+// both sides, review of task 24 A, F3): an entry replaced in between,
+// also by a symbolic link to the same file, is errChanged, never taken
+// for the export's file. The hard link check uses the last os.Lstat; a
+// failure of that os.Lstat other than a missing name is reported with
+// its own error (review of task 25 A).
 func readEntry(st *store.Store, name string) ([]byte, string, error) {
-	fi, err := os.Lstat(st.Path("platform", name))
+	b, link, err := lreadEntry(st, name, "publish")
+	if link != "" {
+		b = nil
+	}
+	return b, link, err
+}
+
+// linkSymbolic and linkHard are the kinds of link lreadEntry reports.
+const (
+	linkSymbolic = "a symbolic link"
+	linkHard     = "a hard link"
+)
+
+// lreadEntry is readEntry that also returns the content of a hard link
+// (link linkHard), for checkDataPlatform, which checks every regular
+// file of platform/ whatever its other names. at names the hook points
+// ("<at>-open <name>", "<at>-recheck <name>", for tests).
+func lreadEntry(st *store.Store, name, at string) ([]byte, string, error) {
+	p := st.Path("platform", name)
+	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, "", nil
 	}
@@ -157,16 +182,68 @@ func readEntry(st *store.Store, name string) ([]byte, string, error) {
 		return nil, "", err
 	}
 	if fi.Mode()&fs.ModeSymlink != 0 {
-		return nil, "a symbolic link", nil
+		return nil, linkSymbolic, nil
 	}
-	b, err := readData(st, name)
-	if err != nil || b == nil {
-		return b, "", err
+	if err := hook(at + "-open " + name); err != nil {
+		return nil, "", err
 	}
-	if n := nlink(fi); n > 1 && n > 1+tempNames(st, fi) {
-		return nil, "a hard link", nil
+	f, ofi, err := store.OpenRegular(p)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, "", changedErr(p, "is gone")
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+	if !os.SameFile(fi, ofi) {
+		return nil, "", changedErr(p, "was replaced before it was opened")
+	}
+	b, err := readLimited(f, ofi, name)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := hook(at + "-recheck " + name); err != nil {
+		return nil, "", err
+	}
+	// os.Lstat of a symbolic link describes the link itself, never the
+	// opened file: a link now is refused here as well.
+	fi, err = os.Lstat(p)
+	if errors.Is(err, fs.ErrNotExist) || err == nil && !os.SameFile(fi, ofi) {
+		return nil, "", changedErr(p, "was replaced while it was read")
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("ceremony: looking at %s again after reading it: %w", p, err)
+	}
+	if nlink(fi) > 1 {
+		return b, linkHard, nil
 	}
 	return b, "", nil
+}
+
+// changedErr reports the entry p that changed while readEntry read it,
+// or, for checkDataPlatform, after platform/ was listed (errChanged);
+// how says what and when.
+func changedErr(p, how string) error {
+	return fmt.Errorf("%w: %s %s; another process writes platform/ during publish: stop it, look at the entry and run the same publish again",
+		errChanged, p, how)
+}
+
+// readLimited reads the open regular file f (fi its Stat, name for
+// messages) as store.ReadFileLimited does: at most store.MaxRecordFile
+// bytes, the size checked before anything is allocated.
+func readLimited(f *os.File, fi fs.FileInfo, name string) ([]byte, error) {
+	const limit = store.MaxRecordFile
+	if fi.Size() > limit {
+		return nil, fmt.Errorf("%w: %s has %d bytes, at most %d", store.ErrTooLarge, name, fi.Size(), limit)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%w: %s grew beyond %d bytes", store.ErrTooLarge, name, limit)
+	}
+	return b, nil
 }
 
 // nlink returns the number of names of the file fi from its system data
@@ -185,26 +262,6 @@ func nlink(fi fs.FileInfo) uint64 {
 		return 1
 	}
 	return n.Uint()
-}
-
-// tempNames counts the temporary files of store (".tmp-") in platform/
-// that are the file fi: a crash of store.CreateFileAtomic between its
-// link and its remove leaves one, which is no foreign name.
-func tempNames(st *store.Store, fi fs.FileInfo) uint64 {
-	ents, err := os.ReadDir(st.Path("platform"))
-	if err != nil {
-		return 0
-	}
-	var k uint64
-	for _, e := range ents {
-		if !strings.HasPrefix(e.Name(), ".tmp-") || !e.Type().IsRegular() {
-			continue
-		}
-		if ti, err := os.Lstat(st.Path("platform", e.Name())); err == nil && os.SameFile(fi, ti) {
-			k++
-		}
-	}
-	return k
 }
 
 // unknownGen reports a file that names an identity generation the pin
@@ -229,8 +286,10 @@ func unknownGen(name string, g, pinGen uint32) error {
 // files (witnesses.rec, temporary files) are not looked at here, nor are
 // entries that are no regular files (a symbolic link is not followed):
 // under a name of the export the comparison of runPublish never takes
-// one, nor a hard link, for the export's file (readEntry). The
-// successions in the log are checked by checkDataLog.
+// one, nor a hard link, for the export's file (readEntry). A regular
+// file is read without following a link (lreadEntry); one replaced
+// meanwhile, by a link as well, is errChanged. The successions in the
+// log are checked by checkDataLog.
 func checkDataPlatform(st *store.Store, pin *store.PlatformPin, known map[uint32]ed25519.PublicKey) error {
 	ents, err := os.ReadDir(st.Path("platform"))
 	if err != nil {
@@ -247,9 +306,19 @@ func checkDataPlatform(st *store.Store, pin *store.PlatformPin, known map[uint32
 		if f.ext == "pub" && f.role != "identity" {
 			continue
 		}
-		data, err := st.ReadPlatformFile(f.name)
+		// Read without following a link (lreadEntry; review of task 25 A,
+		// H5): an entry that the listing showed as a regular file and that
+		// is a symbolic link or gone now changed during publish, after the
+		// listing (review of task 25 A2, H4: the message says so).
+		data, link, err := lreadEntry(st, f.name, "check")
 		if err != nil {
 			return err
+		}
+		if link == linkSymbolic {
+			return changedErr(st.Path("platform", f.name), "was replaced by a symbolic link after platform/ was listed")
+		}
+		if data == nil {
+			return changedErr(st.Path("platform", f.name), "was removed after platform/ was listed")
 		}
 		switch f.ext {
 		case "pub":
@@ -345,6 +414,15 @@ func witnessFile(where string, data []byte, pin *store.PlatformPin) (*witness.Wi
 	return w, sameWitnesses(w.List, w.Min, pinWitnesses(pin), pin.MinWitnesses), nil
 }
 
+// witnessLinkErr reports a symbolic or hard link (readEntry says which)
+// as platform/witnesses.rec without ReplaceWitnesses: never taken for the
+// pin's witnesses (its target, or the file under its other name, can
+// change after publish), refused before anything is written.
+func witnessLinkErr(st *store.Store, link string) error {
+	return fmt.Errorf("%w: %s is %s, never taken for the witnesses of the pin; nothing written: look at the link and remove it by hand, or publish --replace-witnesses (ReplaceWitnesses) replaces it by the pin's",
+		store.ErrExists, st.Path("platform", WitnessesFile), link)
+}
+
 // errWitnessFile reports a witnesses.rec that differs from the pin:
 // translog.ErrMismatch, never a silent replacement (task 15b point 1).
 func errWitnessFile(where, hint string) error {
@@ -370,7 +448,9 @@ const replaceHint = "; publish --replace-witnesses (ReplaceWitnesses) replaces i
 //   - in data/platform/ without a valid log entry (a crash between file
 //     and log entry): only if it verifies against the pin's identity
 //     list (checkDataSucc) and its own predecessor is there by the same
-//     rule; Publish then logs it first (relog).
+//     rule; Publish then logs it first (relog). It is read as a name of
+//     the export is (readEntry): a symbolic or hard link there is never
+//     logged through, Publish refuses before anything is written.
 //
 // A file in data/platform/ alone never counts. Without the succession
 // an older pin cannot follow the chain: a client whose pin ends below g
@@ -416,9 +496,16 @@ func (c *succChain) need(g uint32, by string) error {
 		if len(es) > 0 {
 			break
 		}
-		data, err := readData(c.st, name)
+		// Read as the names of the export are (readEntry; review of task
+		// 25 A, H5): what is logged is what was read and checked, and a
+		// symbolic or hard link is never logged through.
+		data, link, err := readEntry(c.st, name)
 		if err != nil {
 			return err
+		}
+		if link != "" {
+			return fmt.Errorf("%w: %s is %s, never logged through it: %s needs %s, which is neither in the export nor a valid entry of the log; nothing written: look at the link and remove it by hand, then publish the export of the succession to generation %d",
+				translog.ErrPrerequisite, c.st.Path("platform", name), link, by, name, g)
 		}
 		if data == nil {
 			return fmt.Errorf("%w: %s needs %s, which is neither in the export nor a valid entry of the log: publish the export of the succession to generation %d first",
@@ -470,6 +557,36 @@ func OpenLog(st *store.Store, pin *store.PlatformPin) (translog.Log, error) {
 	return l, nil
 }
 
+// errPlatformLink reports platform/ of the data directory as a symbolic
+// link (review of task 25 A, L1).
+var errPlatformLink = errors.New("ceremony: platform/ of the data directory is a symbolic link")
+
+// checkPlatformDir refuses platform/ of the data directory when it is a
+// symbolic link (os.Lstat), whatever it points to, before Publish
+// removes or writes anything: gomail-server init makes it a directory,
+// and publish reaches no entry of platform/ through a link. The message
+// names where the link points (os.Readlink, quoted: someone else chose
+// it), or the link alone when os.Readlink fails (review of task 25 A2,
+// H3). A missing platform/, or one that cannot be looked at, is refused
+// here as well, with the error of os.Lstat in context (H6): no step
+// after it works without platform/ (its listing fails), and none of
+// them would name it.
+func checkPlatformDir(st *store.Store) error {
+	p := st.Path("platform")
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return fmt.Errorf("ceremony: looking at platform/: %w", err)
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		const hint = "; nothing removed or written: look at the link and where it points, and put the directory itself in its place"
+		if target, rerr := os.Readlink(p); rerr == nil {
+			return fmt.Errorf("%w: %s points to %q"+hint, errPlatformLink, p, target)
+		}
+		return fmt.Errorf("%w: %s"+hint, errPlatformLink, p)
+	}
+	return nil
+}
+
 func runPublish(opts PublishOptions) error {
 	if opts.From == "" || opts.Data == nil || opts.Pin == nil {
 		return fmt.Errorf("%w: From, Data and Pin are required", ErrOptions)
@@ -493,6 +610,24 @@ func runPublish(opts PublishOptions) error {
 	defer release()
 	if err := hook("publish-lock"); err != nil {
 		return err
+	}
+	// Temporary files (".tmp-") in platform/ are left by a crash: Publish
+	// is the only program that writes platform/ of a data directory in
+	// use (gomail-server init writes witnesses.rec into an empty one), and
+	// it holds the server lock, which keeps out a second Publish. They are
+	// removed first, so that a crash of store.CreateFileAtomic between its
+	// link and its remove leaves no second name that readEntry would take
+	// for a hard link, and so that no ".tmp-" name can hide one (review of
+	// task 24 A2, N1): every other name of a file counts from here on.
+	// Each name removed is reported (TempRemoved; review of task 25 A,
+	// L2), also when Publish refuses afterwards. platform/ itself must be
+	// no symbolic link (checkPlatformDir), or the files would be removed
+	// and written where it points.
+	if err := checkPlatformDir(st); err != nil {
+		return err
+	}
+	if err := store.RemoveTempReport(st.Path("platform"), opts.TempRemoved); err != nil {
+		return fmt.Errorf("ceremony: removing temporary files of platform/: %w", err)
 	}
 
 	// Identity keys: exactly the pin's list. A generation above it is
@@ -520,12 +655,20 @@ func runPublish(opts PublishOptions) error {
 			return errWitnessFile(where, "")
 		}
 	}
-	haveW, err := readData(st, WitnessesFile)
+	// witnesses.rec is a file of the export as well (Init writes it): a
+	// symbolic or hard link there is never taken for the pin's witnesses
+	// (readEntry), as under the other names of the export. It counts as a
+	// working copy that differs: replaced with ReplaceWitnesses (the rule
+	// that frees this name), refused otherwise before anything is written.
+	haveW, wlink, err := readEntry(st, WitnessesFile)
 	if err != nil {
 		return err
 	}
+	if wlink != "" && !opts.ReplaceWitnesses {
+		return witnessLinkErr(st, wlink)
+	}
 	// oldW is the working copy to replace (ReplaceWitnesses), nil if
-	// none is replaced.
+	// none is replaced or if it is a link (whose content is not read).
 	var oldW *witness.Witnesses
 	if haveW != nil {
 		where := "platform/" + WitnessesFile
@@ -700,12 +843,13 @@ func runPublish(opts PublishOptions) error {
 		}
 	}
 
-	// Existing files: identical regular files are skipped, unless a valid
-	// entry of the log holds the name with other content
-	// (sameButLogged); one with other content, and a symbolic or hard link
-	// whatever it points to (readEntry), is replaced only when its name is
-	// free in the log or its valid entry is the export's file (freeName),
-	// and refused otherwise, before anything is written.
+	// Existing files: identical regular files are skipped, and missing
+	// ones are written, unless a valid entry of the log holds the name
+	// with other content (loggedOther); one with other content, and a
+	// symbolic or hard link whatever it points to (readEntry), is
+	// replaced only when its name is free in the log or its valid entry is
+	// the export's file (freeName), and refused otherwise, before
+	// anything is written.
 	names := make([]string, 0, len(files))
 	for n := range files {
 		names = append(names, n)
@@ -719,11 +863,14 @@ func runPublish(opts PublishOptions) error {
 			return err
 		}
 		if have == nil && link == "" {
+			if err := loggedOther(opts.From, st, log, files[n], "is missing"); err != nil {
+				return err
+			}
 			todo = append(todo, n)
 			continue
 		}
 		if link == "" && bytes.Equal(have, files[n].data) {
-			if err := sameButLogged(opts.From, st, log, files[n]); err != nil {
+			if err := loggedOther(opts.From, st, log, files[n], "is the same as "+filepath.Join(opts.From, "platform", n)); err != nil {
 				return err
 			}
 			continue
@@ -784,8 +931,9 @@ func runPublish(opts PublishOptions) error {
 		// The working copy of the server, from the pin (the export's
 		// witnesses.rec is the same, checked above): written when the
 		// data directory has none, or replaced on purpose
-		// (ReplaceWitnesses, task 15f point 2), atomically and under the
-		// server lock, after every check passed.
+		// (ReplaceWitnesses, task 15f point 2; a link as well), atomically
+		// and under the server lock, after every check passed. The rename
+		// replaces a link itself, never its target.
 		w := wrec
 		if w == nil {
 			if w, err = checkTrust(pin.Origin, pinWitnesses(pin), pin.MinWitnesses); err != nil {
@@ -795,8 +943,12 @@ func runPublish(opts PublishOptions) error {
 		if err := store.WriteFileAtomic(st.Path("platform", WitnessesFile), w); err != nil {
 			return err
 		}
+		after := &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}
 		if oldW != nil && opts.WitnessesReplaced != nil {
-			opts.WitnessesReplaced(oldW, &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses})
+			opts.WitnessesReplaced(oldW, after)
+		}
+		if wlink != "" && opts.WitnessesLinkReplaced != nil {
+			opts.WitnessesLinkReplaced(wlink, after)
 		}
 	}
 	if err := hook("publish-log"); err != nil {
@@ -910,7 +1062,7 @@ func existsErr(from string, st *store.Store, f platformFile, why string) error {
 	return fmt.Errorf("%w: %w: %s", store.ErrExists, translog.ErrDuplicate, what)
 }
 
-// validKept ends the reason of freeName and sameButLogged for a name
+// validKept ends the reason of freeName and loggedOther for a name
 // with a valid entry of the log with other content than the export's.
 const validKept = ": a valid entry is never replaced"
 
@@ -936,6 +1088,10 @@ func linkErr(from string, st *store.Store, f platformFile, link, why string) err
 			cert = store.PlatformFileName(f.role, f.gen, "cert")
 		}
 		hint = fmt.Sprintf("look at the link; publish the export that holds the logged %s, which replaces the link, or, if that entry is the thief's, reissue under the next generation (RUNBOOK 7.3)", cert)
+		if f.ext == "succ" {
+			// A succession is not reissued under another generation.
+			hint = fmt.Sprintf("look at the link; publish the export that holds the logged succession %s, which replaces the link, or, %s", cert, succThiefHint)
+		}
 	}
 	done := "nothing written"
 	if why == written {
@@ -949,12 +1105,23 @@ func linkErr(from string, st *store.Store, f platformFile, link, why string) err
 	return fmt.Errorf("%w: %w: %s", store.ErrExists, translog.ErrDuplicate, what)
 }
 
-// sameButLogged refuses a certificate or succession of the data
-// directory equal to the export's file f whose name has a valid entry of
-// the log with other content (review of task 24 A, F4), before anything
-// is written: logging f would fail as a duplicate only after other files
-// are written. A public key goes with its certificate.
-func sameButLogged(from string, st *store.Store, log translog.Log, f platformFile) error {
+// succThiefHint completes the remedy of linkErr and loggedOther for a
+// succession whose name has a valid entry of the log: unlike a
+// certificate, a succession is not reissued under the next generation,
+// and a valid one the operator did not make means a compromised
+// identity or root (review of task 25 A).
+const succThiefHint = "if that entry is not from a ceremony of your own, decide by RUNBOOK 7.3.1 (identity or root compromised)"
+
+// loggedOther refuses a certificate or succession f of the export whose
+// name has a valid entry of the log with other content, when
+// platform/<name> of the data directory is equal to f (review of task 24
+// A, F4) or missing (review of task 24 A2, N3); state says which ("is
+// the same as <export file>", "is missing"). It refuses before anything
+// is written: logging f would fail as a duplicate only after f and
+// other files are written. A public key goes with its certificate: the
+// export holds <role>-<g>.cert with every <role>-<g>.pub, and that name
+// is checked on its own.
+func loggedOther(from string, st *store.Store, log translog.Log, f platformFile, state string) error {
 	if f.ext == "pub" {
 		return nil
 	}
@@ -965,8 +1132,14 @@ func sameButLogged(from string, st *store.Store, log translog.Log, f platformFil
 	if len(es) == 0 || len(es) == 1 && bytes.Equal(es[0].Content, f.data) {
 		return nil
 	}
-	return fmt.Errorf("%w: %w: %s is the same as %s of the export, and %s is a valid entry of the log under this pin with other content%s",
-		store.ErrExists, translog.ErrDuplicate, st.Path("platform", f.name), filepath.Join(from, "platform", f.name), f.name, validKept)
+	hint := fmt.Sprintf("publish the export that holds the logged %s or, if that entry is the thief's, reissue under the next generation (RUNBOOK 7.3)", f.name)
+	if f.ext == "succ" {
+		// A succession is not reissued under another generation (review
+		// of task 25 A).
+		hint = fmt.Sprintf("publish the export that holds the logged succession %s or, %s", f.name, succThiefHint)
+	}
+	return fmt.Errorf("%w: %w: %s %s, and %s is a valid entry of the log under this pin with other content than %s of the export%s; nothing written: %s",
+		store.ErrExists, translog.ErrDuplicate, st.Path("platform", f.name), state, f.name, filepath.Join(from, "platform", f.name), validKept, hint)
 }
 
 // checkRevocations checks field 7 of pin against the log (D93;

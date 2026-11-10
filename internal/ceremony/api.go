@@ -117,12 +117,15 @@ package ceremony
 //	              witnesses.rec, the server's working copy, only when the
 //	              data directory has none, and it must equal the pin's
 //	              witnesses and quorum; replaced by the pin's only with
-//	              ReplaceWitnesses) and one log entry per .cert and
+//	              ReplaceWitnesses, as is a symbolic or hard link there)
+//	              and one log entry per .cert and
 //	              .succ, in the order successions by generation, then
 //	              certificates by role and generation (translog doc.go
 //	              "Validity rules"); a succession of data/platform/ that
 //	              the export depends on and that is not logged yet is
-//	              logged first
+//	              logged first; temporary files (".tmp-") that a crash
+//	              left in data/platform/ are removed first, under the
+//	              server lock
 //
 // # --dev from now on
 //
@@ -678,8 +681,26 @@ type PublishOptions struct {
 	ReplaceWitnesses bool
 	// WitnessesReplaced, when not nil, is called once witnesses.rec was
 	// replaced, with the working copy before and after (for the message
-	// of the command line). It is not called when nothing was replaced.
+	// of the command line). It is not called when nothing was replaced,
+	// nor when witnesses.rec is written for the first time. Both
+	// callbacks are called right after the replacement, before the log
+	// entries are appended: also when Publish fails afterwards (review of
+	// task 25 A2, N2).
 	WitnessesReplaced func(before, after *witness.Witnesses)
+	// WitnessesLinkReplaced, when not nil, is called once witnesses.rec
+	// was a symbolic or hard link (link says which: "a symbolic link",
+	// "a hard link") and was replaced with ReplaceWitnesses by a regular
+	// file with the witnesses and the quorum after, the pin's. A symbolic
+	// link is never read, and the content of a hard link is never taken
+	// for a working copy, so there is no working copy before;
+	// WitnessesReplaced is not called then (review of task 25 A, H4).
+	WitnessesLinkReplaced func(link string, after *witness.Witnesses)
+	// TempRemoved, when not nil, is called with the name of every
+	// temporary file (".tmp-", left by a crash of an atomic write) that
+	// Publish removes from platform/ of Data under the server lock before
+	// its checks, also when it refuses afterwards (review of task 25 A,
+	// L2: the operator sees what was removed).
+	TempRemoved func(name string)
 	// IngestGap, when not nil, is called for every ingest generation gen
 	// that Pin revokes at time at (by its own element of field 7 or by
 	// the element of the identity generation that certified it) whose
@@ -715,6 +736,11 @@ type PublishOptions struct {
 // a server runs on the data directory it refuses with ErrServer, and no
 // server starts meanwhile. Before anything is written it checks
 //
+//   - platform/ of the data directory itself: a symbolic link, and a
+//     missing platform/, are refused before anything is removed or
+//     written; then the temporary files
+//     (".tmp-") in it are removed under the server lock, each named by
+//     TempRemoved;
 //   - platform/ of the data directory against Pin as gomail-server does
 //     at its start (Q10 point 5): an identity generation above the pin's
 //     (identity-<g>.pub, identity-<g>.succ, a certificate issued by it)

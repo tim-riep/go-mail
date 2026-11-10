@@ -198,13 +198,19 @@
 // that does not decode, does not verify with the pin, certifies another
 // key than its name says or names an identity generation the pin does
 // not know, and a foreign identity-<g>.pub): the operator removes such a
-// file by hand. A symbolic link under a name of the export is never
-// taken for the export's file, whatever it points to and also when it
-// dangles: publish replaces the link itself (not its target) when the
-// name is free by the rules above, and refuses it otherwise, naming the
-// link, before it writes anything. admin-rotate
-// alone does not end a leaked admin key (it can still assign with a
-// backdated valid_from): revoke does.
+// file by hand. A symbolic link (also a dangling one) or a hard link
+// under a name of the export, witnesses.rec included, is never taken for
+// the export's file, whatever it points to: publish replaces the link
+// itself (not its target, nor the file under its other name) when the
+// name is free by the rules above (witnesses.rec: with
+// --replace-witnesses, which names the replaced link), and refuses it
+// otherwise, naming the link, before it writes anything. A succession of
+// data/platform/ that publish would log first is never logged through
+// such a link; publish refuses. platform/ itself as a symbolic link is
+// refused before anything is removed or written; temporary files
+// (.tmp-) in it are removed first and named on standard error.
+// admin-rotate alone does not end a leaked admin key (it can still
+// assign with a backdated valid_from): revoke does.
 //
 // Targets: Linux, macOS and the BSDs control the terminal (tty_unix.go);
 // on the other systems the program builds, but the six commands refuse
@@ -2529,12 +2535,22 @@ func (e *env) publish(args []string) int {
 	if err != nil {
 		return e.fail(err)
 	}
-	var replaced, revoked string
+	var revoked string
 	var gaps []string
 	opts := ceremony.PublishOptions{From: *from, Data: st, Pin: pin, ReplaceWitnesses: *replaceW,
+		// Named at once, also when publish fails afterwards (review of
+		// task 25 A2, N2): witnesses.rec is replaced before the log
+		// entries are appended, and stays replaced.
 		WitnessesReplaced: func(before, after *witness.Witnesses) {
-			replaced = fmt.Sprintf("platform/witnesses.rec ersetzt: bisher Quorum %d von %d (%s), jetzt Quorum %d von %d (%s) wie im Pin.\n",
-				before.Min, len(before.List), witnessNames(before.List), after.Min, len(after.List), witnessNames(after.List))
+			fmt.Fprint(e.stdout, replacedText(before, after))
+		},
+		WitnessesLinkReplaced: func(link string, after *witness.Witnesses) {
+			fmt.Fprint(e.stdout, linkReplacedText(link, after))
+		},
+		// Named at once on standard error, also when publish refuses
+		// afterwards (RUNBOOK 7.3: nothing is removed unseen).
+		TempRemoved: func(name string) {
+			fmt.Fprintf(e.stderr, "platform/%s: Rest eines abgebrochenen Schreibvorgangs entfernt.\n", printableName(name))
 		},
 		RevocationsChecked: func(h *translog.Head) {
 			revoked = fmt.Sprintf("Widerrufe des Pins (%d) geprüft gegen den neuesten bestätigten Kopf (Größe %d, Zeit %d).\n",
@@ -2564,7 +2580,6 @@ func (e *env) publish(args []string) int {
 		}
 		return e.fail(err)
 	}
-	fmt.Fprint(e.stdout, replaced)
 	fmt.Fprint(e.stdout, revoked)
 	for _, g := range gaps {
 		fmt.Fprint(e.stderr, g)
@@ -2572,6 +2587,66 @@ func (e *env) publish(args []string) int {
 	fmt.Fprintf(e.stdout, "%s in %s veröffentlicht und ins Log eingetragen.\n", *from, *data)
 	fmt.Fprintf(e.stdout, "Den Server jetzt mit diesem Pin starten: gomail-server serve --pin %s ...\n", *pinPath)
 	return 0
+}
+
+// replacedText is the line of publish --replace-witnesses for a
+// platform/witnesses.rec replaced by the pin's (RUNBOOK 7.2: old and new
+// quorum); without a working copy before (nil) it names the new one only.
+func replacedText(before, after *witness.Witnesses) string {
+	if before == nil {
+		return fmt.Sprintf("platform/witnesses.rec ersetzt: jetzt %s.\n", quorumText(after))
+	}
+	return fmt.Sprintf("platform/witnesses.rec ersetzt: bisher Quorum %d von %d (%s), jetzt %s.\n",
+		before.Min, len(before.List), witnessNames(before.List), quorumText(after))
+}
+
+// linkReplacedText is the line of publish --replace-witnesses for a
+// platform/witnesses.rec that was a link (ceremony
+// PublishOptions.WitnessesLinkReplaced): a symbolic link is never read,
+// and the content of a hard link is never taken for a working copy
+// (review of task 25 A2, H5: it is read, so the line does not say "nicht
+// gelesen"), so there is no old quorum to name.
+func linkReplacedText(link string, after *witness.Witnesses) string {
+	how := "der Link wurde nicht gelesen"
+	if link == "a hard link" {
+		how = "sein Inhalt wurde nicht übernommen"
+	}
+	return fmt.Sprintf("platform/witnesses.rec war %s und ist durch die Zeugen des Pins ersetzt (%s, ein bisheriges Quorum gibt es nicht): jetzt %s.\n",
+		linkText(link), how, quorumText(after))
+}
+
+// quorumText describes the witnesses w of the pin after a replacement
+// of platform/witnesses.rec ("Quorum k von n (names) wie im Pin").
+func quorumText(w *witness.Witnesses) string {
+	if w == nil {
+		return "Zeugen und Quorum wie im Pin"
+	}
+	return fmt.Sprintf("Quorum %d von %d (%s) wie im Pin", w.Min, len(w.List), witnessNames(w.List))
+}
+
+// linkText names the kind of link that ceremony reports for
+// platform/witnesses.rec ("a symbolic link", "a hard link").
+func linkText(link string) string {
+	switch link {
+	case "a symbolic link":
+		return "ein symbolischer Link"
+	case "a hard link":
+		return "ein harter Link"
+	}
+	return "ein Link"
+}
+
+// printableName returns the file name n as it is when it holds only
+// printable ASCII characters other than the space, and quoted otherwise:
+// a name of platform/ chosen by someone else reaches the terminal
+// without control characters.
+func printableName(n string) string {
+	for i := 0; i < len(n); i++ {
+		if n[i] <= ' ' || n[i] > '~' {
+			return strconv.Quote(n)
+		}
+	}
+	return n
 }
 
 // witnessNames returns the names of ws, comma separated (names are

@@ -363,7 +363,17 @@ func ReadFileLimited(path string, max int64) ([]byte, error) {
 }
 
 // RemoveTemp deletes temporary files left by an interrupted write in dir.
-func RemoveTemp(dir string) error {
+func RemoveTemp(dir string) error { return RemoveTempReport(dir, nil) }
+
+// RemoveTempReport is RemoveTemp that calls removed, when not nil, with
+// the name of every temporary file it removed (gomail-ceremony publish
+// names them: review of task 25 A, L2). A temporary file is an entry of
+// dir that is a regular file when dir is listed and whose name starts
+// with ".tmp-". Its name is removed with unlink (removeName), never with
+// rmdir: a directory that another process put under the name meanwhile
+// is not removed, even when empty, and is an error (review of task 25 A,
+// H2). A name that is gone meanwhile is skipped and not reported.
+func RemoveTempReport(dir string, removed func(name string)) error {
 	entries, err := ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -371,16 +381,22 @@ func RemoveTemp(dir string) error {
 		}
 		return err
 	}
-	removed := false
+	gone := false
 	for _, e := range entries {
 		if len(e.Name()) > len(tmpPrefix) && e.Name()[:len(tmpPrefix)] == tmpPrefix && e.Type().IsRegular() {
-			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := removeName(filepath.Join(dir, e.Name())); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
 				return err
 			}
-			removed = true
+			gone = true
+			if removed != nil {
+				removed(e.Name())
+			}
 		}
 	}
-	if removed {
+	if gone {
 		return SyncDir(dir)
 	}
 	return nil
