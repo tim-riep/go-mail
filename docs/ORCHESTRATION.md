@@ -422,3 +422,14 @@ Anweisung des Auftraggebers: „Fahre fort bis morgen 9 Uhr“. M1 ist bedingt e
   3. Zwei-Maschinen-Test über NFSv4 mit `scripts/two-host-test.sh`. Damit wird E erfüllt.
   4. Liste nach M1: jetzt 83 Nummern, nach dem Merge von 25 die neuen Nr. 72 bis 83. Größere Punkte daraus: `platform/` über `os.Root` (Nr. 72), Verbindungsgrenze und Rate je Quelle in `loghttp` (Nr. 7, Rest).
   5. Format-Restlücke F2 aus 21b (Haltepunkt) und die offenen Fragen.
+
+## 10. Fortsetzung bis 11.11.2026, 06:00 Uhr MEZ (Anweisung 10.11.: „Du entscheidest mache weiter bis morgen 6 Uhr“)
+
+Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit fünf Paketen aus der Liste nach M1, alle ohne offene Frage, ohne Entscheidung des Auftraggebers und ohne Formatänderung (`docs/tasks/26-nach-m1-nacht2.md`). Anhalten per geplanter Aufgabe um 06:00 MEZ (05:00 UTC); dazu ein stündlicher Check-in, falls der Container wieder steht.
+- 08:18 UTC: Volllauf `fr-n25` fortgesetzt. Vorher habe ich die Marken für gofmt, vet, `internal/ceremony` und `cmd/gomail-ceremony` gelöscht, damit diese Schritte auf dem Endstand 3ea40f0 laufen (mit 25D3 und den Tests aus 25A4).
+- Auftrag 26 startet mit fünf Paketen ohne gemeinsame Dateien:
+  - 26A: `loghttp`, Verbindungsgrenze und Rate je Quelle (Nr. 7, Rest), dazu Nr. 74, 75, 67 und 70 ohne `bench.sh`;
+  - 26B: `publish` über einen Deskriptor von `platform/` (Nr. 72), dazu Nr. 73 und 83;
+  - 26C: `bench.sh` (Nr. 76 bis 82);
+  - 26D: Testlücken (Nr. 66, 69, 79);
+  - 26E: Fuzz-Ziele für die Prüfpfade des Clients und die Zeremonie (Nr. 25).
