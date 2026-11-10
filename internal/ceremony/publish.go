@@ -144,7 +144,7 @@ var errChanged = errors.New("ceremony: an entry of platform/ changed while publi
 // server and clients read); it is replaced by the export's file when
 // freeName frees the name and refused otherwise (linkErr), before
 // anything is written. Every other entry is opened with
-// store.OpenRegular and read from that descriptor: a regular file, or
+// store.OpenRegularIn and read from that descriptor: a regular file, or
 // store.ErrNotRegular for a FIFO, a device or a directory, refused before
 // anything is written (none of them is replaced: a directory cannot be
 // renamed over). The descriptor must be the file os.Lstat saw, and after
@@ -153,9 +153,12 @@ var errChanged = errors.New("ceremony: an entry of platform/ changed while publi
 // also by a symbolic link to the same file, is errChanged, never taken
 // for the export's file. The hard link check uses the last os.Lstat; a
 // failure of that os.Lstat other than a missing name is reported with
-// its own error (review of task 25 A).
-func readEntry(st *store.Store, name string) ([]byte, string, error) {
-	b, link, err := lreadEntry(st, name, "publish")
+// its own error (review of task 25 A). Everything goes through pd,
+// platform/ as Publish opened it (openPlatformDir, backlog 72): os.Lstat
+// is Root.Lstat, the open store.OpenRegularIn; st names the entry in
+// messages.
+func readEntry(st *store.Store, pd *os.Root, name string) ([]byte, string, error) {
+	b, link, err := lreadEntry(st, pd, name, "publish")
 	if link != "" {
 		b = nil
 	}
@@ -172,9 +175,9 @@ const (
 // (link linkHard), for checkDataPlatform, which checks every regular
 // file of platform/ whatever its other names. at names the hook points
 // ("<at>-open <name>", "<at>-recheck <name>", for tests).
-func lreadEntry(st *store.Store, name, at string) ([]byte, string, error) {
+func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, error) {
 	p := st.Path("platform", name)
-	fi, err := os.Lstat(p)
+	fi, err := lstatIn(pd, name, p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, "", nil
 	}
@@ -187,11 +190,24 @@ func lreadEntry(st *store.Store, name, at string) ([]byte, string, error) {
 	if err := hook(at + "-open " + name); err != nil {
 		return nil, "", err
 	}
-	f, ofi, err := store.OpenRegular(p)
+	f, ofi, err := store.OpenRegularIn(pd, name)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, "", changedErr(p, "is gone")
 	}
 	if err != nil {
+		// os.Root refuses a symbolic link that leaves platform/ (an
+		// absolute one as well) instead of following it: an entry
+		// replaced by one before the open is reported as replaced, as
+		// one replaced by a link inside it (SameFile below). The entry
+		// os.Lstat saw was no link, so a link now is a replacement even
+		// when it got the inode number of the file it replaced, which
+		// the removal freed (review of task 26 package B, N3:
+		// os.SameFile alone missed that).
+		if !errors.Is(err, store.ErrNotRegular) {
+			if now, lerr := pd.Lstat(name); lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !os.SameFile(fi, now)) {
+				return nil, "", changedErr(p, "was replaced before it was opened")
+			}
+		}
 		return nil, "", err
 	}
 	defer f.Close()
@@ -207,7 +223,7 @@ func lreadEntry(st *store.Store, name, at string) ([]byte, string, error) {
 	}
 	// os.Lstat of a symbolic link describes the link itself, never the
 	// opened file: a link now is refused here as well.
-	fi, err = os.Lstat(p)
+	fi, err = lstatIn(pd, name, p)
 	if errors.Is(err, fs.ErrNotExist) || err == nil && !os.SameFile(fi, ofi) {
 		return nil, "", changedErr(p, "was replaced while it was read")
 	}
@@ -218,6 +234,17 @@ func lreadEntry(st *store.Store, name, at string) ([]byte, string, error) {
 		return b, linkHard, nil
 	}
 	return b, "", nil
+}
+
+// lstatIn is Root.Lstat of name in pd with the error of os.Lstat of its
+// path p (the messages stay those of a path).
+func lstatIn(pd *os.Root, name, p string) (fs.FileInfo, error) {
+	fi, err := pd.Lstat(name)
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		pe.Op, pe.Path = "lstat", p
+	}
+	return fi, err
 }
 
 // changedErr reports the entry p that changed while readEntry read it,
@@ -289,11 +316,14 @@ func unknownGen(name string, g, pinGen uint32) error {
 // one, nor a hard link, for the export's file (readEntry). A regular
 // file is read without following a link (lreadEntry); one replaced
 // meanwhile, by a link as well, is errChanged. The successions in the
-// log are checked by checkDataLog.
-func checkDataPlatform(st *store.Store, pin *store.PlatformPin, known map[uint32]ed25519.PublicKey) error {
-	ents, err := os.ReadDir(st.Path("platform"))
+// log are checked by checkDataLog. platform/ is listed and read through
+// pd, as Publish opened it (openPlatformDir, backlog 72). A failing
+// listing names platform/ by its path, in context (review of task 26
+// package B, H1: platform/ removed after the open).
+func checkDataPlatform(st *store.Store, pd *os.Root, pin *store.PlatformPin, known map[uint32]ed25519.PublicKey) error {
+	ents, err := store.ReadDirIn(pd)
 	if err != nil {
-		return err
+		return fmt.Errorf("ceremony: listing platform/: %w", err)
 	}
 	for _, e := range ents {
 		f, ok := parsePlatformName(e.Name())
@@ -310,7 +340,7 @@ func checkDataPlatform(st *store.Store, pin *store.PlatformPin, known map[uint32
 		// H5): an entry that the listing showed as a regular file and that
 		// is a symbolic link or gone now changed during publish, after the
 		// listing (review of task 25 A2, H4: the message says so).
-		data, link, err := lreadEntry(st, f.name, "check")
+		data, link, err := lreadEntry(st, pd, f.name, "check")
 		if err != nil {
 			return err
 		}
@@ -465,6 +495,7 @@ const replaceHint = "; publish --replace-witnesses (ReplaceWitnesses) replaces i
 type succChain struct {
 	files map[string]platformFile // the export
 	st    *store.Store
+	pd    *os.Root // platform/ of st as Publish opened it
 	log   translog.Log
 	known map[uint32]ed25519.PublicKey
 	rev   []translog.Revoked      // field 7 of the pin
@@ -499,7 +530,7 @@ func (c *succChain) need(g uint32, by string) error {
 		// Read as the names of the export are (readEntry; review of task
 		// 25 A, H5): what is logged is what was read and checked, and a
 		// symbolic or hard link is never logged through.
-		data, link, err := readEntry(c.st, name)
+		data, link, err := readEntry(c.st, c.pd, name)
 		if err != nil {
 			return err
 		}
@@ -570,21 +601,122 @@ var errPlatformLink = errors.New("ceremony: platform/ of the data directory is a
 // H3). A missing platform/, or one that cannot be looked at, is refused
 // here as well, with the error of os.Lstat in context (H6): no step
 // after it works without platform/ (its listing fails), and none of
-// them would name it.
-func checkPlatformDir(st *store.Store) error {
+// them would name it. It returns what os.Lstat saw, for openPlatformDir.
+func checkPlatformDir(st *store.Store) (fs.FileInfo, error) {
 	p := st.Path("platform")
 	fi, err := os.Lstat(p)
 	if err != nil {
-		return fmt.Errorf("ceremony: looking at platform/: %w", err)
+		return nil, fmt.Errorf("ceremony: looking at platform/: %w", err)
 	}
 	if fi.Mode()&fs.ModeSymlink != 0 {
 		const hint = "; nothing removed or written: look at the link and where it points, and put the directory itself in its place"
 		if target, rerr := os.Readlink(p); rerr == nil {
-			return fmt.Errorf("%w: %s points to %q"+hint, errPlatformLink, p, target)
+			return nil, fmt.Errorf("%w: %s points to %q"+hint, errPlatformLink, p, target)
 		}
-		return fmt.Errorf("%w: %s"+hint, errPlatformLink, p)
+		return nil, fmt.Errorf("%w: %s"+hint, errPlatformLink, p)
 	}
-	return nil
+	return fi, nil
+}
+
+// errPlatformReplaced reports platform/ of the data directory replaced
+// between the os.Lstat of checkPlatformDir and its open (backlog 72), or
+// after the open, before the log (review of task 26 package B, H2).
+var errPlatformReplaced = errors.New("ceremony: platform/ of the data directory was replaced during publish")
+
+// platformStillOpened reports whether the path p of platform/ leads, at
+// this moment, to the directory that Publish opened (ri: Root.Stat(".")
+// of its root): os.Lstat(p) is no symbolic link and os.SameFile with
+// ri. Publish holds that directory open, so its inode number is not
+// free for another file while Publish runs, also when the directory is
+// removed: os.SameFile against ri cannot be fooled by a reused inode
+// number, unlike os.SameFile against the os.Lstat of checkPlatformDir,
+// whose directory may be gone by the open (review of task 26 package B,
+// N1). That holds where an inode number identifies a file while it is
+// open, as on the local file systems of Linux.
+func platformStillOpened(p string, ri fs.FileInfo) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode()&fs.ModeSymlink == 0 && os.SameFile(fi, ri)
+}
+
+// openPlatformDir opens platform/ of the data directory once for all of
+// Publish (backlog 72; review of task 25 A2, N1 and H7): checkPlatformDir
+// first, then os.OpenRoot; the directory opened must be the one os.Lstat
+// saw (os.SameFile), and after the open the path must still lead to it,
+// without a symbolic link (platformStillOpened; review of task 26
+// package B, N1), or Publish refuses before it removes or writes
+// anything (errPlatformReplaced). It returns the root and what
+// Root.Stat(".") saw, for the check before the log.
+//
+// The second check closes the bypass of the first by a reused inode
+// number: platform/ removed after the os.Lstat and a symbolic link put
+// in its place that leads to a new directory elsewhere, which got the
+// freed inode number; os.SameFile with the os.Lstat of checkPlatformDir
+// held, and Publish worked outside the data directory. Now the path
+// leads to the opened directory itself at the second check, and that
+// comparison is exact. What is left:
+//   - Publish works in the directory under the path at the second
+//     check, which is not always the one checkPlatformDir looked at
+//     (with a reused inode number both checks pass, but then it is
+//     platform/ by then).
+//   - A swap after the second check does not change where Publish
+//     lists, reads, writes, renames, removes temporary files and fsyncs:
+//     all of that goes through the returned root, relative to its
+//     descriptor, also when the directory is moved out of the data
+//     directory. Publish then refuses before the log
+//     (platformStillOpened once more, errPlatformReplaced), and what it
+//     wrote stays in the directory it opened. A swap between that check
+//     and the log entries is not seen.
+//
+// The open resolves "<platform>/." so that only a directory opens: a
+// FIFO or a file put in place of platform/ meanwhile is syscall.ENOTDIR
+// at once, never an open that waits for a writer (os.OpenRoot opens
+// without O_NONBLOCK). A symbolic link put there is followed and then
+// refused. A failure of the open keeps the message it had when the
+// listing of RemoveTempReport was the first step after
+// checkPlatformDir. The operator log does not go through the root:
+// OpenLog (translog.Open) lists platform/ and reads its ingest
+// certificates and successions by the path, for the keys of the log,
+// and takes only those that verify in a chain from the identity list of
+// the pin; a platform/ swapped before that can make the log fail to
+// open or lack a key, never give it a key that the pin does not
+// certify.
+func openPlatformDir(st *store.Store) (*os.Root, fs.FileInfo, error) {
+	fi, err := checkPlatformDir(st)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := hook("publish-platform"); err != nil {
+		return nil, nil, err
+	}
+	p := st.Path("platform")
+	pd, err := os.OpenRoot(p + string(filepath.Separator) + ".")
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			pe.Path = p
+		}
+		return nil, nil, fmt.Errorf("ceremony: removing temporary files of platform/: %w", err)
+	}
+	ri, err := pd.Stat(".")
+	if err != nil {
+		pd.Close()
+		return nil, nil, fmt.Errorf("ceremony: looking at platform/ after opening it: %w", err)
+	}
+	replaced := fmt.Errorf("%w: %s is no longer the directory publish looked at; nothing removed or written: another process writes the data directory: stop it, look at platform/ and run the same publish again",
+		errPlatformReplaced, p)
+	if !os.SameFile(fi, ri) {
+		pd.Close()
+		return nil, nil, replaced
+	}
+	if err := hook("publish-platform-opened"); err != nil {
+		pd.Close()
+		return nil, nil, err
+	}
+	if !platformStillOpened(p, ri) {
+		pd.Close()
+		return nil, nil, replaced
+	}
+	return pd, ri, nil
 }
 
 func runPublish(opts PublishOptions) error {
@@ -622,11 +754,14 @@ func runPublish(opts PublishOptions) error {
 	// Each name removed is reported (TempRemoved; review of task 25 A,
 	// L2), also when Publish refuses afterwards. platform/ itself must be
 	// no symbolic link (checkPlatformDir), or the files would be removed
-	// and written where it points.
-	if err := checkPlatformDir(st); err != nil {
+	// and written where it points; it is opened once (openPlatformDir,
+	// backlog 72) and everything below goes through that descriptor.
+	pd, pdInfo, err := openPlatformDir(st)
+	if err != nil {
 		return err
 	}
-	if err := store.RemoveTempReport(st.Path("platform"), opts.TempRemoved); err != nil {
+	defer pd.Close()
+	if err := store.RemoveTempReportIn(pd, opts.TempRemoved); err != nil {
 		return fmt.Errorf("ceremony: removing temporary files of platform/: %w", err)
 	}
 
@@ -637,7 +772,7 @@ func runPublish(opts PublishOptions) error {
 	for _, id := range ids {
 		known[id.Gen] = id.Pub
 	}
-	if err := checkDataPlatform(st, pin, known); err != nil {
+	if err := checkDataPlatform(st, pd, pin, known); err != nil {
 		return err
 	}
 	files, wrec, err := readExport(opts.From)
@@ -660,7 +795,7 @@ func runPublish(opts PublishOptions) error {
 	// (readEntry), as under the other names of the export. It counts as a
 	// working copy that differs: replaced with ReplaceWitnesses (the rule
 	// that frees this name), refused otherwise before anything is written.
-	haveW, wlink, err := readEntry(st, WitnessesFile)
+	haveW, wlink, err := readEntry(st, pd, WitnessesFile)
 	if err != nil {
 		return err
 	}
@@ -720,7 +855,7 @@ func runPublish(opts PublishOptions) error {
 			}
 		}
 	}
-	chain := &succChain{files: files, st: st, log: log, known: known, rev: rev, ok: map[uint32]bool{}, relog: map[uint32]platformFile{}}
+	chain := &succChain{files: files, st: st, pd: pd, log: log, known: known, rev: rev, ok: map[uint32]bool{}, relog: map[uint32]platformFile{}}
 
 	var succs []platformFile
 	for _, f := range files {
@@ -858,7 +993,7 @@ func runPublish(opts PublishOptions) error {
 	var todo []string
 	replace := map[string]bool{}
 	for _, n := range names {
-		have, link, err := readEntry(st, n)
+		have, link, err := readEntry(st, pd, n)
 		if err != nil {
 			return err
 		}
@@ -875,7 +1010,7 @@ func runPublish(opts PublishOptions) error {
 			}
 			continue
 		}
-		free, why, err := freeName(st, log, files, n)
+		free, why, err := freeName(st, pd, log, files, n)
 		if err != nil {
 			return err
 		}
@@ -902,17 +1037,17 @@ func runPublish(opts PublishOptions) error {
 			// Under the server lock, after every check, atomically; the
 			// rename replaces a symbolic or hard link itself, never its
 			// target or the file under its other name.
-			if err := store.WriteFileAtomic(st.Path("platform", n), files[n].data); err != nil {
+			if err := store.WriteFileAtomicIn(pd, n, files[n].data); err != nil {
 				return err
 			}
-		} else if err := st.WritePlatformFile(n, files[n].data); err != nil {
+		} else if err := store.CreateFileAtomicIn(pd, n, files[n].data); err != nil {
 			if !errors.Is(err, store.ErrExists) {
 				return err
 			}
 			// The name was missing above (a dangling link is not missing for
 			// readEntry): another process wrote it meanwhile. A link written
 			// meanwhile is never taken for the export's file either.
-			have, link, rerr := readEntry(st, n)
+			have, link, rerr := readEntry(st, pd, n)
 			if rerr != nil {
 				return rerr
 			}
@@ -940,9 +1075,14 @@ func runPublish(opts PublishOptions) error {
 				return err
 			}
 		}
-		if err := store.WriteFileAtomic(st.Path("platform", WitnessesFile), w); err != nil {
+		if err := store.ReplaceFileIn(pd, WitnessesFile, w); err != nil {
 			return err
 		}
+		// witnesses.rec is replaced from here on: the callbacks report it
+		// also when only the fsync of platform/ fails now, and Publish
+		// returns that error after them (backlog 83: before, the
+		// replacement went unreported for good).
+		serr := syncPlatform(pd)
 		after := &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}
 		if oldW != nil && opts.WitnessesReplaced != nil {
 			opts.WitnessesReplaced(oldW, after)
@@ -950,9 +1090,23 @@ func runPublish(opts PublishOptions) error {
 		if wlink != "" && opts.WitnessesLinkReplaced != nil {
 			opts.WitnessesLinkReplaced(wlink, after)
 		}
+		if serr != nil {
+			return serr
+		}
 	}
 	if err := hook("publish-log"); err != nil {
 		return err
+	}
+	// Nothing is logged for files written into a directory that is no
+	// longer platform/ by its path (review of task 26 package B, H2):
+	// platform/ was swapped after the open, and what Publish wrote is in
+	// the directory it opened, wherever that is now, while server and
+	// clients read the path. Nothing is undone: a repeat of the same
+	// publish works in what platform/ is then (a symbolic link there is
+	// refused by checkPlatformDir) and logs what this one did not.
+	if p := st.Path("platform"); !platformStillOpened(p, pdInfo) {
+		return fmt.Errorf("%w: %s is no longer the directory publish opened and wrote to; nothing logged: another process writes the data directory: stop it, look at platform/ and run the same publish again",
+			errPlatformReplaced, p)
 	}
 
 	// Log: successions by generation (the export's and those of
@@ -975,6 +1129,17 @@ func runPublish(opts PublishOptions) error {
 		}
 	}
 	return nil
+}
+
+// syncPlatform fsyncs platform/ through pd after witnesses.rec was
+// renamed into it. The hook "publish-sync witnesses.rec" stands for a
+// failing fsync in tests (backlog 83): its error is returned instead,
+// and the fsync is not made.
+func syncPlatform(pd *os.Root) error {
+	if err := hook("publish-sync " + WitnessesFile); err != nil {
+		return err
+	}
+	return store.SyncDirIn(pd)
 }
 
 // freeName decides whether platform/<n> of the data directory, which
@@ -1014,7 +1179,7 @@ func runPublish(opts PublishOptions) error {
 // signature or under a wrong name), and a foreign identity-<g>.pub. Such
 // a file is never healed: the operator removes it by hand (backlog 56;
 // RUNBOOK 7.3, "Fremde Dateien in platform/").
-func freeName(st *store.Store, log translog.Log, files map[string]platformFile, n string) (bool, string, error) {
+func freeName(st *store.Store, pd *os.Root, log translog.Log, files map[string]platformFile, n string) (bool, string, error) {
 	f := files[n]
 	cert := n
 	if f.ext == "pub" {
@@ -1038,7 +1203,7 @@ func freeName(st *store.Store, log translog.Log, files map[string]platformFile, 
 	if f.ext == "pub" {
 		// A link as the certificate is never the export's
 		// (readEntry): the certificate is replaced, and its key with it.
-		have, link, err := readEntry(st, cert)
+		have, link, err := readEntry(st, pd, cert)
 		if err != nil {
 			return false, "", err
 		}

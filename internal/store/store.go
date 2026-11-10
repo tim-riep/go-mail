@@ -900,8 +900,22 @@ func (s *Store) RemoveIncompleteEpoch(id ID, n uint32) error {
 	return SyncDir(filepath.Dir(dir))
 }
 
+// tempFilesHook, if set, is called by RemoveTempFiles with the path of
+// every temporary file before it is removed. Only tests set it
+// (backlog 73); it is nil in production.
+var tempFilesHook func(path string)
+
 // RemoveTempFiles deletes the temporary files of interrupted atomic
-// writes anywhere in the data directory (server start).
+// writes anywhere in the data directory (server start): every entry
+// whose name starts with ".tmp-" and that is a regular file when its
+// directory is listed. Its name is removed with unlink (removeName), as
+// RemoveTempReport does (backlog 73; review of task 25 A2, H1), never
+// with rmdir. A ".tmp-" directory is no temporary file: the walk enters
+// it, and it stays. One that another process put under the name of a
+// temporary file after the listing stays as well, also when empty, and
+// is skipped without an error, like a name that is gone meanwhile: the
+// start does not stop at it (os.Remove removed an empty one before,
+// without an error).
 func (s *Store) RemoveTempFiles() error {
 	return filepath.WalkDir(s.Root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -911,7 +925,20 @@ func (s *Store) RemoveTempFiles() error {
 			return nil
 		}
 		if strings.HasPrefix(d.Name(), tmpPrefix) && d.Type().IsRegular() {
-			return RemoveDurable(p)
+			if tempFilesHook != nil {
+				tempFilesHook(p)
+			}
+			err := removeName(p)
+			if err == nil {
+				return SyncDir(filepath.Dir(p))
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			if fi, lerr := os.Lstat(p); lerr == nil && fi.IsDir() {
+				return nil
+			}
+			return err
 		}
 		return nil
 	})

@@ -685,7 +685,9 @@ type PublishOptions struct {
 	// nor when witnesses.rec is written for the first time. Both
 	// callbacks are called right after the replacement, before the log
 	// entries are appended: also when Publish fails afterwards (review of
-	// task 25 A2, N2).
+	// task 25 A2, N2), and also when only the fsync of platform/ after the
+	// rename of witnesses.rec fails, whose error Publish returns after the
+	// callback (backlog 83).
 	WitnessesReplaced func(before, after *witness.Witnesses)
 	// WitnessesLinkReplaced, when not nil, is called once witnesses.rec
 	// was a symbolic or hard link (link says which: "a symbolic link",

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -611,26 +612,43 @@ func TestPublishPlatformIsLink(t *testing.T) {
 
 // TestPublishRecheckError (review of task 25 A): when the second os.Lstat
 // of an entry fails other than with a missing name, the message names
-// that error and does not claim the entry was replaced.
+// that error and does not claim the entry was replaced. Since publish
+// looks at the entries through platform/ as it opened it (backlog 72),
+// a swap of platform/ no longer makes that os.Lstat fail
+// (TestPublishPlatformSwappedAfterOpen); platform/ without search
+// permission does, for a process without CAP_DAC_OVERRIDE. With that
+// capability (root) the test is skipped.
 func TestPublishRecheckError(t *testing.T) {
 	f := newFixture(t)
 	st, _ := f.published(t, "data")
 	out := filepath.Join(f.base, "out")
 	plat := st.Path("platform")
 	p := st.Path("platform", "ingest-1.cert")
+	fi, err := os.Stat(plat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(plat, fi.Mode()) })
+	privileged := false
 	serr := swapAt(t, "publish-recheck", "ingest-1.cert", func() error {
-		if err := os.Rename(plat, plat+".moved"); err != nil {
+		if err := os.Chmod(plat, 0o600); err != nil {
 			return err
 		}
-		return os.WriteFile(plat, nil, 0o644)
+		_, err := os.Lstat(p)
+		privileged = err == nil
+		return nil
 	})
-	err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
+	err = Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
 	crashHook = nil
+	os.Chmod(plat, fi.Mode())
 	if *serr != nil {
 		t.Fatal(*serr)
 	}
-	if !errors.Is(err, syscall.ENOTDIR) || errors.Is(err, errChanged) || strings.Contains(err.Error(), "replaced") ||
-		!strings.Contains(err.Error(), "ceremony: looking at "+p+" again after reading it: ") {
+	if privileged {
+		t.Skip("platform/ without search permission is searched all the same (CAP_DAC_OVERRIDE)")
+	}
+	if !errors.Is(err, fs.ErrPermission) || errors.Is(err, errChanged) || strings.Contains(err.Error(), "replaced") ||
+		!strings.Contains(err.Error(), "ceremony: looking at "+p+" again after reading it: lstat "+p+": ") {
 		t.Fatalf("second lstat fails: %v", err)
 	}
 }

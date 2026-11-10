@@ -367,7 +367,8 @@ func RemoveTemp(dir string) error { return RemoveTempReport(dir, nil) }
 
 // RemoveTempReport is RemoveTemp that calls removed, when not nil, with
 // the name of every temporary file it removed (gomail-ceremony publish
-// names them: review of task 25 A, L2). A temporary file is an entry of
+// names them: review of task 25 A, L2; publish uses RemoveTempReportIn
+// since backlog 72). A temporary file is an entry of
 // dir that is a regular file when dir is listed and whose name starts
 // with ".tmp-". Its name is removed with unlink (removeName), never with
 // rmdir: a directory that another process put under the name meanwhile
