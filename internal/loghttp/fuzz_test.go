@@ -2,6 +2,7 @@ package loghttp
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -17,7 +18,8 @@ import (
 // never a panic, only the statuses of the protocol, text/plain answers,
 // error bodies of one ASCII line, and heads/ never holds a line the
 // server did not verify (every stored head opens with the log key and
-// all witnesses).
+// all witnesses). POST /cosign without the content type of the protocol
+// is 400 before a byte of its body is read.
 func FuzzServer(f *testing.F) {
 	e := newEnv(f, 3, 2)
 	e.grow(3)
@@ -47,6 +49,8 @@ func FuzzServer(f *testing.F) {
 	f.Add(uint8(1), uint8(2), "", sign(signers[0], signers[1], signers[2]), true)
 	f.Add(uint8(1), uint8(2), "", append(sign(signers[0], signers[3]), "— witness-a AAAA\n"...), true)
 	f.Add(uint8(1), uint8(2), "", c.Note, true)
+	f.Add(uint8(1), uint8(2), "", c.Note, false)
+	f.Add(uint8(1), uint8(2), "", bytes.Repeat([]byte("x"), translog.MaxHeadNote+1), false)
 	f.Add(uint8(0), uint8(1), "from=1&to=5", []byte(nil), false)
 	f.Add(uint8(0), uint8(1), "from=2&to=2", []byte(nil), false)
 	f.Add(uint8(0), uint8(0), "", []byte(nil), false)
@@ -67,6 +71,7 @@ func FuzzServer(f *testing.F) {
 			ct = witness.ContentType
 		}
 		var r *http.Request
+		read := &countReader{r: bytes.NewReader(body)}
 		func() {
 			defer func() {
 				if recover() != nil {
@@ -78,6 +83,7 @@ func FuzzServer(f *testing.F) {
 		if r == nil {
 			return
 		}
+		r.Body = io.NopCloser(read)
 		w := newRecorder()
 		e.srv.ServeHTTP(w, r)
 		if !allowed[w.Code] || w.Header().Get("Content-Type") != witness.ContentType {
@@ -99,8 +105,24 @@ func FuzzServer(f *testing.F) {
 				t.Fatalf("stored head does not open: %v", err)
 			}
 		}
-		if len(body) > translog.MaxHeadNote && w.Code != http.StatusRequestEntityTooLarge && r.Method == http.MethodPost && target == witness.PathCosign {
+		cosign := r.Method == http.MethodPost && target == witness.PathCosign
+		if len(body) > translog.MaxHeadNote && w.Code != http.StatusRequestEntityTooLarge && cosign && ctype {
 			t.Fatalf("large body: %d", w.Code)
 		}
+		if cosign && !ctype && (w.Code != http.StatusBadRequest || read.n != 0) {
+			t.Fatalf("wrong type: %d, %d bytes read", w.Code, read.n)
+		}
 	})
+}
+
+// countReader counts the bytes read through it.
+type countReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
 }

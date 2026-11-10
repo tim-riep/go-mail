@@ -41,17 +41,44 @@
 //	                              parameters once each, 1 <= from <= to <= translog.MaxTreeSize (400);
 //	                              to above the size of the head GET /head serves: 404;
 //	                              200 with witness.FormatProof(ConsistencyProof(from, to))
-//	POST /gomail/log/cosign       body at most translog.MaxHeadNote bytes (413), text/plain;
-//	                              charset=utf-8 (400); opened with the log key, witnesses.rec and the
+//	POST /gomail/log/cosign       text/plain; charset=utf-8, checked before the body is read (400);
+//	                              body at most translog.MaxHeadNote bytes (413, a declared length
+//	                              above it before the body is read); read in full, then verified
+//	                              in a slot of MaxVerifying: none free within SlotWait 503;
+//	                              opened with the log key, witnesses.rec and the
 //	                              logged ingest keys of the committed tree (Operator.LogKeys):
 //	                              a known line that does not verify 403; malformed, no strict head
 //	                              text, not exactly one log signature or no witness cosignature left
 //	                              after dropping unknown lines 400; the text of the candidate with
 //	                              a line of the configured log key: merged, 200; the text of the
 //	                              newest published head: merged into it (PublishHead, which keeps
-//	                              only the log line of the generation covering the head time), 200;
-//	                              anything else 409
-//	any other method              405 with Allow; any other path 404
+//	                              only the log line of the generation covering the head time) when
+//	                              the body brings a cosignature the stored head lacks, else left
+//	                              as it is, 200 either way; anything else 409
+//	any other method              405 with Allow; any other path 404; both with Connection: close
+//
+// GET /head and /consistency that have to open the newest published head
+// (no candidate) take a slot of MaxVerifying as well, only while
+// Operator.Head runs, and answer 503 when none is free within SlotWait.
+// A 503 is no status of the protocol in package witness; the witness
+// treats it like every other unexpected status (ErrProtocol, logged) and
+// tries again in its next round.
+//
+// Slot after the body (task 24 D, rework of the review): POST /cosign
+// takes its slot only once the body is read, for the verification
+// alone. Task 24 D first had it taken before the body and answered 503
+// unread; then MaxVerifying clients that send the headers with
+// Content-Length: MaxHeadNote and never the body each held a slot until
+// ReadTimeout and reconnected at once: every witness got 503, no head
+// was published, and after HeadInterval every client stopped with
+// ErrStale. Now a slow body holds only its own connection and goroutine,
+// as on any HTTP server (no limit of connections, below), and a slot is
+// held for the CPU time of note.Open and the merge only. The price: the
+// bodies read at once are bounded by the connections, not by
+// MaxVerifying (each at most translog.MaxHeadNote bytes, and for at most
+// ReadTimeout). A request that finds every slot taken waits up to
+// SlotWait (or until the client goes away) before it answers 503, so
+// that a short burst does not turn the witnesses away.
 //
 // GET /head and /consistency read the newest published head with
 // Operator.Head, which opens it line by line (task 11b finding 5): an
@@ -72,16 +99,28 @@
 //     (log and its own), but the server does not require that: every
 //     line is verified on its own and only verified lines are kept, so
 //     the milder reading admits nothing unverified.
-//   - The HTTP server has timeouts and size limits but no limit on the
-//     number of connections and no rate limit (10.2: required before
-//     production, not in the PoC).
+//   - The HTTP server has timeouts and size limits and bounds the
+//     requests that verify signatures at once (MaxVerifying), but has no
+//     limit on the number of connections and no rate per source (10.2:
+//     required before production). A client that sends a body slowly
+//     holds a connection for up to ReadTimeout, no slot; many of them
+//     exhaust connections or memory of the process, which only a limit
+//     of connections per source prevents (not part of this package).
+//     Valid public bodies (the candidate's or the published head's own
+//     note) cost a verification each and nothing more: they merge
+//     nothing new, and the published head is not written again.
 //
 // Responses are text/plain; charset=utf-8; error bodies are one line of
-// ASCII without data from the request. Bodies of POST are read at most
-// up to their limit; NewHTTPServer sets timeouts for headers, bodies,
-// responses and idle connections and a header limit. Log lines carry the
-// path, the status, sizes and the first four bytes of a root hash in hex
-// only, never a body, a query or an address.
+// ASCII without data from the request. Every answer to a request whose
+// body the handler does not read carries Connection: close (404, 405,
+// 400 and 413 before the body, a GET with a body): without it net/http
+// reads up to 256 KiB of the unread body before it sends the answer, so
+// an announced and unsent body would delay it until ReadTimeout. Bodies
+// of POST are read at most up to their limit; NewHTTPServer sets
+// timeouts for headers, bodies, responses and idle connections and a
+// header limit. Log lines carry the path, the status, sizes and the
+// first four bytes of a root hash in hex only, never a body, a query or
+// an address.
 package loghttp
 
 import (
@@ -121,6 +160,25 @@ const (
 	MaxHeaderBytes    = 8 << 10
 )
 
+// MaxVerifying is the number of requests that may verify signatures at
+// the same time: POST /cosign from after its body is read until the
+// answer, and GET /head or /consistency while Operator.Head opens the
+// newest published head. Every legitimate client is one of at most
+// witness.MaxWitnesses witnesses with one request in flight, so a full
+// set of witnesses never waits for each other. The bound is on CPU:
+// note.Open of a POST body (with the keys of Operator.LogKeys) runs
+// without a lock and in parallel, up to MaxVerifying at once; the merge,
+// PublishHead and Operator.Head run one at a time under the locks of the
+// server and of the operator log. A request that finds no slot waits up
+// to SlotWait and then answers 503.
+const MaxVerifying = witness.MaxWitnesses
+
+// SlotWait is the longest time a request waits for a slot of
+// MaxVerifying before it answers 503: long enough for a burst of
+// verifications (each well below a millisecond) to drain, short enough
+// that a request does not hold its connection for long.
+const SlotWait = time.Second
+
 // ErrConfig reports an unusable configuration.
 var ErrConfig = errors.New("loghttp: invalid configuration")
 
@@ -156,6 +214,10 @@ type Server struct {
 	log   *slog.Logger
 	now   func() time.Time
 	known note.Verifiers
+	// slots holds one token per request that verifies signatures
+	// (MaxVerifying); wait is SlotWait, shorter in tests.
+	slots chan struct{}
+	wait  time.Duration
 
 	mu      sync.Mutex
 	cand    *candidate
@@ -200,7 +262,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.HeadInterval < 0 || cfg.HeadInterval > translog.HeadInterval || cfg.MinGap < 0 || cfg.MinGap > cfg.HeadInterval {
 		return nil, fmt.Errorf("%w: head interval at most %v, at least the minimum gap", ErrConfig, translog.HeadInterval)
 	}
-	s := &Server{cfg: cfg, log: cfg.Logger, now: cfg.Now}
+	s := &Server{cfg: cfg, log: cfg.Logger, now: cfg.Now, slots: make(chan struct{}, MaxVerifying), wait: SlotWait}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
 	}
@@ -396,6 +458,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		code, attrs = s.method(w, r, http.MethodPost, s.serveCosign)
 	default:
 		code = http.StatusNotFound
+		w.Header().Set("Connection", "close")
 		reply(w, code, []byte("not found\n"))
 		s.log.Info("request", "path", "other", "status", code)
 		return
@@ -406,16 +469,56 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) method(w http.ResponseWriter, r *http.Request, m string, fn func(http.ResponseWriter, *http.Request) (int, []any)) (int, []any) {
 	if r.Method != m {
 		w.Header().Set("Allow", m)
+		w.Header().Set("Connection", "close")
 		reply(w, http.StatusMethodNotAllowed, []byte("method not allowed\n"))
 		return http.StatusMethodNotAllowed, nil
+	}
+	if m == http.MethodGet && r.ContentLength != 0 {
+		// A GET does not read its body (package comment).
+		w.Header().Set("Connection", "close")
 	}
 	return fn(w, r)
 }
 
+// acquire takes a slot for a request that verifies signatures, waiting
+// up to SlotWait for one; false when none came free in that time or ctx
+// ended. A true result is paired with release.
+func (s *Server) acquire(ctx context.Context) bool {
+	select {
+	case s.slots <- struct{}{}:
+		return true
+	default:
+	}
+	t := time.NewTimer(s.wait)
+	defer t.Stop()
+	select {
+	case s.slots <- struct{}{}:
+		return true
+	case <-t.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *Server) release() { <-s.slots }
+
+// errBusy reports that all MaxVerifying slots are taken (503).
+var errBusy = errors.New("loghttp: busy")
+
+// busy answers 503 to a request that found no slot, with Connection:
+// close: a busy server sheds the connection.
+func busy(w http.ResponseWriter) (int, []any) {
+	w.Header().Set("Connection", "close")
+	reply(w, http.StatusServiceUnavailable, []byte("busy\n"))
+	return http.StatusServiceUnavailable, nil
+}
+
 // current returns the head GET /head serves: the candidate's note, else
 // the newest published head. ok is false without either; err reports a
-// published head that cannot be read.
-func (s *Server) current() (size int64, msg []byte, ok bool, err error) {
+// published head that cannot be read, errBusy that no slot was free to
+// open it.
+func (s *Server) current(ctx context.Context) (size int64, msg []byte, ok bool, err error) {
 	s.mu.Lock()
 	if c := s.cand; c != nil {
 		size, msg = c.head.Size, append([]byte(nil), c.note...)
@@ -423,6 +526,10 @@ func (s *Server) current() (size int64, msg []byte, ok bool, err error) {
 		return size, msg, true, nil
 	}
 	s.mu.Unlock()
+	if !s.acquire(ctx) {
+		return 0, nil, false, errBusy
+	}
+	defer s.release()
 	h, err := s.cfg.Log.Head()
 	if errors.Is(err, translog.ErrStale) {
 		return 0, nil, false, nil
@@ -433,9 +540,11 @@ func (s *Server) current() (size int64, msg []byte, ok bool, err error) {
 	return h.Size, h.Note, true, nil
 }
 
-func (s *Server) serveHead(w http.ResponseWriter, _ *http.Request) (int, []any) {
-	size, msg, ok, err := s.current()
+func (s *Server) serveHead(w http.ResponseWriter, r *http.Request) (int, []any) {
+	size, msg, ok, err := s.current(r.Context())
 	switch {
+	case errors.Is(err, errBusy):
+		return busy(w)
 	case err != nil:
 		reply(w, http.StatusInternalServerError, []byte("internal error\n"))
 		return http.StatusInternalServerError, []any{"reason", reason(err)}
@@ -476,7 +585,10 @@ func (s *Server) serveConsistency(w http.ResponseWriter, r *http.Request) (int, 
 		reply(w, http.StatusBadRequest, []byte("malformed request\n"))
 		return http.StatusBadRequest, nil
 	}
-	size, _, have, err := s.current()
+	size, _, have, err := s.current(r.Context())
+	if errors.Is(err, errBusy) {
+		return busy(w)
+	}
 	if err != nil {
 		reply(w, http.StatusInternalServerError, []byte("internal error\n"))
 		return http.StatusInternalServerError, []any{"reason", reason(err)}
@@ -501,8 +613,23 @@ func textPlain(v string) bool {
 	return err == nil && mt == "text/plain" && len(params) == 1 && strings.EqualFold(params["charset"], "utf-8")
 }
 
+// serveCosign checks the headers, reads the body and only then takes a
+// slot for the verification (package comment, "Slot after the body"): a
+// wrong type or a declared length above the limit is answered without
+// the handler reading a byte of the body. These answers carry
+// Connection: close: without it net/http reads up to 256 KiB of the
+// unread body before it sends the answer, to reuse the connection.
+// After the answer net/http still discards up to that much of the body
+// before it closes the connection (at most ReadTimeout); that is outside
+// the handler.
 func (s *Server) serveCosign(w http.ResponseWriter, r *http.Request) (int, []any) {
+	if !textPlain(r.Header.Get("Content-Type")) {
+		w.Header().Set("Connection", "close")
+		reply(w, http.StatusBadRequest, []byte("content type\n"))
+		return http.StatusBadRequest, nil
+	}
 	if r.ContentLength > translog.MaxHeadNote {
+		w.Header().Set("Connection", "close")
 		reply(w, http.StatusRequestEntityTooLarge, []byte("request too large\n"))
 		return http.StatusRequestEntityTooLarge, nil
 	}
@@ -516,10 +643,10 @@ func (s *Server) serveCosign(w http.ResponseWriter, r *http.Request) (int, []any
 		reply(w, http.StatusBadRequest, []byte("malformed request\n"))
 		return http.StatusBadRequest, nil
 	}
-	if !textPlain(r.Header.Get("Content-Type")) {
-		reply(w, http.StatusBadRequest, []byte("content type\n"))
-		return http.StatusBadRequest, nil
+	if !s.acquire(r.Context()) {
+		return busy(w)
 	}
+	defer s.release()
 	code, msg, attrs := s.cosign(body)
 	reply(w, code, []byte(msg))
 	return code, attrs
@@ -548,6 +675,21 @@ func (s *Server) cosignKnown() note.Verifiers {
 		}
 	}
 	return note.VerifierList(vs...)
+}
+
+// brings reports whether cos holds a line of a key that has none in
+// have (the same rule as candidate.merge: one line per key).
+func brings(have, cos []note.Signature) bool {
+	for _, n := range cos {
+		found := false
+		for _, o := range have {
+			found = found || (o.Name == n.Name && o.Hash == n.Hash)
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
 }
 
 // cosign merges the cosignatures of a POST body (package comment) and
@@ -597,10 +739,14 @@ func (s *Server) cosign(body []byte) (int, string, []any) {
 	// server had no candidate): PublishHead merges and keeps the lines
 	// of the stored head; it keeps only a log line of the generation
 	// that covers the head time, which after an ingest rotation is not
-	// the configured key.
+	// the configured key. A body that brings no cosignature the stored
+	// head lacks (its own note, public) is answered without a write.
 	pub, err := s.cfg.Log.Head()
 	if err == nil {
 		if text, terr := pub.Text(); terr == nil && string(text) == n.Text {
+			if !brings(pub.Sigs, cos) {
+				return http.StatusOK, "stored\n", append(attrs, "unchanged", true)
+			}
 			ph := *h
 			ph.Note = body
 			if err := s.cfg.Log.PublishHead(&ph); err != nil {
