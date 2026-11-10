@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -182,7 +181,7 @@ func (s *Store) ReadCheckpoint(id, user, device ID) (*Checkpoint, error) {
 // user and device. Names that are not "<user-id>-<device-id>.rec" with
 // canonical IDs are ignored.
 func (s *Store) ListCheckpoints(id ID) ([]CheckpointRef, error) {
-	entries, err := os.ReadDir(s.CheckpointDir(id))
+	entries, err := ReadDir(s.CheckpointDir(id))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil

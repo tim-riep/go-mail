@@ -212,7 +212,7 @@ func findUser(st *store.Store, id store.ID, rootPub ed25519.PublicKey) (*store.U
 	if !id.IsZero() {
 		ids = []store.ID{id}
 	} else {
-		entries, err := os.ReadDir(st.Path("users"))
+		entries, err := store.ReadDir(st.Path("users"))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -245,7 +245,7 @@ func findUser(st *store.Store, id store.ID, rootPub ed25519.PublicKey) (*store.U
 // in any epoch. Nothing is verified here; the chains are checked on first
 // use.
 func userMailboxes(st *store.Store, user store.ID) ([]store.ID, error) {
-	entries, err := os.ReadDir(st.Path("mailboxes"))
+	entries, err := store.ReadDir(st.Path("mailboxes"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil

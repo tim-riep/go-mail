@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 )
 
@@ -38,6 +40,26 @@ const tmpPrefix = ".tmp-"
 // os.Open. On a platform without O_DIRECTORY the type is checked after
 // the open instead (openDir in dir_other.go).
 func OpenDir(dir string) (*os.File, error) { return openDir(dir) }
+
+// ReadDir returns the entries of the directory dir sorted by name, as
+// os.ReadDir does, but opens dir with OpenDir (task 24 package F, R41):
+// a FIFO, or a file, in place of the directory is refused by the open
+// itself (syscall.ENOTDIR) instead of an open that could wait for a
+// writer. os.ReadDir of the current toolchain opens with O_DIRECTORY on
+// Unix as well; ReadDir makes that guarantee part of this package rather
+// than a detail of the runtime. The errors are those of os.ReadDir: a
+// missing directory is fs.ErrNotExist (not ErrNotFound), and on an error
+// while reading, the entries read so far are returned with it.
+func ReadDir(dir string) ([]fs.DirEntry, error) {
+	d, err := OpenDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	entries, err := d.ReadDir(-1)
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, err
+}
 
 // OpenRegular opens path for reading (or fsync) if it is a regular file:
 // it is opened with O_NONBLOCK and checked with fstat after the open
@@ -342,7 +364,7 @@ func ReadFileLimited(path string, max int64) ([]byte, error) {
 
 // RemoveTemp deletes temporary files left by an interrupted write in dir.
 func RemoveTemp(dir string) error {
-	entries, err := os.ReadDir(dir)
+	entries, err := ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil

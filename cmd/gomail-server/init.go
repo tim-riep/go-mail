@@ -614,9 +614,12 @@ func syncDirIn(r *os.Root, name string) error {
 
 // emptyDir reports whether the directory dir has no entry (the check
 // before init opens anything; createData checks again on the
-// descriptor).
+// descriptor). dir is opened with store.OpenDir (O_DIRECTORY,
+// O_NONBLOCK; R41): a FIFO put in place of the directory after the
+// Lstat of the caller is an error at once (syscall.ENOTDIR) instead of
+// an open that waits for a writer.
 func emptyDir(dir string) (bool, error) {
-	f, err := os.Open(dir)
+	f, err := store.OpenDir(dir)
 	if err != nil {
 		return false, err
 	}

@@ -643,7 +643,7 @@ func (s *Store) ClearInvalidEpoch(id ID, n uint32, old []byte) error {
 		return err
 	}
 	dir := s.EpochDir(id, n)
-	entries, err := os.ReadDir(dir)
+	entries, err := ReadDir(dir)
 	if err != nil {
 		return err
 	}
@@ -732,7 +732,7 @@ func (s *Store) ListEpochs(id ID) ([]uint32, error) {
 }
 
 func listNumbers(dir string) ([]uint32, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -770,7 +770,7 @@ func (s *Store) ListPendingEpochs(id ID) ([]uint32, error) {
 }
 
 func listIDs(dir, suffix, exclude string) ([]ID, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -843,7 +843,7 @@ func (s *Store) RemoveNote(id ID) error { return RemoveDurable(s.NoteFile(id)) }
 
 // ListFolders returns the folder directories below mail/, sorted.
 func (s *Store) ListFolders(id ID) ([]ID, error) {
-	entries, err := os.ReadDir(filepath.Join(s.MailboxDir(id), "mail"))
+	entries, err := ReadDir(filepath.Join(s.MailboxDir(id), "mail"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil

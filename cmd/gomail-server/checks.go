@@ -42,7 +42,7 @@ var platformName = regexp.MustCompile(`^(identity|admin|ingest)-([1-9][0-9]{0,9}
 // closed). Other files of platform/ (witnesses.rec, temporary files)
 // are not looked at.
 func checkPlatformPin(st *store.Store, pin *store.PlatformPin) error {
-	entries, err := os.ReadDir(st.Path("platform"))
+	entries, err := store.ReadDir(st.Path("platform"))
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func checkDataDir(st *store.Store, logger *slog.Logger) error {
 	if !root.IsDir() {
 		return fmt.Errorf("das Datenverzeichnis ist kein Verzeichnis")
 	}
-	entries, err := os.ReadDir(st.Root)
+	entries, err := store.ReadDir(st.Root)
 	if err != nil {
 		return err
 	}

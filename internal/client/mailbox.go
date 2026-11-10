@@ -793,7 +793,7 @@ func (c *Client) resumeMailboxes() error {
 		return nil
 	}
 	root := filepath.Join(c.cfg.Dir, newMailboxesDir)
-	ents, err := os.ReadDir(root)
+	ents, err := store.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

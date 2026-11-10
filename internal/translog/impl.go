@@ -238,7 +238,7 @@ func (l *fileLog) create() error {
 	if ok, err := l.f.exists(TreeFile); err != nil || ok {
 		return err
 	}
-	ents, err := os.ReadDir(l.f.path(EntriesDir))
+	ents, err := store.ReadDir(l.f.path(EntriesDir))
 	if err != nil {
 		return logErr("entries", err)
 	}
@@ -1252,7 +1252,7 @@ func (l *fileLog) candidates(s *state) []candidate {
 		}
 		out = append(out, candidate{key: LogKey{Gen: gen, Verifier: v, ValidFrom: validFrom, IdentityGen: issuer}, pub: pub})
 	}
-	if ents, err := os.ReadDir(l.st.Path("platform")); err == nil {
+	if ents, err := store.ReadDir(l.st.Path("platform")); err == nil {
 		for _, de := range ents {
 			g, ok := parseGenName(de.Name(), "ingest-", ".cert")
 			if !ok {

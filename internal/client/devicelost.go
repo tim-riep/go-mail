@@ -1296,7 +1296,7 @@ func (c *Client) wrapRecipients(e *store.Epoch) ([]store.ID, error) {
 		}
 	}
 	dir := filepath.Join(c.st.EpochDir(e.MailboxID, e.Number), "members")
-	entries, err := os.ReadDir(dir)
+	entries, err := store.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return out, nil

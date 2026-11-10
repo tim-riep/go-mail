@@ -282,7 +282,7 @@ func New(cfg Config) (*Ingest, error) {
 // committed keep their "unprocessed" marker.
 func (in *Ingest) Recover() error {
 	spool := in.st.SpoolDir()
-	entries, err := os.ReadDir(spool)
+	entries, err := store.ReadDir(spool)
 	if err != nil {
 		return err
 	}
@@ -301,7 +301,7 @@ func (in *Ingest) Recover() error {
 		return err
 	}
 	work := in.st.WorkDir()
-	wentries, err := os.ReadDir(work)
+	wentries, err := store.ReadDir(work)
 	if err != nil {
 		return err
 	}
