@@ -603,40 +603,75 @@ func (c *Client) Read(mbx, id store.ID) (*Mail, []byte, error) {
 	if err := c.saveSeen(); err != nil {
 		return nil, nil, err
 	}
-	data, err := c.st.ReadMail(mbx, folder, id)
+	content, _, err := c.openMail(ch, folder, m, true)
 	if err != nil {
-		return nil, nil, err
-	}
-	if sha256.Sum256(data) != m.Meta.MailHash {
-		c.warn("WARNUNG: Mail %s weicht von ihren signierten Metadaten ab und wird nicht geöffnet.", id)
-		return nil, nil, ErrMailHash
-	}
-	f, err := envelope.Parse(data)
-	if err != nil {
-		return nil, nil, err
-	}
-	h := f.Header
-	if h.Kind != envelope.KindMail || h.MailboxID != mbx || h.Epoch != m.Epoch || h.FileID != id || f.Trailer != nil {
-		c.warn("WARNUNG: Kopf der Mail %s passt nicht zu den Metadaten.", id)
-		return nil, nil, ErrMismatch
-	}
-	e, err := ch.usable(m.Epoch)
-	if err != nil {
-		return nil, nil, err
-	}
-	if f.Suite != e.Suite {
-		return nil, nil, envelope.ErrSuite
-	}
-	k, err := c.keysFor(ch, e)
-	if err != nil {
-		return nil, nil, err
-	}
-	content, err := f.Decrypt(envelope.RecipientKey{Type: envelope.RecipientEpochContent, ID: mbx, Gen: e.Number, PrivateKey: k.Content})
-	if err != nil {
-		c.warn("WARNUNG: Mail %s lässt sich nicht entschlüsseln: %s.", id, warnCause(err))
 		return nil, nil, err
 	}
 	return m, content, nil
+}
+
+// openMail returns the content of mail m in folder of the verified chain
+// ch, whose metadata checkMeta has accepted (section 7, "Prüfung beim
+// Öffnen einer Mail"): the SHA-256 of the whole mail file is compared
+// with the signed value, then mailbox, epoch and file ID of the mail
+// header with the metadata; only then is the mail decrypted, and content
+// is returned only after its last block authenticated. With warn, a
+// failed check of the hash, the header or the decryption is warned about
+// as Read does, with the mail ID and a fixed cause; an error of reading
+// the file (one that is not there: store.ErrNotFound) is returned
+// without a warning. Without warn nothing is warned (the caller does).
+//
+// checked reports whether err is the verdict of a check on the bytes of
+// the mail file, which the signed hash fixes: the hash, the format and
+// header of the envelope, its suite, the decryption. A mail file larger
+// than store.MaxMailFile (store.ErrTooLarge) is one as well: the limit is
+// envelope.MaxFileSize, so such a file is never a valid envelope and
+// never the mail the hash names, just as a file with another hash. It is
+// false for any other error of reading the file (not there, not a
+// regular file, an error of the system) and for an error of the epoch
+// and its keys, which a later attempt may not have (unprocessedTerms).
+func (c *Client) openMail(ch *chain, folder store.ID, m *Mail, warn bool) (content []byte, checked bool, err error) {
+	mbx, id := ch.mailbox.ID, m.ID
+	data, err := c.st.ReadMail(mbx, folder, id)
+	if err != nil {
+		return nil, errors.Is(err, store.ErrTooLarge), err
+	}
+	if sha256.Sum256(data) != m.Meta.MailHash {
+		if warn {
+			c.warn("WARNUNG: Mail %s weicht von ihren signierten Metadaten ab und wird nicht geöffnet.", id)
+		}
+		return nil, true, ErrMailHash
+	}
+	f, err := envelope.Parse(data)
+	if err != nil {
+		return nil, true, err
+	}
+	h := f.Header
+	if h.Kind != envelope.KindMail || h.MailboxID != mbx || h.Epoch != m.Epoch || h.FileID != id || f.Trailer != nil {
+		if warn {
+			c.warn("WARNUNG: Kopf der Mail %s passt nicht zu den Metadaten.", id)
+		}
+		return nil, true, ErrMismatch
+	}
+	e, err := ch.usable(m.Epoch)
+	if err != nil {
+		return nil, false, err
+	}
+	if f.Suite != e.Suite {
+		return nil, true, envelope.ErrSuite
+	}
+	k, err := c.keysFor(ch, e)
+	if err != nil {
+		return nil, false, err
+	}
+	content, err = f.Decrypt(envelope.RecipientKey{Type: envelope.RecipientEpochContent, ID: mbx, Gen: e.Number, PrivateKey: k.Content})
+	if err != nil {
+		if warn {
+			c.warn("WARNUNG: Mail %s lässt sich nicht entschlüsseln: %s.", id, warnCause(err))
+		}
+		return nil, true, err
+	}
+	return content, false, nil
 }
 
 // warnRejected warns about a mail that failed a check. A mail for a

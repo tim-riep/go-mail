@@ -26,6 +26,7 @@ import (
 	"github.com/tim-riep/go-mail/internal/keys"
 	"github.com/tim-riep/go-mail/internal/smtpd"
 	"github.com/tim-riep/go-mail/internal/store"
+	"github.com/tim-riep/go-mail/internal/terms"
 	"github.com/tim-riep/go-mail/internal/translog"
 )
 
@@ -34,11 +35,11 @@ const (
 	DefaultMinFree       = 0.10 // 5.1: below 10 % free, 452 4.3.1
 	DefaultQueueMemory   = 32 << 20
 	DefaultWorkLimit     = 256 << 20
-	DefaultBatchSize     = 100              // 5.4
-	DefaultBatchAge      = 60 * time.Second // 5.4
-	MaxHeaderBytes       = 1_000_000        // 5.2, 5.3: 1 MB
-	MaxHeaderFields      = 500              // 5.3
-	maxBatchEncodedBytes = 512 << 10        // keeps a batch far below rec.MaxRecordSize
+	DefaultBatchSize     = 100                   // 5.4
+	DefaultBatchAge      = 60 * time.Second      // 5.4
+	MaxHeaderBytes       = terms.MaxHeaderBytes  // 5.2, 5.3: 1 MB
+	MaxHeaderFields      = terms.MaxHeaderFields // 5.3
+	maxBatchEncodedBytes = 512 << 10             // keeps a batch far below rec.MaxRecordSize
 )
 
 // Config configures the ingest backend.

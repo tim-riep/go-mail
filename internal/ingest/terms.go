@@ -1,9 +1,7 @@
 package ingest
 
 import (
-	"bytes"
 	"mime"
-	"net/mail"
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/store"
@@ -32,29 +30,16 @@ func decodeText(v string) string {
 }
 
 // parseHeader parses a captured header (5.3: net/mail, at most 1 MB and
-// 500 fields). It reports false if the header cannot be evaluated; the
-// mail then stays marked unprocessed.
+// 500 fields; terms.ParseHeader). It reports false if the header cannot
+// be evaluated; the mail then stays marked unprocessed. The addresses
+// for from: and to: come from terms.Addresses, which a client applies to
+// the header of a mail marked unprocessed as well.
 func parseHeader(h []byte) (headerFields, bool) {
 	var f headerFields
-	if len(h) == 0 || len(h) > MaxHeaderBytes {
+	hd, ok := terms.ParseHeader(h)
+	if !ok {
 		return f, false
 	}
-	// Count fields before parsing: lines that do not start with
-	// whitespace.
-	fields := 0
-	for _, line := range bytes.Split(h, []byte("\r\n")) {
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' {
-			fields++
-		}
-	}
-	if fields > MaxHeaderFields {
-		return f, false
-	}
-	msg, err := mail.ReadMessage(bytes.NewReader(h))
-	if err != nil {
-		return f, false
-	}
-	hd := msg.Header
 	f.from = decodeText(hd.Get("From"))
 	f.to = decodeText(hd.Get("To"))
 	f.cc = decodeText(hd.Get("Cc"))
@@ -62,18 +47,7 @@ func parseHeader(h []byte) (headerFields, bool) {
 	f.date = decodeText(hd.Get("Date"))
 	f.messageID = decodeText(hd.Get("Message-Id"))
 	f.attachment = terms.HasAttachment(hd.Get("Content-Type"))
-	if a, err := mail.ParseAddress(hd.Get("From")); err == nil {
-		f.fromAddr = a.Address
-	}
-	for _, name := range []string{"To", "Cc"} {
-		if v := hd.Get(name); v != "" {
-			if list, err := mail.ParseAddressList(v); err == nil {
-				for _, a := range list {
-					f.rcptAddrs = append(f.rcptAddrs, a.Address)
-				}
-			}
-		}
-	}
+	f.fromAddr, f.rcptAddrs = terms.Addresses(hd)
 	f.thread = terms.ThreadRoot(hd.Get("References"), hd.Get("In-Reply-To"), hd.Get("Message-Id"))
 	return f, true
 }

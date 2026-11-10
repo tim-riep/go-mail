@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/store"
@@ -62,10 +63,13 @@ func (ch *chain) inPeriod(i int, since int64) bool {
 // mark of the term is computed with the index key of the epoch, the hits
 // of every accepted segment are united and duplicate mail IDs dropped,
 // and the entries of pending/ not indexed yet are searched directly
-// (their term lists, or the terms derived from the checked metadata of an
-// entry marked unprocessed). Every hit is then checked like in List; only
-// mails that pass every check, belong to the epoch whose index named them
-// and lie in a folder of folders.gml are returned, sorted like List.
+// (their term lists, or for an entry marked unprocessed the terms derived
+// from its checked metadata, for a from:, fromdomain: or to: term with
+// from: and to: from the mail itself if a value of the metadata may be
+// cut, unprocessedTerms). Every hit is then
+// checked like in List; only mails that pass every check, belong to the
+// epoch whose index named them and lie in a folder of folders.gml are
+// returned, sorted like List.
 //
 // If an epoch has more index segments than one run reads
 // (maxReadSegments, maxReadBytes), the mails found are returned with
@@ -112,6 +116,13 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
 		hits[id][n] = true
 	}
 	checked := map[store.ID]*Mail{}
+	// Only the from:, fromdomain: and to: terms of an entry marked
+	// unprocessed can come from the mail itself (unprocessedTerms); every
+	// other term the metadata give as the server does, so for those no
+	// mail is opened. A mail named by several such entries is opened once
+	// per call; nothing is kept beyond it.
+	addressTerm := strings.HasPrefix(term, terms.From) || strings.HasPrefix(term, terms.FromDomain) || strings.HasPrefix(term, terms.To)
+	opened := map[store.ID][]string{}
 	var first error
 	for i, e := range ch.epochs {
 		if ch.discarded[e.Number] || !ch.inPeriod(i, since) {
@@ -159,7 +170,18 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
 						continue
 					}
 					checked[m.ID] = m
-					terms = metaTerms(m.Meta)
+					switch t, ok := opened[m.ID]; {
+					case !addressTerm:
+						terms = metaTerms(m.Meta)
+					case ok:
+						terms = t
+					default:
+						// A mail file that cannot be read: the
+						// terms of the metadata (see
+						// unprocessedTerms).
+						terms, _ = c.unprocessedTerms(ch, where[en.MailID], m)
+						opened[m.ID] = terms
+					}
 				}
 				if slices.Contains(terms, term) {
 					hit(en.MailID, e.Number)

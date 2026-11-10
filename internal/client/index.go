@@ -295,10 +295,11 @@ func (c *Client) pendingMeta(ch *chain, e *store.Epoch, id store.ID, where map[s
 // is a user member of (only their segments are accepted by readers), it
 // opens every pending file with the checks of OpenPending, takes the
 // terms of each entry, or for an entry marked unprocessed derives them
-// from the checked metadata (metaTerms), computes the marks with the
-// index key of the epoch and writes those that no segment of the epoch
-// holds yet as new segments; only then does it delete the pending files
-// it processed completely (K5 point 2). Every entry that checks is
+// from the checked metadata (unprocessedTerms: metaTerms, from: and to:
+// from the mail itself if a value of the metadata may be cut), computes
+// the marks with the index key of the epoch and writes those that no
+// segment of the epoch holds yet as new segments; only then does it
+// delete the pending files it processed completely (K5 point 2). Every entry that checks is
 // indexed, however often it comes (task 09g): a pending file put back
 // whose postings a segment holds writes nothing, and one whose segment is
 // gone (removed, or index/ restored from a backup) writes its postings
@@ -389,7 +390,13 @@ func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[
 					complete = false
 					break
 				}
-				terms = metaTerms(m.Meta)
+				if terms, err = c.unprocessedTerms(ch, (*where)[en.MailID], m); err != nil {
+					// The mail cannot be read now (gone since
+					// the listing, not a regular file, an I/O
+					// error): the marker stays for a later run.
+					complete = false
+					break
+				}
 			}
 			items = append(items, item{en.MailID, terms})
 		}

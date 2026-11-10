@@ -22,15 +22,24 @@
 // at most MaxTerms terms.
 //
 // Inputs that differ between server and client: the server reads the
-// header as received, the client only the values the metadata keep. They
-// are cut to store.MaxTextLen bytes (4096) each, the envelope sender to
+// header as received, the client the values the metadata keep. They are
+// cut to store.MaxTextLen bytes (4096) each, the envelope sender to
 // store.MaxAddressLen bytes (320), and the metadata keep neither
 // References nor In-Reply-To. For a header with an overlong From, To or
-// Cc value, or an overlong envelope sender, the from: and to: terms a
-// client derives can therefore differ from those of the server (the
-// addresses after the cut are missing, or an address is cut), and the
-// thread: term of a reply is its own Message-ID (SPEC-ISSUES S23,
-// TODO(Q12)). TestMetaTermsMatchServer in package client pins both.
+// Cc value the from: and to: terms derived from the metadata alone can
+// therefore differ from those of the server (the addresses after the cut
+// are missing, or an address is cut, or a cut address makes a term the
+// server does not have); TestMetaTermsMatchServer in package client pins
+// that. If a value may be cut, Index and Search of the client read from:
+// and to: from the header of the mail itself (task 27, Nr. 47;
+// TestUnprocessedTermsMatchServer in package client): with ParseHeader
+// and Addresses, which the server uses as well, and HeaderOf, which takes
+// the header from the whole content as the server's capture takes it
+// from the received stream (equivalent, not the same code:
+// TestCaptureMatchesHeaderOf in package ingest).
+// The envelope sender is never cut in practice: smtpd takes at most 254
+// bytes. The thread: term of a reply stays its own Message-ID
+// (SPEC-ISSUES S23, TODO(Q12)).
 package terms
 
 import (

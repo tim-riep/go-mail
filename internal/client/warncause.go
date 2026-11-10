@@ -43,6 +43,8 @@ func warnCause(err error) string {
 		return "ältere Version als bereits gesehen"
 	case errors.Is(err, ErrMailHash):
 		return "die Mail passt nicht zu ihren Metadaten"
+	case errors.Is(err, errHeader):
+		return "Kopf der Mail nicht auswertbar"
 	case errors.Is(err, ErrMismatch):
 		return "die Datei passt nicht zu ihrem Ort oder ihren Metadaten"
 	case errors.Is(err, ErrPlatform):
