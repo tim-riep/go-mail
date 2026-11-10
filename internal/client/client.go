@@ -48,7 +48,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tim-riep/go-mail/internal/keys"
@@ -179,14 +181,40 @@ func (cfg *Config) check() error {
 // (Config.Dir).
 var errInsideDataDir = errors.New("client: the client directory must not be inside the data directory")
 
-// insideDataDir reports whether the absolute path dir is root or lies
-// below it, compared as given and with symbolic links resolved as far as
-// the paths exist (resolveExisting; L3 of the review of the client
-// directories, task 20o point 3): a client directory named through a
-// symbolic link into the data directory, at dir itself or at one of its
-// parents, is inside it.
+// insideDataDir reports whether the path dir is root or lies below it,
+// compared as given and with symbolic links resolved as far as the paths
+// exist (resolveExisting; L3 of the review of the client directories,
+// task 20o point 3): a client directory named through a symbolic link
+// into the data directory, at dir itself or at one of its parents, is
+// inside it. Both paths are made absolute first (filepath.Abs; root is
+// Store.Root, an exported field that may hold a relative path). It fails
+// closed (task 24 package B, follow-up B2): an empty root, a path that
+// cannot be made absolute, and a path whose resolution fails
+// (resolveExisting returns an error) count as inside, so the caller
+// refuses the client directory with errInsideDataDir.
 func insideDataDir(dir, root string) bool {
-	return below(dir, root) || below(resolveExisting(dir), resolveExisting(root))
+	if root == "" {
+		return true
+	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return true
+	}
+	if root, err = filepath.Abs(root); err != nil {
+		return true
+	}
+	if below(dir, root) {
+		return true
+	}
+	rd, err := resolveExisting(dir)
+	if err != nil {
+		return true
+	}
+	rr, err := resolveExisting(root)
+	if err != nil {
+		return true
+	}
+	return below(rd, rr)
 }
 
 // below reports whether the absolute path p is base or lies below it.
@@ -195,47 +223,91 @@ func below(p, base string) bool {
 	return err == nil && filepath.IsLocal(rel) || p == base
 }
 
-// resolveExisting returns the absolute path p with the symbolic links of
-// its longest prefix that filepath.EvalSymlinks resolves replaced; the
-// rest of p, which does not exist (or cannot be resolved), is appended as
-// it is. A prefix that is a dangling symbolic link (EvalSymlinks fails on
-// its missing target) is replaced by its target (os.Readlink, a relative
-// one taken relative to the directory of the link) and resolved further,
-// so that a dangling link into the data directory is inside it (review
-// of task 20o, task 22 point 3); at most maxHops links are followed that
-// way (a cycle of links), after that the prefix stays as it is.
-func resolveExisting(p string) string {
+// resolveExisting returns the absolute path p with its symbolic links
+// resolved the way the system resolves them, as far as the path exists.
+// It walks p one component at a time (task 24 package B, backlog 57):
+// each component is examined with os.Lstat; a symbolic link is replaced
+// by its target (os.Readlink), an absolute target resolved from the root
+// and a relative one from the directory resolved so far, and the
+// components of the target are resolved in turn in front of the rest of
+// p. A ".." applies to the path resolved so far, never to the text of
+// the path: for a link sub, "sub/.." names the parent of the target of
+// sub, as for the system, not the directory that holds sub (N4 of the
+// attack review and N1 of the specification review of task 22). So a
+// client directory named through a dangling symbolic link into the data
+// directory, also one whose target passes through another link before a
+// "..", is inside it (review of task 20o, task 22 point 3).
+//
+// A component that does not exist (Lstat or Readlink fails with ENOENT,
+// or with ENOTDIR below something that is not a directory) is kept as a
+// plain name, and a ".." after it removes it again. Every other failure
+// is an error, and so is a relative p: the check fails closed (task 24
+// package B, follow-up B2). Lstat fails with ENAMETOOLONG once the
+// resolved path is longer than PATH_MAX, also when the system reaches
+// the same directory through a shorter path, and with EACCES below a
+// directory without search permission; the components below such a
+// component cannot be examined, and a link among them could lead into
+// the data directory. A client directory there is refused; the client
+// could not create one below a directory it may not search either. At
+// most maxHops links are followed in all, as by the system (40 on
+// Linux); the link met after that is an error wrapping syscall.ELOOP, as
+// for a cycle of links. The error is for insideDataDir only and never
+// shown: it may name parts of p.
+func resolveExisting(p string) (string, error) {
 	const maxHops = 40
-	rest := ""
-	hops := 0
-	for {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Join(r, rest)
-		}
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 && hops < maxHops {
-			if target, err := os.Readlink(p); err == nil {
-				hops++
-				if !filepath.IsAbs(target) {
-					// Relative to the directory of the link as the system
-					// resolves it (a ".." in the target applies to the
-					// resolved directory).
-					dir := filepath.Dir(p)
-					if r, err := filepath.EvalSymlinks(dir); err == nil {
-						dir = r
-					}
-					target = filepath.Join(dir, target)
-				}
-				p = filepath.Clean(target)
-				continue
-			}
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return filepath.Join(p, rest)
-		}
-		rest = filepath.Join(filepath.Base(p), rest)
-		p = parent
+	if !filepath.IsAbs(p) {
+		return "", errors.New("client: resolve a relative path")
 	}
+	split := func(s string) []string {
+		return strings.FieldsFunc(s, func(r rune) bool { return r == '/' || r == filepath.Separator })
+	}
+	// missing reports an error that leaves the component a plain name.
+	missing := func(err error) bool {
+		return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+	}
+	vol := filepath.VolumeName(p)
+	resolved := vol + string(filepath.Separator)
+	todo := split(p[len(vol):])
+	hops := 0
+	for len(todo) > 0 {
+		name := todo[0]
+		todo = todo[1:]
+		switch name {
+		case ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, name)
+		fi, err := os.Lstat(next)
+		if err != nil && !missing(err) {
+			return "", err
+		}
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		if hops >= maxHops {
+			return "", fmt.Errorf("client: more than %d symbolic links: %w", maxHops, syscall.ELOOP)
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			if !missing(err) {
+				return "", err
+			}
+			resolved = next
+			continue
+		}
+		hops++
+		if filepath.IsAbs(target) {
+			v := filepath.VolumeName(target)
+			resolved = v + string(filepath.Separator)
+			target = target[len(v):]
+		}
+		todo = append(split(target), todo...)
+	}
+	return resolved, nil
 }
 
 // checkReader checks everything but the client directory, which a

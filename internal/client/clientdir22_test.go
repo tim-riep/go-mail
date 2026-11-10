@@ -81,8 +81,8 @@ func TestClientDirDanglingLinkIntoDataDir(t *testing.T) {
 
 // TestResolveExisting: resolveExisting follows dangling symbolic links
 // (absolute and relative targets, a ".." in a relative target applied to
-// the resolved directory of the link) and stops on a cycle of dangling
-// links, keeping the prefix as it is.
+// the resolved directory of the link); a cycle of dangling links is an
+// error (fail closed, task 24 package B, follow-up B2; want "").
 func TestResolveExisting(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -113,11 +113,12 @@ func TestResolveExisting(t *testing.T) {
 		{filepath.Join(base, "other", "abs", "x"), filepath.Join(base, "real", "missing", "x")},
 		{filepath.Join(base, "via", "up", "x"), filepath.Join(base, "real", "gone", "x")},
 		{filepath.Join(base, "via", "new"), filepath.Join(base, "real", "sub", "new")},
-		{filepath.Join(base, "other", "loop1", "x"), filepath.Join(base, "other", "loop1", "x")},
+		{filepath.Join(base, "other", "loop1", "x"), ""},
 		{filepath.Join(base, "missing", "x"), filepath.Join(base, "missing", "x")},
 	} {
-		if got := client.ResolveExisting(c.in); got != c.want {
-			t.Errorf("%s: %s, want %s", c.in, got, c.want)
+		got, err := client.ResolveExisting(c.in)
+		if got != c.want || (err != nil) != (c.want == "") {
+			t.Errorf("%s: %q (%v), want %q", c.in, got, err, c.want)
 		}
 	}
 }

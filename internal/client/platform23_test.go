@@ -29,9 +29,11 @@ import (
 // certificate (the test hook), he puts the logged files back. The
 // client never takes his key: the log check rejects the certificate it
 // read (translog.ErrMismatch, as for any certificate the log does not
-// hold) and never shows his mail. The other way round (the logged
-// certificate when read, the forged one right after) the client takes
-// the logged key and shows only the genuine mail.
+// hold) and never shows his mail; asked again once the logged files are
+// back, it takes the logged key (a rejection is not cached; task 24
+// package B, backlog 60). The other way round (the logged certificate
+// when read, the forged one right after) the client takes the logged
+// key and shows only the genuine mail.
 //
 // List checks the mails in the order of their random IDs, and the hook
 // swaps the files at the first read only: the mail checked first is
@@ -121,6 +123,15 @@ func TestPlatformIngestCertSwapped(t *testing.T) {
 						// translog.ErrMismatch), or ErrPlatform.
 						if !errors.Is(err, client.ErrPlatform) && !errors.Is(err, translog.ErrMismatch) && !errors.Is(err, translog.ErrNotInLog) {
 							t.Fatalf("ingestKeyFor: %v", err)
+						}
+						// The logged files are back: a second call reads
+						// ingest-1.cert again and takes the logged key
+						// (the rejection is not cached). So every run
+						// covers both orders, whatever order List checks
+						// the mails in (task 24 package B, backlog 60).
+						pub, err = c.IngestKeyFor(1)
+						if err != nil || !bytes.Equal(pub, loggedPub) {
+							t.Fatalf("ingestKeyFor after the logged files are back: %v", err)
 						}
 					} else if err != nil || !bytes.Equal(pub, loggedPub) {
 						t.Fatalf("ingestKeyFor: %v", err)
