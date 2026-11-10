@@ -71,6 +71,19 @@ func TestReadPlatformCertRaw(t *testing.T) {
 // another valid certificate of the same key; a version that reads the
 // file a second time (ReadPlatformCert, then ReadPlatformFile for the
 // bytes) counts two reads and returns the bytes of another certificate.
+//
+// Task 26, package 26D, point 2 (backlog item 69, mutant M4direct of the
+// review of task 24 E): the hook sees only reads through
+// ReadPlatformFile. A version that reads the file a second time past it
+// (ReadFileLimited on the path, then ReadPlatformCert) counts one read
+// at the hook and returns the bytes of the first read, which the swap
+// after the hooked read does not change. On Linux the test therefore
+// also counts every open and every close of the file with inotify
+// (watchOpens), whatever path opens it: exactly one of each. The kernel
+// merges equal events queued one after the other; the closes find a
+// second open that such a merge hides (a descriptor held open across
+// the second read). Only opens that overlap concurrently, from a second
+// goroutine, can still hide each other.
 func TestReadPlatformCertRawReadsOnce(t *testing.T) {
 	s, _ := Init(t.TempDir())
 	var seed keys.Seed
@@ -103,6 +116,17 @@ func TestReadPlatformCertRawReadsOnce(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { platformReadHook = nil })
+	opens := watchOpens(t, s.Path("platform"))
+	checkOpens := func(what string) {
+		t.Helper()
+		if opens == nil {
+			return // not Linux; watchOpens has logged it
+		}
+		opened, closed := opens()
+		if n, c := opened[certName], closed[certName]; n != 1 || c != 1 {
+			t.Fatalf("%s: %s opened %d, closed %d times, want once", what, certName, n, c)
+		}
+	}
 
 	got, raw, err := s.ReadPlatformCertRaw(keys.RoleIngest, 1)
 	if err != nil {
@@ -111,6 +135,7 @@ func TestReadPlatformCertRawReadsOnce(t *testing.T) {
 	if reads[certName] != 1 {
 		t.Fatalf("%s read %d times, want once", certName, reads[certName])
 	}
+	checkOpens("ReadPlatformCertRaw")
 	if !bytes.Equal(raw, cd1) || got.ValidFrom != 7 {
 		t.Fatalf("returned certificate (valid_from %d) and bytes are not those of the one read", got.ValidFrom)
 	}
@@ -124,4 +149,5 @@ func TestReadPlatformCertRawReadsOnce(t *testing.T) {
 	if c, err := s.ReadPlatformCert(keys.RoleIngest, 1); err != nil || c.ValidFrom != 9 || reads[certName] != 1 {
 		t.Fatalf("ReadPlatformCert: %v, %d reads", err, reads[certName])
 	}
+	checkOpens("ReadPlatformCert")
 }

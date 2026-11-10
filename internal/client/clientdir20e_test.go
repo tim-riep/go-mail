@@ -152,7 +152,9 @@ func TestRestoreAtomic(t *testing.T) {
 // names), not a regular file, not the temporary directory of a restore
 // or of another client directory, not one of another user. A successful
 // restore removes .<name>.restore-* in the same way and keeps
-// .<name>.keygen-*. A failed run removes nothing.
+// .<name>.keygen-*. A failed run removes nothing. The directory of
+// another user needs uid 0 with CAP_CHOWN; without it only that part is
+// left out (task 26, package 26D, point 3).
 func TestClientDirLeftovers(t *testing.T) {
 	env := testenv.New(t)
 	parent := filepath.Join(env.Base, "devices")
@@ -200,8 +202,14 @@ func TestClientDirLeftovers(t *testing.T) {
 		if err := os.Chown(at(".alice.keygen-1008"), 4242, 4242); errors.Is(err, syscall.EPERM) {
 			// Root without CAP_CHOWN (setpriv --inh-caps=-all
 			// --bounding-set=-all): the directory of another user
-			// cannot be made.
-			t.Skipf("uid 0 without CAP_CHOWN: %v", err)
+			// cannot be made. Only that part is left out (task 26,
+			// package 26D, point 3, backlog item 79); the directory, owned
+			// by the process itself, is removed again.
+			t.Logf("uid 0 without CAP_CHOWN, no directory of another user: %v", err)
+			foreign = false
+			if err := os.RemoveAll(at(".alice.keygen-1008")); err != nil {
+				t.Fatal(err)
+			}
 		} else if err != nil {
 			t.Fatal(err)
 		}
