@@ -432,14 +432,54 @@ func (c *fuzzCeremony) onlyGood(st *store.Store, log *recLog) string {
 // the export. Nothing may panic; when it accepts, every regular file
 // under a name of section 4 that it checks (identity keys, successions
 // and certificates; the public keys of admin and ingest generations are
-// not its business, nor are links and other entries) is the genuine
-// file of that name that is valid under the pin, byte for byte: no
-// identity generation the pin does not know, nothing that contradicts
-// its identity list or fails to verify. The heap that checkDataPlatform
-// allocates is bounded.
+// not its business, nor are symbolic links) is the genuine file of that
+// name that is valid under the pin, byte for byte: no identity
+// generation the pin does not know, nothing that contradicts its
+// identity list or fails to verify. No entry under a name of section 4
+// is a directory (an entry that is neither a regular file nor a symbolic
+// link is refused, also under the public key of an admin or ingest
+// generation), and no identity-<g>.pub or identity-<g>.succ of any kind
+// has g above the pin's generation (backlog 40; review of task 27 A,
+// H2). The heap that checkDataPlatform allocates is bounded.
 func FuzzCheckDataPlatform(f *testing.F) {
 	c := newFuzzCeremony(f)
 	c.seeds(f)
+	// A certificate and a succession whose signature has one bit flipped
+	// (backlog 90): only the check of the signature refuses them, the
+	// rest of each is genuine. Without these seeds a mutant that skips
+	// that check passed the seeds (review of task 26E4).
+	initExport := []string{"identity-1.pub", "admin-1.pub", "admin-1.cert", "ingest-1.pub", "ingest-1.cert"}
+	for _, name := range []string{"admin-2.cert", "ingest-1.cert", "identity-2.succ"} {
+		var es []fuzzEntry
+		for _, n := range initExport {
+			if n != name {
+				es = append(es, fuzzEntry{kind: kindFile, name: n, data: c.good[n]})
+			}
+		}
+		es = append(es, fuzzEntry{kind: kindFile, name: name, data: flipSignature(f, name, c.good[name])})
+		f.Add(joinEntries(es...))
+	}
+	// Entries under names of section 4 that are no regular files (review
+	// of task 27 A, H2): a directory under names the export of the
+	// ceremony does not hold, also the public key of an admin or ingest
+	// generation, and identity files above the pin's generation 2 as a
+	// directory, a symbolic link to the genuine-looking file of the
+	// ceremony beyond the pin and a hard link.
+	for _, e := range []fuzzEntry{
+		{kind: kindDir, name: "admin-3.pub"},
+		{kind: kindDir, name: "ingest-2.pub"},
+		{kind: kindDir, name: "identity-2.succ"},
+		{kind: kindDir, name: "identity-3.pub"},
+		{kind: kindSymlink, name: "identity-3.succ", data: c.beyond["identity-3.succ"]},
+		{kind: kindSymlink, name: "identity-3.pub", data: c.beyond["identity-3.pub"]},
+		{kind: kindHard, name: "identity-4.succ"},
+	} {
+		var es []fuzzEntry
+		for _, n := range initExport {
+			es = append(es, fuzzEntry{kind: kindFile, name: n, data: c.good[n]})
+		}
+		f.Add(joinEntries(append(es, e)...))
+	}
 	f.Fuzz(func(t *testing.T, in []byte) {
 		base := t.TempDir()
 		st, err := store.Init(filepath.Join(base, "data"))
@@ -465,6 +505,12 @@ func FuzzCheckDataPlatform(f *testing.F) {
 		if cerr == nil {
 			for name, m := range es {
 				f, ok := parsePlatformName(name)
+				if ok && f.role == "identity" && f.gen > c.pin.Gen {
+					t.Fatalf("accepted platform/%s (kind %d), which names an identity generation above the pin's", name, m.kind)
+				}
+				if ok && m.kind == kindDir {
+					t.Fatalf("accepted platform/%s, a directory under a name of section 4", name)
+				}
 				if m.kind != kindFile || !ok || f.ext == "pub" && f.role != "identity" {
 					continue
 				}
@@ -477,4 +523,34 @@ func FuzzCheckDataPlatform(f *testing.F) {
 			t.Fatalf("allocated %d bytes for %d bytes of input (bound %d)", used, len(in), limit)
 		}
 	})
+}
+
+// flipSignature returns the certificate or succession data (file name
+// name) with the lowest bit of the first byte of its signature flipped,
+// encoded again: well formed, and genuine but for the signature.
+func flipSignature(f *testing.F, name string, data []byte) []byte {
+	var out []byte
+	var err error
+	if strings.HasSuffix(name, ".succ") {
+		var s *keys.PlatformSuccession
+		if s, err = keys.DecodePlatformSuccession(data); err == nil {
+			s.Signature = bytes.Clone(s.Signature)
+			s.Signature[0] ^= 1
+			out, err = s.Encode()
+		}
+	} else {
+		var pc *keys.PlatformCert
+		if pc, err = keys.DecodePlatformCert(data); err == nil {
+			pc.Signature = bytes.Clone(pc.Signature)
+			pc.Signature[0] ^= 1
+			out, err = pc.Encode()
+		}
+	}
+	if err != nil {
+		f.Fatal(err)
+	}
+	if bytes.Equal(out, data) || len(out) != len(data) {
+		f.Fatalf("%s: signature not flipped", name)
+	}
+	return out
 }

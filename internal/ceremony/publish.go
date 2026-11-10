@@ -143,11 +143,15 @@ var errChanged = errors.New("ceremony: an entry of platform/ changed while publi
 // file under its other name, can change after publish, and with it what
 // server and clients read); it is replaced by the export's file when
 // freeName frees the name and refused otherwise (linkErr), before
-// anything is written. Every other entry is opened with
-// store.OpenRegularIn and read from that descriptor: a regular file, or
-// store.ErrNotRegular for a FIFO, a device or a directory, refused before
-// anything is written (none of them is replaced: a directory cannot be
-// renamed over). The descriptor must be the file os.Lstat saw, and after
+// anything is written. Any other entry that os.Lstat shows as no regular
+// file (a FIFO, a device, a directory, a socket) is store.ErrNotRegular
+// by that kind, never opened (review of task 27 A, N2: no ENXIO of a
+// socket or of a device without a driver, no EACCES of a directory
+// without permission, no open of a device), refused before anything is
+// written (none of them is replaced: a directory cannot be renamed
+// over). A regular file is opened with store.OpenRegularIn and read from
+// that descriptor (a FIFO or a directory by then is ErrNotRegular of the
+// open). The descriptor must be the file os.Lstat saw, and after
 // the read the name must still be that file and no link (os.SameFile on
 // both sides, review of task 24 A, F3): an entry replaced in between,
 // also by a symbolic link to the same file, is errChanged, never taken
@@ -187,6 +191,14 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, 
 	if fi.Mode()&fs.ModeSymlink != 0 {
 		return nil, linkSymbolic, nil
 	}
+	// Any other entry that is no regular file is refused by its kind as
+	// os.Lstat saw it, before anything opens it (review of task 27 A, N2
+	// and F3): a socket or a device without a driver fails the open with
+	// ENXIO, a directory without permission with EACCES, and a device
+	// would be opened.
+	if !fi.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("store: %s is %w", name, store.ErrNotRegular)
+	}
 	if err := hook(at + "-open " + name); err != nil {
 		return nil, "", err
 	}
@@ -202,7 +214,11 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, 
 		// os.Lstat saw was no link, so a link now is a replacement even
 		// when it got the inode number of the file it replaced, which
 		// the removal freed (review of task 26 package B, N3:
-		// os.SameFile alone missed that).
+		// os.SameFile alone missed that). A regular file replaced by
+		// a socket or a device after os.Lstat fails the open here with
+		// ENXIO, neither missing nor ErrNotRegular: only os.SameFile
+		// tells that it was replaced (backlog 86, X6). One replaced by a
+		// FIFO or a directory is ErrNotRegular of the open, as before.
 		if !errors.Is(err, store.ErrNotRegular) {
 			if now, lerr := pd.Lstat(name); lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !os.SameFile(fi, now)) {
 				return nil, "", changedErr(p, "was replaced before it was opened")
@@ -298,6 +314,16 @@ func unknownGen(name string, g, pinGen uint32) error {
 		translog.ErrMismatch, name, g, pinGen)
 }
 
+// notRegularKinds and notRegularHint complete the refusal of an entry of
+// platform/ under a name of section 4 that is no regular file and no
+// symbolic link (checkDataPlatform; review of task 27 A, N1): publish
+// never reads, replaces or removes it, so it refuses every publish until
+// the operator removes it.
+const (
+	notRegularKinds = "a FIFO, a device, a directory or a socket"
+	notRegularHint  = "look at the entry, remove it by hand and run the same publish again"
+)
+
 // checkDataPlatform applies the start check of gomail-server
 // (checkPlatformPin, Q10 point 5) to platform/ of the data directory:
 // no identity generation the pin does not know (identity-<g>.pub,
@@ -310,16 +336,36 @@ func unknownGen(name string, g, pinGen uint32) error {
 // platform/ that does not verify is translog.ErrMismatch, never counted
 // and never logged; the operator removes it on purpose after finding out
 // where it came from; Publish never heals such a file (freeName). Other
-// files (witnesses.rec, temporary files) are not looked at here, nor are
-// entries that are no regular files (a symbolic link is not followed):
-// under a name of the export the comparison of runPublish never takes
-// one, nor a hard link, for the export's file (readEntry). A regular
-// file is read without following a link (lreadEntry); one replaced
-// meanwhile, by a link as well, is errChanged. The successions in the
-// log are checked by checkDataLog. platform/ is listed and read through
-// pd, as Publish opened it (openPlatformDir, backlog 72). A failing
-// listing names platform/ by its path, in context (review of task 26
-// package B, H1: platform/ removed after the open).
+// files (witnesses.rec, temporary files) are not looked at here.
+//
+// The name comes first, whatever the entry is (backlog 40): an
+// identity-<g>.pub or identity-<g>.succ with g above the pin's
+// generation is refused as a symbolic link, a FIFO, a device, a
+// directory or a socket as well, as the start check of gomail-server
+// refuses it by its name; one that is neither a regular file nor a
+// symbolic link is store.ErrNotRegular as well, and the message asks to
+// remove it by hand rather than to install a new pin (review of task
+// 27 A, H3). A symbolic link under another name of section 4 is not
+// followed and not looked at further: under a name of the export the
+// comparison of runPublish never takes one, nor a hard link, for the
+// export's file (readEntry). Any other entry under a name of section 4
+// that is no regular file (a FIFO, a device, a directory, a socket, also
+// under the public key of an admin or ingest generation and under a name
+// the export does not hold) is refused, as readExport refuses it in the
+// export (fail closed): lreadEntry refuses it by the kind os.Lstat
+// shows, before anything opens it, and the refusal is
+// store.ErrNotRegular with the path of the entry, "nothing written or
+// logged" and the remedy (review of task 27 A, N1 and N2). No platform
+// file can be such an entry, and gomail-server refuses to start on one
+// under the names it reads; publish never removes or replaces one, so
+// it refuses every publish until the operator has looked at the entry
+// and removed it by hand. A regular file is read without
+// following a link (lreadEntry); one replaced meanwhile, by a link as
+// well, is errChanged. The successions in the log are checked by
+// checkDataLog. platform/ is listed and read through pd, as Publish
+// opened it (openPlatformDir, backlog 72). A failing listing names
+// platform/ by its path, in context (review of task 26 package B, H1:
+// platform/ removed after the open).
 func checkDataPlatform(st *store.Store, pd *os.Root, pin *store.PlatformPin, known map[uint32]ed25519.PublicKey) error {
 	ents, err := store.ReadDirIn(pd)
 	if err != nil {
@@ -327,13 +373,21 @@ func checkDataPlatform(st *store.Store, pd *os.Root, pin *store.PlatformPin, kno
 	}
 	for _, e := range ents {
 		f, ok := parsePlatformName(e.Name())
-		if !ok || !e.Type().IsRegular() {
+		if !ok {
 			continue
 		}
+		p := st.Path("platform", f.name)
 		if f.role == "identity" && f.gen > pin.Gen {
+			if t := e.Type(); !t.IsRegular() && t&fs.ModeSymlink == 0 {
+				return fmt.Errorf("%w: %s names identity generation %d, the pin knows 1 to %d, and is %w (%s): no pin makes it a file of platform/ (Q10 point 5); nothing written or logged: %s",
+					translog.ErrMismatch, p, f.gen, pin.Gen, store.ErrNotRegular, notRegularKinds, notRegularHint)
+			}
 			return unknownGen("platform/"+f.name, f.gen, pin.Gen)
 		}
-		if f.ext == "pub" && f.role != "identity" {
+		if e.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
+		if f.ext == "pub" && f.role != "identity" && e.Type().IsRegular() {
 			continue
 		}
 		// Read without following a link (lreadEntry; review of task 25 A,
@@ -341,14 +395,23 @@ func checkDataPlatform(st *store.Store, pd *os.Root, pin *store.PlatformPin, kno
 		// is a symbolic link or gone now changed during publish, after the
 		// listing (review of task 25 A2, H4: the message says so).
 		data, link, err := lreadEntry(st, pd, f.name, "check")
+		if errors.Is(err, store.ErrNotRegular) {
+			return fmt.Errorf("ceremony: %s is %w (%s) under a name of section 4: publish never reads or replaces such an entry; nothing written or logged: %s",
+				p, store.ErrNotRegular, notRegularKinds, notRegularHint)
+		}
 		if err != nil {
 			return err
 		}
 		if link == linkSymbolic {
-			return changedErr(st.Path("platform", f.name), "was replaced by a symbolic link after platform/ was listed")
+			return changedErr(p, "was replaced by a symbolic link after platform/ was listed")
 		}
 		if data == nil {
-			return changedErr(st.Path("platform", f.name), "was removed after platform/ was listed")
+			return changedErr(p, "was removed after platform/ was listed")
+		}
+		if f.ext == "pub" && f.role != "identity" {
+			// Listed as no regular file, a regular file by now: its content
+			// is not the business of this check.
+			continue
 		}
 		switch f.ext {
 		case "pub":
@@ -1032,6 +1095,9 @@ func runPublish(opts PublishOptions) error {
 	sort.SliceStable(todo, func(i, j int) bool {
 		return files[todo[i]].ext == "pub" && files[todo[j]].ext != "pub"
 	})
+	// wrote tells whether Publish wrote a file into platform/ (for the
+	// message before the log; backlog 86).
+	wrote := false
 	for _, n := range todo {
 		if replace[n] {
 			// Under the server lock, after every check, atomically; the
@@ -1040,7 +1106,10 @@ func runPublish(opts PublishOptions) error {
 			if err := store.WriteFileAtomicIn(pd, n, files[n].data); err != nil {
 				return err
 			}
-		} else if err := store.CreateFileAtomicIn(pd, n, files[n].data); err != nil {
+			wrote = true
+		} else if err := store.CreateFileAtomicIn(pd, n, files[n].data); err == nil {
+			wrote = true
+		} else {
 			if !errors.Is(err, store.ErrExists) {
 				return err
 			}
@@ -1078,6 +1147,7 @@ func runPublish(opts PublishOptions) error {
 		if err := store.ReplaceFileIn(pd, WitnessesFile, w); err != nil {
 			return err
 		}
+		wrote = true
 		// witnesses.rec is replaced from here on: the callbacks report it
 		// also when only the fsync of platform/ fails now, and Publish
 		// returns that error after them (backlog 83: before, the
@@ -1103,10 +1173,17 @@ func runPublish(opts PublishOptions) error {
 	// the directory it opened, wherever that is now, while server and
 	// clients read the path. Nothing is undone: a repeat of the same
 	// publish works in what platform/ is then (a symbolic link there is
-	// refused by checkPlatformDir) and logs what this one did not.
+	// refused by checkPlatformDir) and logs what this one did not. The
+	// message says "wrote to" only when Publish wrote a file there
+	// (backlog 86); a missing platform/ is no longer the opened directory
+	// either.
 	if p := st.Path("platform"); !platformStillOpened(p, pdInfo) {
-		return fmt.Errorf("%w: %s is no longer the directory publish opened and wrote to; nothing logged: another process writes the data directory: stop it, look at platform/ and run the same publish again",
-			errPlatformReplaced, p)
+		did := "opened and wrote to; nothing logged"
+		if !wrote {
+			did = "opened; nothing written or logged"
+		}
+		return fmt.Errorf("%w: %s is no longer the directory publish %s: another process writes the data directory: stop it, look at platform/ and run the same publish again",
+			errPlatformReplaced, p, did)
 	}
 
 	// Log: successions by generation (the export's and those of

@@ -751,7 +751,13 @@ type PublishOptions struct {
 //     verify with the pin's list (task 15g point 2b; the operator
 //     removes such a file on purpose), and a valid succession in the log
 //     above the pin's generation (task 15g point 3, also when its files
-//     are gone from platform/);
+//     are gone from platform/); the generation of an identity-<g>.pub or
+//     identity-<g>.succ counts by its name, whatever the entry is, and
+//     an entry under a name of section 4 that is neither a regular file
+//     nor a symbolic link (a FIFO, a device, a directory, a socket) is
+//     store.ErrNotRegular by the kind os.Lstat shows, never opened
+//     (backlog 40; review of task 27 A, N2), also under a name the
+//     export does not hold: the operator removes it by hand (N1);
 //   - witnesses.rec of the export and of the data directory against the
 //     witnesses and the quorum of Pin (fields 5 and 6): a difference is
 //     translog.ErrMismatch, the working copy is never replaced silently;

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/tim-riep/go-mail/internal/store"
@@ -227,39 +228,57 @@ func TestKeyDirMode(t *testing.T) {
 			t.Fatalf("%s: %v %v", n, fi.Mode(), err)
 		}
 	}
-	if os.Getuid() != 0 {
-		t.Log("not root: the owner check is not tested")
-		return
-	}
-	kd2 := filepath.Join(f.base, "keys2")
-	os.Mkdir(kd2, 0o700)
-	if err := os.Chown(kd2, 12345, 12345); err != nil {
-		t.Fatal(err)
-	}
-	p := &prompter{scr: &screen{}}
-	o = f.opts(filepath.Join(f.base, "out2"), kd2, p)
-	o.MinWitnesses = 1
-	if _, err := Init(o); !errors.Is(err, ErrKeyDir) || len(p.handovers) != 0 {
-		t.Fatalf("foreign owner: %v", err)
-	}
-	// Swapped at "export" for a directory of another user.
-	kd3 := filepath.Join(f.base, "keys3")
-	os.Mkdir(kd3, 0o700)
-	defer func() { crashHook = nil }()
-	crashHook = func(point string) error {
-		if point == "export" {
-			os.Rename(kd3, kd3+".old")
-			os.Mkdir(kd3, 0o700)
-			return os.Chown(kd3, 12345, 12345)
+	// The owner check needs a directory of another user: root with
+	// CAP_CHOWN gives one away. Without it, and where uid 12345 does not
+	// exist for the kernel (EINVAL in a user namespace), only this part
+	// is skipped (backlog 87); the checks above have run.
+	t.Run("owner", func(t *testing.T) {
+		if os.Getuid() != 0 {
+			t.Skip("not root: no directory of another user")
 		}
-		return nil
-	}
-	o = f.opts(filepath.Join(f.base, "out3"), kd3, &prompter{scr: &screen{}})
-	o.MinWitnesses = 1
-	if _, err := Init(o); !errors.Is(err, ErrKeyDir) {
-		t.Fatalf("swapped for a foreign directory: %v", err)
-	}
-	if names := listDir(t, kd3); len(names) != 0 {
-		t.Fatalf("keys in the foreign directory: %v", names)
-	}
+		kd2 := filepath.Join(f.base, "keys2")
+		if err := os.Mkdir(kd2, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(kd2, 12345, 12345); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				t.Skipf("no directory of another user without CAP_CHOWN: %v", err)
+			}
+			// root of a user namespace in which uid 12345 is not mapped
+			// (unshare --user --map-root-user; review of task 27 A, F7
+			// and N4).
+			if errors.Is(err, syscall.EINVAL) {
+				t.Skipf("no directory of another user: uid 12345 is not mapped in this user namespace: %v", err)
+			}
+			t.Fatal(err)
+		}
+		p := &prompter{scr: &screen{}}
+		o := f.opts(filepath.Join(f.base, "out2"), kd2, p)
+		o.MinWitnesses = 1
+		if _, err := Init(o); !errors.Is(err, ErrKeyDir) || len(p.handovers) != 0 {
+			t.Fatalf("foreign owner: %v", err)
+		}
+		// Swapped at "export" for a directory of another user.
+		kd3 := filepath.Join(f.base, "keys3")
+		if err := os.Mkdir(kd3, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { crashHook = nil }()
+		crashHook = func(point string) error {
+			if point == "export" {
+				os.Rename(kd3, kd3+".old")
+				os.Mkdir(kd3, 0o700)
+				return os.Chown(kd3, 12345, 12345)
+			}
+			return nil
+		}
+		o = f.opts(filepath.Join(f.base, "out3"), kd3, &prompter{scr: &screen{}})
+		o.MinWitnesses = 1
+		if _, err := Init(o); !errors.Is(err, ErrKeyDir) {
+			t.Fatalf("swapped for a foreign directory: %v", err)
+		}
+		if names := listDir(t, kd3); len(names) != 0 {
+			t.Fatalf("keys in the foreign directory: %v", names)
+		}
+	})
 }
