@@ -87,7 +87,11 @@
 // or already assigned to that mailbox (exit status 2 otherwise), and
 // only with an admin key whose generation pin field 7 does not revoke,
 // nor the identity generation that issued its certificate (exit status 2
-// with the fixed message adminRevoked, D93 and its addendum). On
+// with the fixed message adminRevoked, D93 and its addendum). The
+// assignment's valid_from is the clock of this computer, raised to 1 ms
+// after the newest valid assignment of the address in the log while that
+// lies less than translog.MaxClockSkew ahead of the clock; further ahead,
+// the log refuses it as before (assignmentValidFrom, backlog item 41). On
 // success it prints the normalized address and the mailbox on standard
 // output ("<address> -> <mailbox>"); no message on standard error names
 // the address, an error names the mailbox only (failAddr,
@@ -121,6 +125,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -311,6 +316,48 @@ const ingestRevoked = "der Ingest-Schlüssel gehört zu einer Generation, die de
 // assignment it signs now is logged from revoked_at_size on and invalid.
 const adminRevoked = "der Admin-Schlüssel gehört zu einer Generation, die der Pin widerruft (Feld 7); " +
 	"Zuordnungen nur mit dem Schlüssel einer neu ausgestellten Admin-Generation"
+
+// adminCertInvalid is the message of "address add" for an
+// admin-<gen>.cert that the platform identity of its identity_gen did not
+// sign or that is not a valid entry of the log (backlog item 63, D93
+// addendum 23, AUDIT R48).
+const adminCertInvalid = "admin-<gen>.cert ist nicht von der Plattformidentität seiner identity_gen signiert oder kein gültiger Eintrag des Logs"
+
+// adminKeyMismatch is the message of "address add" when admin-<gen>.cert
+// of the admin key's generation cannot be read, together with
+// admin-<gen>.pub, or certifies another key; a failed read adds its cause.
+const adminKeyMismatch = "der Admin-Schlüssel passt nicht zu admin-<gen>.cert"
+
+// identityKey returns the key of platform identity generation gen: from
+// the pin's identity list ids, or, above it, from the chain of valid
+// successions identity-<g>.succ in the log, each verified with the key
+// of generation g-1 (translog doc.go "Validity rules", "Pin"); never from
+// the data directory alone. It is the derivation of client/read.go
+// identityKey.
+func identityKey(tl translog.Log, ids []translog.Identity, gen uint32) (ed25519.PublicKey, error) {
+	if k, ok := translog.IdentityKey(ids, gen); ok {
+		return k, nil
+	}
+	if gen == 0 || len(ids) == 0 || uint64(gen) > uint64(len(ids))+translog.MaxIdentities {
+		return nil, fmt.Errorf("identity generation %d unknown", gen)
+	}
+	key := ids[len(ids)-1].Pub
+	for g := uint32(len(ids)) + 1; g <= gen; g++ {
+		ents, err := tl.Lookup(translog.KindPlatform, []byte(store.PlatformFileName("identity", g, "succ")))
+		if err != nil {
+			return nil, err
+		}
+		if len(ents) == 0 {
+			return nil, fmt.Errorf("succession to identity generation %d not in the log", g)
+		}
+		sc, err := keys.DecodePlatformSuccession(ents[0].Content)
+		if err != nil || sc.Gen != g || sc.Verify(key, g-1) != nil {
+			return nil, fmt.Errorf("succession to identity generation %d", g)
+		}
+		key = sc.Pub
+	}
+	return key, nil
+}
 
 // devPinWarning is printed by a build with the development ceremony when
 // it runs with a development pin.
@@ -677,9 +724,29 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if _, ok := translog.FindRevoked(rev, store.KeyRoleAdmin, gen); ok {
 		return fail(stderr, usageError{adminRevoked})
 	}
-	cert, err := st.ReadPlatformCert(keys.RoleAdmin, gen)
-	if err != nil || !cert.Pub.Equal(admin.Public()) {
-		return fail(stderr, errors.New("der Admin-Schlüssel passt nicht zu admin-<gen>.cert"))
+	// One read of admin-<gen>.cert (store.ReadPlatformCertRaw, task 23,
+	// backlog item 63): the key, the signature, identity_gen for the
+	// cascade and the comparison with the log all work on raw.
+	// A failed read carries its cause after the fixed message, as
+	// adminCertInvalid does.
+	cert, raw, err := st.ReadPlatformCertRaw(keys.RoleAdmin, gen)
+	if err != nil {
+		return fail(stderr, fmt.Errorf("%s: %w", adminKeyMismatch, err))
+	}
+	if !cert.Pub.Equal(admin.Public()) {
+		return fail(stderr, errors.New(adminKeyMismatch))
+	}
+	// The signature with the key of identity_gen (the pin's identity
+	// list, above it the valid logged successions, as client/read.go
+	// identityKey): before it, identity_gen is not authenticated and the
+	// cascade check below could be bypassed by a forged identity_gen.
+	// The cause follows the fixed message (backlog item 63, rework F3).
+	idKey, err := identityKey(tl, ids, cert.IdentityGen)
+	if err == nil {
+		err = cert.Verify(idKey)
+	}
+	if err != nil {
+		return fail(stderr, fmt.Errorf("%s: %w", adminCertInvalid, err))
 	}
 	// The cascade (D93, addendum on task 21a): an assignment logged from
 	// revoked_at_size of the identity generation that issued
@@ -688,14 +755,12 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if _, ok := translog.FindRevoked(rev, store.KeyRoleIdentity, cert.IdentityGen); ok {
 		return fail(stderr, usageError{adminRevoked})
 	}
-	// Signed assignment for the log (2.3); addresses.json is the working copy.
-	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: time.Now().UnixMilli(), AdminGen: gen}
-	if err := a.Sign(admin); err != nil {
-		return failAddr(stderr, err, pos[1], addr)
-	}
-	enc, err := a.Encode()
-	if err != nil {
-		return failAddr(stderr, err, pos[1], addr)
+	// The certificate in the log (2.3, translog doc.go "Platform
+	// generations"), on the same bytes: Append checks the assignment
+	// against the logged certificate (admitAddress) and would refuse
+	// later with a less clear error.
+	if err := tl.CheckPlatform(store.PlatformFileName("admin", gen, "cert"), raw); err != nil {
+		return fail(stderr, fmt.Errorf("%s: %w", adminCertInvalid, err))
 	}
 	// The signed assignment goes into the log before the working copy
 	// addresses.json changes (2.3, translog doc.go "Who writes"). Under
@@ -723,7 +788,21 @@ func address(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return failAddr(stderr, err, pos[1], addr)
 	}
-	if err := checkAddressFree(st, tl, addr, mbx); err != nil {
+	last, logged, err := checkAddressFree(st, tl, addr, mbx)
+	if err != nil {
+		unlock()
+		return failAddr(stderr, err, pos[1], addr)
+	}
+	// Signed assignment for the log (2.3); addresses.json is the working
+	// copy. Its valid_from comes from the log under addresses.lock
+	// (assignmentValidFrom, backlog item 41, D80 addendum 20j).
+	a := &store.AddressAssignment{Address: addr, MailboxID: mbx, ValidFrom: assignmentValidFrom(addressNow().UnixMilli(), last, logged), AdminGen: gen}
+	if err := a.Sign(admin); err != nil {
+		unlock()
+		return failAddr(stderr, err, pos[1], addr)
+	}
+	enc, err := a.Encode()
+	if err != nil {
 		unlock()
 		return failAddr(stderr, err, pos[1], addr)
 	}
@@ -752,30 +831,64 @@ var addressHook func()
 
 // checkAddressFree reports a usageError unless addr is unassigned or
 // assigned to mbx in addresses.json and in every valid entry of the log
-// for it. The message names the mailbox only, never the address.
-func checkAddressFree(st *store.Store, tl translog.Log, addr string, mbx store.ID) error {
+// for it. The message names the mailbox only, never the address. It
+// returns the largest valid_from of those entries (backlog item 41;
+// Lookup returns them in log order, where it increases, admitAddress), and
+// whether there is one.
+func checkAddressFree(st *store.Store, tl translog.Log, addr string, mbx store.ID) (last int64, logged bool, err error) {
 	assigned := usageError{fmt.Sprintf("Postfach %s: Adresse bereits zugeordnet", mbx)}
 	cur, err := st.LoadAddresses()
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	if old, ok := cur[addr]; ok && old != mbx {
-		return assigned
+		return 0, false, assigned
 	}
 	es, err := tl.Lookup(translog.KindAddress, []byte(addr))
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	for _, e := range es {
 		a, err := store.DecodeAddressAssignment(e.Content)
 		if err != nil {
-			return fmt.Errorf("Logeintrag %d: %w", e.Index, err)
+			return 0, false, fmt.Errorf("Logeintrag %d: %w", e.Index, err)
 		}
 		if a.MailboxID != mbx {
-			return assigned
+			return 0, false, assigned
+		}
+		if !logged || a.ValidFrom > last {
+			last, logged = a.ValidFrom, true
 		}
 	}
-	return nil
+	return last, logged, nil
+}
+
+// addressNow is the clock of "address add" for valid_from; time.Now in
+// production, set only by tests of this package.
+var addressNow = time.Now
+
+// assignmentValidFrom returns the valid_from of a new assignment of an
+// address at the time now (backlog item 41, D80 addendum 20j, RUNBOOK
+// 4.2): now, or, when the largest valid_from of the valid assignments of
+// the address in the log (last, if logged) is not before now, last plus
+// 1 ms. So a clock that went back since the last assignment, or that runs
+// behind the one of the computer that made it, no longer ends in
+// ErrOrder ("valid_from does not increase", admitAddress), which needs
+// valid_from to increase per address.
+//
+// Bound: only while last + 1 ms is at most translog.MaxClockSkew after
+// now. Beyond it the result is now, and Append refuses with ErrOrder as
+// before (exit status 1, nothing written): an assignment dated far into
+// the future, such as one a thief of the admin key logged (Q9, F3 of the
+// attack review of task 21a), is never carried on silently. Whatever
+// this returns, Append decides (fail closed).
+func assignmentValidFrom(now, last int64, logged bool) int64 {
+	// last >= now, so the difference fits in a uint64 exactly; last+1
+	// cannot overflow (last < math.MaxInt64).
+	if !logged || last < now || last == math.MaxInt64 || uint64(last)-uint64(now) >= uint64(translog.MaxClockSkew.Milliseconds()) {
+		return now
+	}
+	return last + 1
 }
 
 // failAddr is fail for "address add": the address, as given (raw) or
