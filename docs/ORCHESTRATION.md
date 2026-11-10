@@ -479,3 +479,10 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 12:15 UTC: **26F** geprüft ohne Funde über niedrig. Damit ist Auftrag 26 bis auf den Haltepunkt bei 26A fertig: 26B 76fc484, 26C e060e09, 26D aa44137, 26E c44cc7e mit 2e56813, 26F c16ee34. Doku-Nachzug **26g** (`docs/tasks/26g-docs.md`) startet. Volllauf `fr-n26` läuft.
 - 12:45 UTC: **26g** (14776da) geprüft ohne Funde über niedrig. Alle Meldungen stimmen wörtlich, die Fuzz-Zahlen gleichen den Protokollen, und nichts aus 26A ist als vorhanden beschrieben. Die kleine Nacharbeit 26g2 setzt die sechs niedrigen Textpunkte mit Ersatztext um. Volllauf `fr-n26`: 21 von 67.
 - 12:50 UTC: **26g2** (c122809) fertig. Die Ersatztexte sind am Code geprüft, mit zwei begründeten Abweichungen; dazu zwei Stellen an R48 angeglichen. Diff durchgesehen, kein Modellname. Doku 26g ist mit c122809 bereit für den Merge.
+- 12:51 UTC: Auftrag 27 (`docs/tasks/27-nach-m1-nacht2b.md`, Basis `orch/n26`), vier Pakete ohne gemeinsame Dateien:
+  - 27A: `publish`, Nr. 40 teilweise sowie Nr. 86, 87, 90;
+  - 27B: Prüfskript für Release-Builds, Nr. 19;
+  - 27C: `from:`/`to:` für `unprocessed`, Nr. 47; endet mit einem Bericht, falls ein Format berührt ist;
+  - 27D: kleine Reste, Nr. 84, 88, 89, 91.
+
+  Ausgeschlossen bleiben Punkte mit Frage, Entscheidung, neuem Befehl oder Formatänderung.
