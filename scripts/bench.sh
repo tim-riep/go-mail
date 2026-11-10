@@ -24,7 +24,8 @@
 #                steal time of every group are noted in the raw output and
 #                the table either way
 #   -dir DIR     temporary directory of the benchmarks (TMPDIR); its file
-#                system is part of the result
+#                system is part of the result and must hold a FIFO (exit
+#                2 before anything runs otherwise, not with -render)
 #   -o FILE      write the Markdown table to FILE as well; exit 2 before
 #                anything runs if FILE cannot be written (as -raw)
 #   -raw FILE    keep the raw go test output in FILE (benchstat format);
@@ -364,7 +365,20 @@ fi
 # bench-raw.txt (raw.txt without the group-benchtime lines, for -render)
 # into $work, keeps $work (without the FIFO of bgwait) and names it on
 # stderr, after why (what went wrong, if bench.sh knows it).
+#
+# On the measurement path the FIFO of the guard of bgwait ($work/guard)
+# is made and opened right after mktemp, before anything runs or is
+# printed: a TMPDIR on a file system without FIFOs (vfat, some FUSE)
+# ends bench.sh here with 2, $work removed. -render needs no FIFO.
 work="$(mktemp -d)"
+guardw=""
+if [ "$renderset" = 0 ]; then
+	if ! { mkfifo -- "$work/guard" && exec {guardw}<>"$work/guard"; } 2>/dev/null; then
+		rm -rf -- "$work"
+		echo "bench.sh: cannot make a FIFO in $work (TMPDIR on a file system without FIFOs?); nothing run" >&2
+		exit 2
+	fi
+fi
 rawfile="$work/raw.txt"
 why=""
 rawsafe=0
@@ -408,20 +422,16 @@ trap onexit EXIT
 #
 # guard, a process of the group, ends the group when bash is gone
 # without its traps (KILL): it reads the FIFO $work/guard, which bash
-# holds open for writing (guardw) and no process of the group does, so
-# that the read ends (end of file) only once bash has ended. It opens
-# the FIFO before the group closes guardw (no wait for a writer, also if
-# bash is already gone). When "$@" ends, the group ends guard. A group
-# stopped as a whole (SIGSTOP to it) stops guard as well; when bash then
-# dies, the group is orphaned, and the kernel sends it SIGHUP and
-# SIGCONT, unless a child subreaper in the session of bash adopts it.
-guardw=""
+# made and holds open for writing (guardw, right after mktemp) and no
+# process of the group does, so that the read ends (end of file) only
+# once bash has ended. It opens the FIFO before the group closes guardw
+# (no wait for a writer, also if bash is already gone). When "$@" ends,
+# the group ends guard. A group stopped as a whole (SIGSTOP to it) stops
+# guard as well; when bash then dies, the group is orphaned, and the
+# kernel sends it SIGHUP and SIGCONT, unless a child subreaper in the
+# session of bash adopts it.
 bgwait() {
 	local pid rc=0
-	if [ -z "$guardw" ]; then
-		mkfifo -- "$work/guard"
-		exec {guardw}<>"$work/guard"
-	fi
 	set -m
 	{
 		trap '' TTOU TTIN QUIT

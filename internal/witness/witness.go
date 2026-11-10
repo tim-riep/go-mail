@@ -84,13 +84,18 @@
 // restart, a timeout of loghttp.NewHTTPServer) fails like every network
 // failure (ErrUnavailable), with the same retry in the next round. A
 // keep-alive connection closed while idle (loghttp.IdleTimeout) is
-// usually noticed by net/http before the next request, which then goes
-// on a new connection; after an answer with Connection: close net/http
-// does not reuse the connection at all. When the request meets the
-// close instead, http.Transport sends it again on a new connection if
-// nothing of it was written yet, or if it is a GET (GET /head,
-// GET /consistency) that got no byte of an answer; a POST /cosign that
-// was written fails the round like any other closed connection.
+// usually noticed by net/http before the next request, which then
+// takes another connection; after an answer with Connection: close
+// net/http does not reuse the connection at all. A request sent on a
+// reused keep-alive connection can still meet a close of it, whatever
+// the cause (the idle timeout, a restart, a timeout of
+// loghttp.NewHTTPServer): http.Transport then sends it again, on
+// another connection (an idle one of its pool or a new one), if nothing
+// of it was written yet (also a POST /cosign, whose body it can send
+// again), or if it is a GET (GET /head, GET /consistency) that got no
+// byte of an answer. A POST /cosign that was written, and any request
+// on a connection used for the first time, fails the round like any
+// other closed connection.
 //
 // Reading: the witness pulls and posts back (the server needs no route
 // to the witness and the witness opens no port). The alternative, the
