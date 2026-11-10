@@ -25,7 +25,7 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich.
 - **A (`publish`):**
   - RUNBOOK 7.3, „Fremde Dateien in `platform/`“, Fall 4: Symlinks und harte Links (`Nlink > 1`; `.tmp-*` zählt nicht) unter einem Namen des Exports gelten nie als gleich. Ist der Name frei, ersetzt `publish` den Eintrag, sonst erscheint `linkErr` mit Hinweis. FIFO, Gerät und Verzeichnis werden abgelehnt (`is not a regular file`). „written meanwhile“ prüft mit `readEntry`. F4 (`sameButLogged`) gilt auch für Dateien.
   - `witnesses.rec` und nachgeloggte Nachfolgen folgen Links weiter.
-  - `find … \( -type l -o -links +1 \)`.
+  - `find … \( -type l -o -type f -links +1 \)`.
   - RUNBOOK 7.3, „Zertifikate des Diebs“: F4 und die neuen Meldungen.
   - RUNBOOK 8.6: neue und geänderte Zeilen, Meldungstexte wörtlich aus dem Code.
   - D93: Nachtrag 24 A.
