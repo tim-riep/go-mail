@@ -486,3 +486,4 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
   - 27D: kleine Reste, Nr. 84, 88, 89, 91.
 
   Ausgeschlossen bleiben Punkte mit Frage, Entscheidung, neuem Befehl oder Formatänderung.
+- 13:19 UTC: 27A, 27B, 27C, 27D gestartet (12:53). 27B (e6f5954) fertig, Prüfung mit zwei Funden mittel (gequotete Tags, fehlende Hilfsprogramme; 20-notes); Nacharbeit 27B2 in neuem Kontext gestartet. Volllauf fr-n26 läuft.
