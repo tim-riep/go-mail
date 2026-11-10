@@ -193,7 +193,16 @@
 // log is never replaced by other content. A file of data/platform/
 // written over a logged one is put back by running the same publish
 // again (the export's file is that valid entry; likewise the public key
-// of a logged admin or ingest certificate). admin-rotate
+// of a logged admin or ingest certificate), but not a file that publish
+// refuses before it looks at the log (ceremony checkDataPlatform: one
+// that does not decode, does not verify with the pin, certifies another
+// key than its name says or names an identity generation the pin does
+// not know, and a foreign identity-<g>.pub): the operator removes such a
+// file by hand. A symbolic link under a name of the export is never
+// taken for the export's file, whatever it points to and also when it
+// dangles: publish replaces the link itself (not its target) when the
+// name is free by the rules above, and refuses it otherwise, naming the
+// link, before it writes anything. admin-rotate
 // alone does not end a leaked admin key (it can still assign with a
 // backdated valid_from): revoke does.
 //

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -130,6 +132,81 @@ func readData(st *store.Store, name string) ([]byte, error) {
 	return b, err
 }
 
+// readEntry reads platform/<name> of the data directory for the
+// comparison with the export's file of that name (backlog 54 and 55): it
+// looks at the entry itself first (os.Lstat). A missing entry is
+// (nil, "", nil). A symbolic link, a dangling one as well, is
+// (nil, "a symbolic link", nil) and is never read; a regular file with
+// another name besides (a hard link, Nlink > 1, not counting temporary
+// files of store in platform/ that a crash left) is
+// (nil, "a hard link", nil). Whatever such an entry points to, it is
+// never taken for the export's file (its target, or the file under its
+// other name, can change after publish, and with it what server and
+// clients read); it is replaced by the export's file when freeName frees
+// the name and refused otherwise (linkErr), before anything is written.
+// Every other entry is read by readData: a regular file, or
+// store.ErrNotRegular for a FIFO, a device or a directory, refused
+// before anything is written (none of them is replaced: a directory
+// cannot be renamed over). witnesses.rec is not looked at here.
+func readEntry(st *store.Store, name string) ([]byte, string, error) {
+	fi, err := os.Lstat(st.Path("platform", name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		return nil, "a symbolic link", nil
+	}
+	b, err := readData(st, name)
+	if err != nil || b == nil {
+		return b, "", err
+	}
+	if n := nlink(fi); n > 1 && n > 1+tempNames(st, fi) {
+		return nil, "a hard link", nil
+	}
+	return b, "", nil
+}
+
+// nlink returns the number of names of the file fi from its system data
+// (the field Nlink of syscall.Stat_t, whose type differs between
+// systems), or 1 where the system gives none.
+func nlink(fi fs.FileInfo) uint64 {
+	v := reflect.ValueOf(fi.Sys())
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return 1
+	}
+	n := v.FieldByName("Nlink")
+	if !n.IsValid() || !n.CanUint() {
+		return 1
+	}
+	return n.Uint()
+}
+
+// tempNames counts the temporary files of store (".tmp-") in platform/
+// that are the file fi: a crash of store.CreateFileAtomic between its
+// link and its remove leaves one, which is no foreign name.
+func tempNames(st *store.Store, fi fs.FileInfo) uint64 {
+	ents, err := os.ReadDir(st.Path("platform"))
+	if err != nil {
+		return 0
+	}
+	var k uint64
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), ".tmp-") || !e.Type().IsRegular() {
+			continue
+		}
+		if ti, err := os.Lstat(st.Path("platform", e.Name())); err == nil && os.SameFile(fi, ti) {
+			k++
+		}
+	}
+	return k
+}
+
 // unknownGen reports a file that names an identity generation the pin
 // does not know (operating rule of Q10 point 5).
 func unknownGen(name string, g, pinGen uint32) error {
@@ -148,9 +225,12 @@ func unknownGen(name string, g, pinGen uint32) error {
 // pin's key of its identity_gen; task 15g point 2b): a file of
 // platform/ that does not verify is translog.ErrMismatch, never counted
 // and never logged; the operator removes it on purpose after finding out
-// where it came from. Other files (witnesses.rec, temporary files) are
-// not looked at here; the successions in the log are checked by
-// checkDataLog.
+// where it came from; Publish never heals such a file (freeName). Other
+// files (witnesses.rec, temporary files) are not looked at here, nor are
+// entries that are no regular files (a symbolic link is not followed):
+// under a name of the export the comparison of runPublish never takes
+// one, nor a hard link, for the export's file (readEntry). The
+// successions in the log are checked by checkDataLog.
 func checkDataPlatform(st *store.Store, pin *store.PlatformPin, known map[uint32]ed25519.PublicKey) error {
 	ents, err := os.ReadDir(st.Path("platform"))
 	if err != nil {
@@ -620,10 +700,12 @@ func runPublish(opts PublishOptions) error {
 		}
 	}
 
-	// Existing files: identical ones are skipped; one with other content
-	// is replaced only when its name is free in the log or its valid
-	// entry is the export's file (freeName), and refused otherwise,
-	// before anything is written.
+	// Existing files: identical regular files are skipped, unless a valid
+	// entry of the log holds the name with other content
+	// (sameButLogged); one with other content, and a symbolic or hard link
+	// whatever it points to (readEntry), is replaced only when its name is
+	// free in the log or its valid entry is the export's file (freeName),
+	// and refused otherwise, before anything is written.
 	names := make([]string, 0, len(files))
 	for n := range files {
 		names = append(names, n)
@@ -632,15 +714,18 @@ func runPublish(opts PublishOptions) error {
 	var todo []string
 	replace := map[string]bool{}
 	for _, n := range names {
-		have, err := readData(st, n)
+		have, link, err := readEntry(st, n)
 		if err != nil {
 			return err
 		}
-		if have == nil {
+		if have == nil && link == "" {
 			todo = append(todo, n)
 			continue
 		}
-		if bytes.Equal(have, files[n].data) {
+		if link == "" && bytes.Equal(have, files[n].data) {
+			if err := sameButLogged(opts.From, st, log, files[n]); err != nil {
+				return err
+			}
 			continue
 		}
 		free, why, err := freeName(st, log, files, n)
@@ -648,6 +733,9 @@ func runPublish(opts PublishOptions) error {
 			return err
 		}
 		if !free {
+			if link != "" {
+				return linkErr(opts.From, st, files[n], link, why)
+			}
 			return existsErr(opts.From, st, files[n], why)
 		}
 		todo = append(todo, n)
@@ -664,7 +752,9 @@ func runPublish(opts PublishOptions) error {
 	})
 	for _, n := range todo {
 		if replace[n] {
-			// Under the server lock, after every check, atomically.
+			// Under the server lock, after every check, atomically; the
+			// rename replaces a symbolic or hard link itself, never its
+			// target or the file under its other name.
 			if err := store.WriteFileAtomic(st.Path("platform", n), files[n].data); err != nil {
 				return err
 			}
@@ -672,12 +762,18 @@ func runPublish(opts PublishOptions) error {
 			if !errors.Is(err, store.ErrExists) {
 				return err
 			}
-			have, rerr := readData(st, n)
+			// The name was missing above (a dangling link is not missing for
+			// readEntry): another process wrote it meanwhile. A link written
+			// meanwhile is never taken for the export's file either.
+			have, link, rerr := readEntry(st, n)
 			if rerr != nil {
 				return rerr
 			}
+			if link != "" {
+				return linkErr(opts.From, st, files[n], link, written)
+			}
 			if !bytes.Equal(have, files[n].data) {
-				return existsErr(opts.From, st, files[n], " (written meanwhile)")
+				return existsErr(opts.From, st, files[n], written)
 			}
 		}
 		if err := hook("publish-file"); err != nil {
@@ -730,31 +826,42 @@ func runPublish(opts PublishOptions) error {
 }
 
 // freeName decides whether platform/<n> of the data directory, which
-// differs from the export's file n, may be replaced by it (attack review
-// 21c F1; translog doc.go "Reading for the operator": a certificate that
-// field 7 makes invalid holds no key, and <role>-<g>.cert is reissued
-// under the new identity with the same name). A certificate or
-// succession is replaced when the log holds no valid entry of its name
-// under the pin (Log.Lookup returns valid entries only): the entry there
-// is invalid (such as the thief's certificate issued with a revoked
-// identity generation at or above its revoked_at_size, class "revoked")
-// or there is none (a file left by a crash before its log entry, which
-// gives nobody anything: translog doc.go "Platform generations"). It is
-// also replaced when the valid entry of its name is exactly the export's
-// file: the file of the data directory is then foreign (written over the
-// logged one after an earlier publish, for example by a thief with write
-// access to data/platform/), and the export puts back what the log
-// holds, so that running the same publish again heals data/platform/
+// differs from the export's file n or is a symbolic or hard link
+// (readEntry), may be replaced by it (attack review 21c F1; translog
+// doc.go "Reading for the operator": a certificate that field 7 makes
+// invalid holds no key, and <role>-<g>.cert is reissued under the new
+// identity with the same name). A certificate or succession is replaced when the log holds no
+// valid entry of its name under the pin (Log.Lookup returns valid
+// entries only): the entry there is invalid (such as the thief's
+// certificate issued with a revoked identity generation at or above its
+// revoked_at_size, class "revoked") or there is none (a file left by a
+// crash before its log entry, which gives nobody anything: translog
+// doc.go "Platform generations"). It is also replaced when the valid
+// entry of its name is exactly the export's file: the entry of the data
+// directory is then foreign (written over the logged file after an
+// earlier publish, for example by a thief with write access to
+// data/platform/, or a link), and the export puts back what the
+// log holds, so that running the same publish again heals that entry
 // (attack review 21c R-low, task 22 point 1). The public key
 // <role>-<g>.pub of an admin or ingest generation is replaced together
 // with its certificate (when <role>-<g>.cert of the data directory
-// differs from the export's and is replaced by this rule), and when the
-// export's <role>-<g>.cert is the valid entry of the log: Publish has
-// checked that the export's public key is the one that certificate
-// names. Everything else is refused, above all a valid entry with other
-// content than the export's file; why completes the message
-// (existsErr). The caller has checked the export's files already
-// (signature, pin, field 7, prerequisites).
+// differs from the export's or is a link, and is replaced by
+// this rule), and when the export's <role>-<g>.cert is the valid entry
+// of the log: Publish has checked that the export's public key is the
+// one that certificate names. Everything else is refused, above all a
+// valid entry with other content than the export's file and every
+// identity-<g>.pub; why completes the message (existsErr, linkErr). The
+// caller has checked the export's files already (signature, pin, field
+// 7, prerequisites).
+//
+// Healing reaches only what checkDataPlatform lets through. Before any
+// name is looked up in the log, it refuses a regular file of
+// data/platform/ that does not decode, does not verify with the pin,
+// certifies another key than its name says or names an identity
+// generation the pin does not know (garbage, a certificate with a wrong
+// signature or under a wrong name), and a foreign identity-<g>.pub. Such
+// a file is never healed: the operator removes it by hand (backlog 56;
+// RUNBOOK 7.3, "Fremde Dateien in platform/").
 func freeName(st *store.Store, log translog.Log, files map[string]platformFile, n string) (bool, string, error) {
 	f := files[n]
 	cert := n
@@ -774,14 +881,16 @@ func freeName(st *store.Store, log translog.Log, files map[string]platformFile, 
 		if len(es) == 1 && bytes.Equal(es[0].Content, files[cert].data) {
 			return true, "", nil
 		}
-		return false, fmt.Sprintf(", and %s is a valid entry of the log under this pin with other content than the export's: a valid entry is never replaced", cert), nil
+		return false, fmt.Sprintf(", and %s is a valid entry of the log under this pin with other content than the export's%s", cert, validKept), nil
 	}
 	if f.ext == "pub" {
-		have, err := readData(st, cert)
+		// A link as the certificate is never the export's
+		// (readEntry): the certificate is replaced, and its key with it.
+		have, link, err := readEntry(st, cert)
 		if err != nil {
 			return false, "", err
 		}
-		if have == nil || bytes.Equal(have, files[cert].data) {
+		if link == "" && (have == nil || bytes.Equal(have, files[cert].data)) {
 			return false, fmt.Sprintf(", while platform/%s is missing there or the same and is no valid entry of the log: a public key is replaced only together with its certificate or under its logged certificate", cert), nil
 		}
 	}
@@ -799,6 +908,65 @@ func existsErr(from string, st *store.Store, f platformFile, why string) error {
 		return fmt.Errorf("%w: %s", store.ErrExists, what)
 	}
 	return fmt.Errorf("%w: %w: %s", store.ErrExists, translog.ErrDuplicate, what)
+}
+
+// validKept ends the reason of freeName and sameButLogged for a name
+// with a valid entry of the log with other content than the export's.
+const validKept = ": a valid entry is never replaced"
+
+// written completes the messages of the "written meanwhile" branch.
+const written = " (written meanwhile)"
+
+// linkErr reports a link (a symbolic link, a dangling one as well, or a
+// hard link: readEntry says which) under the name of the export's file f
+// in platform/ of the data directory whose name freeName does not free
+// (backlog 54 and 55), or one written meanwhile: Publish neither takes it
+// for the export's file nor replaces it, and refuses before anything is
+// written (meanwhile: before the log, after other files possibly). The
+// message names the link, not its target; why completes it as in
+// existsErr, and the errors are those of existsErr. When a valid
+// entry of the log holds the name, removing the link does not help: the
+// export that holds the logged file heals it, and a thief's entry needs
+// a reissue under the next generation (RUNBOOK 7.3).
+func linkErr(from string, st *store.Store, f platformFile, link, why string) error {
+	hint := "look at the link and remove it by hand"
+	if strings.HasSuffix(why, validKept) {
+		cert := f.name
+		if f.ext == "pub" {
+			cert = store.PlatformFileName(f.role, f.gen, "cert")
+		}
+		hint = fmt.Sprintf("look at the link; publish the export that holds the logged %s, which replaces the link, or, if that entry is the thief's, reissue under the next generation (RUNBOOK 7.3)", cert)
+	}
+	done := "nothing written"
+	if why == written {
+		done, hint = "nothing logged", "look at the link, remove it by hand and run the same publish again"
+	}
+	what := fmt.Sprintf("%s is %s, never taken for %s of the export%s; %s: %s",
+		st.Path("platform", f.name), link, filepath.Join(from, "platform", f.name), why, done, hint)
+	if f.ext == "pub" {
+		return fmt.Errorf("%w: %s", store.ErrExists, what)
+	}
+	return fmt.Errorf("%w: %w: %s", store.ErrExists, translog.ErrDuplicate, what)
+}
+
+// sameButLogged refuses a certificate or succession of the data
+// directory equal to the export's file f whose name has a valid entry of
+// the log with other content (review of task 24 A, F4), before anything
+// is written: logging f would fail as a duplicate only after other files
+// are written. A public key goes with its certificate.
+func sameButLogged(from string, st *store.Store, log translog.Log, f platformFile) error {
+	if f.ext == "pub" {
+		return nil
+	}
+	es, err := log.Lookup(translog.KindPlatform, []byte(f.name))
+	if err != nil {
+		return fmt.Errorf("ceremony: looking up %s in the log: %w", f.name, err)
+	}
+	if len(es) == 0 || len(es) == 1 && bytes.Equal(es[0].Content, f.data) {
+		return nil
+	}
+	return fmt.Errorf("%w: %w: %s is the same as %s of the export, and %s is a valid entry of the log under this pin with other content%s",
+		store.ErrExists, translog.ErrDuplicate, st.Path("platform", f.name), filepath.Join(from, "platform", f.name), f.name, validKept)
 }
 
 // checkRevocations checks field 7 of pin against the log (D93;
