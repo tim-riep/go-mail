@@ -436,3 +436,11 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 08:32 UTC: **26D** fertig (f2697ae, nur Tests). Nr. 66: ein Test-Wrapper um `Lookup` trennt den Zweig `sc.Verify`. Nr. 69: Öffnungen der `.cert` per inotify gezählt, M4direct scheitert jetzt. Nr. 79: ohne `CAP_CHOWN` fällt nur der Teil mit fremdem Besitzer weg. Prüfung läuft. Volllauf `fr-n25`: 20 von 67.
 - 08:40 UTC: Prüfung **26D**: ein Fund mittel im Test zu Nr. 69 (inotify fasst Ereignisse zusammen, ein überlappendes zweites Öffnen bleibt unentdeckt). Nacharbeit 26D2 läuft.
 - 08:54 UTC: **26D2** nachgeprüft ohne Funde über niedrig: Paket 26D fertig (aa44137). Volllauf `fr-n25`: 67 von 67.
+- 08:56 UTC: **Volllauf `fr-n25` grün, 67 von 67 Schritten** (02:04 bis 08:49 UTC; Stillstand des Containers 03:28 bis 08:00 UTC; gofmt, vet, `internal/ceremony` und `cmd/gomail-ceremony` liefen nach dem Neustart auf dem Endstand 3ea40f0). **Zusammengeführt (Auftrag 25):**
+  - 25A 5635872 (f6420a6, 4b37e6d, 9fd2156, 49c98e6)
+  - 25B fca9e04 (704ff09, 23fc312)
+  - 25C cdbf4ef (aaf2bd8, 4f4535f)
+  - 25D a57ee9c (8270349, 3beee11, 79bd462)
+  - Doku 25g 4f4b6e6 (aa13f9e, 3c9e491, 0c4d1a9)
+
+  Geprüft: Code gleich `orch/n25`, Dokumente gleich 0c4d1a9, Vektoren unverändert, gofmt und vet mit und ohne Tags grün. Hashes in HANDOFF, AUDIT und in der Liste nach M1 (Nachtrag 25g) eingetragen. **26D** ist fertig (aa44137), wartet aber auf den Volllauf von 26.
