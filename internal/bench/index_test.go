@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,10 @@ import (
 // indexMails is the number of corpus mails client.Index processes per
 // operation of BenchmarkIndex.
 const indexMails = 1000
+
+// segmentMails is the number of corpus mails of BenchmarkIndexSegments
+// (its sub-benchmark mails=<segmentMails>).
+const segmentMails = 1000
 
 // indexKinds are the contents of pending/ of point 2: term lists of the
 // ingest worker (terms) or markers only (unprocessed).
@@ -416,8 +421,8 @@ func indexHeld(tb testing.TB, r *rig, segments int) (before, after segmentStat, 
 // whole procedure; run it with -benchtime=1x. The sizes do not depend on
 // the machine.
 func BenchmarkIndexSegments(b *testing.B) {
-	const n = 1000
-	b.Run("mails=1000", func(b *testing.B) {
+	const n = segmentMails
+	b.Run(fmt.Sprintf("mails=%d", n), func(b *testing.B) {
 		var runs []segmentStat
 		for b.Loop() {
 			runs = indexSegmentRuns(b, n)

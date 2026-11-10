@@ -359,14 +359,18 @@ func envInt(tb testing.TB, name string, def int) int {
 	return n
 }
 
-// memConnsEnv sets the number of connections of point 5.
-const memConnsEnv = "GOMAIL_BENCH_MEM_CONNS"
+// memConnsEnv sets the number of connections of point 5,
+// memConnsDefault if it is unset or empty.
+const (
+	memConnsEnv     = "GOMAIL_BENCH_MEM_CONNS"
+	memConnsDefault = 20
+)
 
-// memConns reads GOMAIL_BENCH_MEM_CONNS (default 20, as in point 5) and
-// refuses more connections than the benchmark server accepts, which
-// would otherwise end in a dial error.
+// memConns reads GOMAIL_BENCH_MEM_CONNS (default memConnsDefault, 20 as
+// in point 5) and refuses more connections than the benchmark server
+// accepts, which would otherwise end in a dial error.
 func memConns() (int, error) {
-	n, err := lookupEnvInt(memConnsEnv, 20)
+	n, err := lookupEnvInt(memConnsEnv, memConnsDefault)
 	if err != nil {
 		return 0, err
 	}

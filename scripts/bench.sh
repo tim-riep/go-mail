@@ -14,9 +14,10 @@
 #                and the smallest and largest value
 #   -benchtime T benchtime of the throughput, Sync and Index benchmarks
 #                (default 1s): a count such as 20x or a duration of Go
-#                with one unit (ns, us, µs, ms, s, m, h) such as 1.5s,
-#                exit 2 otherwise; the memory and the segment size
-#                benchmarks always run once per -count (1x)
+#                with one unit (ns, us, µs or μs, ms, s, m, h) such as
+#                1.5s, not zero (0x, 0s), exit 2 otherwise; the memory
+#                and the segment size benchmarks always run once per
+#                -count (1x)
 #   -maxload L   before every group, wait until the load average of the
 #                last minute is below L (a positive number such as 0.5;
 #                polled every 10 s, at most 30 minutes); the load and the
@@ -24,11 +25,16 @@
 #                the table either way
 #   -dir DIR     temporary directory of the benchmarks (TMPDIR); its file
 #                system is part of the result
-#   -o FILE      write the Markdown table to FILE as well
+#   -o FILE      write the Markdown table to FILE as well; exit 2 before
+#                anything runs if FILE cannot be written (as -raw)
 #   -raw FILE    keep the raw go test output in FILE (benchstat format);
 #                exit 2 before anything runs if FILE cannot be written (a
-#                directory, a missing directory, a file not writable) or
-#                is the -o FILE
+#                directory, a missing directory, a file not writable, a
+#                socket) or is the same regular file as the -o FILE (also
+#                through a symlink, a hard link or a bind mount); a FILE
+#                that is there and is not regular (a FIFO, /dev/null) is
+#                only checked for write permission, not opened, and is
+#                never the same as another
 #   -render FILE measure nothing: print the table of the raw output FILE
 #                of an earlier run (-raw); -count, -benchtime and
 #                GOMAIL_BENCH_MIN_FREE, GOMAIL_BENCH_SYNC_MAILS,
@@ -58,11 +64,11 @@
 # the table shows (names, units, the key: value lines, the times and
 # loads of the groups) may have a |, a backtick or a carriage return;
 # otherwise bench.sh prints what is missing, writes no table and exits
-# with 1. wantnames is kept by hand: a benchmark that internal/bench
-# adds is not required, one that it renames or drops makes every table
-# fail until wantnames follows. A line number in these messages counts
-# the lines of the raw output as the user has it (-raw, bench-raw.txt
-# below or the -render FILE).
+# with 1. wantnames and groups are kept by hand; TestBenchScriptNames in
+# internal/bench fails while they differ from the benchmarks of the
+# package (a benchmark it adds, renames or drops). A line number in
+# these messages counts the lines of the raw output as the user has it
+# (-raw, bench-raw.txt below or the -render FILE).
 #
 # The raw output of a measurement is kept before the table is made:
 # with -raw in FILE, written first. It stays in a new directory under
@@ -70,7 +76,24 @@
 # and the run does not end with a table: without -raw if no table comes
 # out, if FILE cannot be written (bench.sh then writes no table and
 # exits with 1), if go test fails or bench.sh is stopped (INT, TERM,
-# HUP). -render FILE takes bench-raw.txt as it is.
+# HUP). -render FILE takes bench-raw.txt as it is. Such a signal, also
+# one sent to bash alone, ends the running go test with all its
+# processes (a process group of their own) before bash ends.
+#
+# Other signals: QUIT (Ctrl-\) goes on to the group of go test, and
+# bash stays. The test binary and its child processes print their
+# goroutines and end (Go programs), the rest of the group ignores QUIT
+# (tee, so the dump stays in the raw output, and the sleep of -maxload:
+# while bench.sh waits for a quiet machine, Ctrl-\ does nothing); go
+# test then fails, and bench.sh ends with 1 and keeps the raw output as
+# above. KILL ends bash at once, without any trap: a guard in the group
+# of go test sees bash gone and ends the group (TERM, then CONT for a
+# stopped process), so no go test goes on measuring, and names the raw
+# output on stderr, raw.txt in a directory bench.sh made under TMPDIR
+# (-render takes it as it is); -raw and -o are not written. Ctrl-Z
+# (TSTP) stops bash only: go test is not in its process group and goes
+# on measuring, its output still on the terminal; fg resumes bash, and
+# kill %N (TERM, then CONT to a stopped job) ends both as above.
 #
 # Relative paths of -dir, -o, -raw and -render and a relative TMPDIR are
 # taken from the directory bench.sh is called from, not from the root of
@@ -172,11 +195,20 @@ if [ "$maxloadset" = 1 ]; then
 	fi
 fi
 # -benchtime is a count with x or a duration of Go (time.ParseDuration,
-# one number and unit): go test refuses anything else only when its
-# group starts, and the table puts the value in its commands.
-btre='^([0-9]+x|[0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))$'
+# one number and unit; µs with the micro sign U+00B5 or the Greek mu
+# U+03BC, as Go takes both) that is not zero (0x, 0s, 0.0s; go test
+# refuses a count or duration that is not positive): go test refuses
+# anything else only when its group starts, and the table puts the
+# value in its commands. The number is what comes before the first
+# character that is neither a digit nor a dot; the digits are spelled
+# out, a range such as 1-9 depends on the locale.
+btre='^([0-9]+x|[0-9]+([.][0-9]+)?(ns|us|µs|μs|ms|s|m|h))$'
 if ! [[ "$benchtime" =~ $btre ]]; then
 	echo "bench.sh: -benchtime needs a count such as 20x or a duration such as 1s or 1.5m, not '$benchtime'" >&2
+	exit 2
+fi
+if [[ "${benchtime%%[!0123456789.]*}" != *[123456789]* ]]; then
+	echo "bench.sh: -benchtime needs a count or a duration above zero, not '$benchtime'" >&2
 	exit 2
 fi
 if [ "$renderset" = 1 ]; then
@@ -204,36 +236,14 @@ fi
 if [ -n "$out" ]; then abspath out "$out"; fi
 if [ -n "$raw" ]; then abspath raw "$raw"; fi
 
-# samefile is true if the paths $1 and $2 name the same file: the same
-# device and inode if both exist, otherwise the same path once every
-# symlink in it is resolved (realpath -m; a file need not exist). The x
-# keeps a trailing line break of a path.
-samefile() {
-	local a b
-	[ "$1" -ef "$2" ] && return 0
-	a="$(realpath -m -- "$1" 2>/dev/null && echo x)" || a=""
-	b="$(realpath -m -- "$2" 2>/dev/null && echo x)" || b=""
-	if [ -z "$a" ] || [ -z "$b" ]; then a="$1" b="$2"; fi
-	[ "$a" = "$b" ]
-}
-# -o is written last: as the -raw FILE it would replace the raw output
-# by the table, as the -render FILE the input of the table.
-if [ -n "$out" ] && [ -n "$raw" ] && samefile "$raw" "$out"; then
-	echo "bench.sh: -raw and -o are the same file ($raw); nothing run" >&2
-	exit 2
-fi
-if [ -n "$out" ] && [ "$renderset" = 1 ] && samefile "$renderin" "$out"; then
-	echo "bench.sh: -render and -o are the same file ($renderin); nothing run" >&2
-	exit 2
-fi
-
 # The values the table shows must not break it: a line break (LF or
 # CR) ends the row, a | the cell and a backtick the code span of the
 # command. Checked before anything runs (exit 2), for the variables of
-# the env line of internal/bench (envNames in main_test.go: the table
-# shows that line, and puts some of them in its commands, envof in
-# render) and for the name of the -render file (in the "Erzeugt mit"
-# line); what the raw output brings is checked by render (cell).
+# the env line of internal/bench (envNames in main_test.go, in the same
+# order, which TestBenchScriptEnvNames checks: the table shows that
+# line, and puts some of them in its commands, envof in render) and for
+# the name of the -render file (in the "Erzeugt mit" line); what the raw
+# output brings is checked by render (cell).
 tablebad() {
 	case "$1" in *$'\n'* | *$'\r'* | *'|'* | *'`'*) return 0 ;; esac
 	return 1
@@ -249,18 +259,91 @@ if [ "$renderset" = 1 ] && tablebad "$(basename -- "$renderin")"; then
 	echo "bench.sh: the name of the -render file has a line break, a | or a backtick, which would break the table; nothing run" >&2
 	exit 2
 fi
-# -raw must be writable before the first group: a missing directory, a
-# directory or a file that cannot be written would only show after the
-# whole run. The test opens FILE for appending (its content stays) and
-# removes it again if it was not there.
-if [ "$renderset" = 0 ] && [ -n "$raw" ]; then
-	rawnew=0
-	if [ ! -e "$raw" ] && [ ! -L "$raw" ]; then rawnew=1; fi
-	if [ -d "$raw" ] || ! { : >>"$raw"; } 2>/dev/null; then
-		echo "bench.sh: -raw: cannot write $raw (a directory, a missing directory or not writable); nothing run" >&2
-		exit 2
+# -raw and -o must be writable before anything runs: a missing
+# directory, a directory or a file that cannot be written would only
+# show after the whole run (-raw) or after the table (-o). probe FILE
+# opens a regular FILE for appending (its content stays) and creates a
+# new one, which unprobe removes again below. A directory or a socket
+# (also behind a symlink) fails: neither can be opened for writing. Any
+# other file that is there (a FIFO, a device such as /dev/null) is not
+# opened: opening a FIFO waits for a reader or, when one is there, ends
+# it with the close, and the run would then wait for a reader at the
+# end. For it only -w counts. A new FILE is created with noclobber
+# (O_EXCL), so a file someone else makes at the same name meanwhile is
+# never taken for one probe made (and removed); a dangling symlink FILE
+# cannot be created that way (O_EXCL fails on any symlink), so probe
+# creates its target with >>, and there a file made meanwhile at the
+# target is taken for new (if it is still empty, unprobe removes it).
+probed=()
+probe() {
+	if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+		if (set -C && : >"$1") 2>/dev/null; then
+			probed+=("$1")
+			return 0
+		fi
+		# Not created: not writable, or someone else made it meanwhile
+		# (then as for a file that is there).
+		if [ ! -e "$1" ] && [ ! -L "$1" ]; then return 1; fi
 	fi
-	if [ "$rawnew" = 1 ]; then rm -f -- "$raw"; fi
+	if [ -d "$1" ] || [ -S "$1" ]; then return 1; fi
+	if [ -e "$1" ]; then
+		if [ -f "$1" ]; then { : >>"$1"; } 2>/dev/null; else [ -w "$1" ]; fi
+		return
+	fi
+	{ : >>"$1"; } 2>/dev/null || return 1
+	probed+=("$1")
+}
+# unprobe removes the files probe created, if they are still empty
+# regular files: FILE itself, or the file a dangling symlink FILE named
+# (probe created it there), found with readlink -f; if readlink cannot
+# tell, that file stays (empty). The x keeps a trailing line break.
+unprobe() {
+	local f t
+	for f in ${probed[@]+"${probed[@]}"}; do
+		t="$f"
+		if [ -L "$f" ]; then
+			t="$(readlink -f -- "$f" 2>/dev/null && echo x)" || continue
+			t="${t%x}"
+			t="${t%$'\n'}"
+		fi
+		if [ -f "$t" ] && [ ! -s "$t" ] && [ "$t" -ef "$f" ]; then rm -f -- "$t"; fi
+	done
+	probed=()
+}
+# samefile is true if $1 and $2 are the same regular file: the same
+# device and inode (-ef, which follows symlinks and sees a hard link or
+# a bind mount; probe has created a new FILE, so both exist). Two names
+# of a file that is not regular (/dev/null, a FIFO) do not count:
+# writing the table there replaces nothing.
+samefile() {
+	[ -f "$1" ] && [ -f "$2" ] && [ "$1" -ef "$2" ]
+}
+# -o is written last: as the -raw FILE it would replace the raw output
+# by the table, as the -render FILE the input of the table. The probe
+# files go before bench.sh ends here or goes on.
+rawbad=0 outbad=0 same=""
+if [ "$renderset" = 0 ] && [ -n "$raw" ] && ! probe "$raw"; then rawbad=1; fi
+if [ -n "$out" ] && ! probe "$out"; then outbad=1; fi
+if [ -n "$out" ] && [ "$rawbad$outbad" = 00 ]; then
+	if [ "$renderset" = 0 ] && [ -n "$raw" ] && samefile "$raw" "$out"; then same=raw; fi
+	if [ "$renderset" = 1 ] && samefile "$renderin" "$out"; then same=render; fi
+fi
+unprobe
+if [ "$rawbad" = 1 ]; then
+	echo "bench.sh: -raw: cannot write $raw (a directory, a socket, a missing directory or not writable); nothing run" >&2
+	exit 2
+fi
+if [ "$outbad" = 1 ]; then
+	echo "bench.sh: -o: cannot write $out (a directory, a socket, a missing directory or not writable); nothing run" >&2
+	exit 2
+fi
+if [ "$same" = raw ]; then
+	echo "bench.sh: -raw and -o are the same file ($raw); nothing run" >&2
+	exit 2
+fi
+if [ "$same" = render ]; then
+	echo "bench.sh: -render and -o are the same file ($renderin); nothing run" >&2
+	exit 2
 fi
 
 cd -- "$(dirname -- "$0")/.."
@@ -274,12 +357,13 @@ fi
 
 # $work holds the raw output of the run (raw.txt). The EXIT trap
 # removes it, except on the measurement path when the run did not end
-# normally (an exit status other than 0, also from go test, or a signal
-# such as INT, TERM or HUP, after which bash runs the trap with status
-# 0 and finished still 0) and the raw output is neither empty (nothing
-# ran yet) nor in -raw: then it writes bench-raw.txt (raw.txt without
-# the group-benchtime lines, for -render) into $work, keeps $work and
-# names it on stderr, after why (what went wrong, if bench.sh knows it).
+# normally (an exit status other than 0, also from go test, or INT, TERM
+# or HUP, after which stop below ends bash by the signal and bash runs
+# the EXIT trap with status 0 and finished still 0) and the raw output
+# is neither empty (nothing ran yet) nor in -raw: then it writes
+# bench-raw.txt (raw.txt without the group-benchtime lines, for -render)
+# into $work, keeps $work (without the FIFO of bgwait) and names it on
+# stderr, after why (what went wrong, if bench.sh knows it).
 work="$(mktemp -d)"
 rawfile="$work/raw.txt"
 why=""
@@ -291,6 +375,7 @@ onexit() {
 		rm -rf -- "$work"
 		return
 	fi
+	rm -f -- "$work/guard"
 	if [ -z "$why" ]; then
 		if [ "$rc" = 0 ]; then why="the run was stopped"; else why="the run did not finish (exit $rc)"; fi
 	fi
@@ -301,6 +386,115 @@ onexit() {
 	fi
 }
 trap onexit EXIT
+
+# bgwait runs "$@" in the background in a process group of its own (set
+# -m) and waits for it. bash runs the trap of a signal only once the
+# command in the foreground has ended, but at once during wait: an INT,
+# TERM or HUP, also one sent to bash alone, reaches stop below while go
+# test runs. stop ends the whole group (go test, its test binary and the
+# child processes of that, tee), which a signal to bash alone does not
+# reach: no go test goes on measuring and appending to the raw output
+# after bash has ended. At a terminal, the group is not the one in the
+# foreground; Ctrl-C reaches bash, and stop ends the group. The group
+# reads nothing (/dev/null) and ignores SIGTTOU, which would stop it
+# when it writes to the terminal with stty tostop, SIGTTIN, which would
+# stop the whole group when a process of it reads the terminal (it gets
+# an error instead; a reader that tries again would stop the group again
+# right after the CONT of stop, before it takes the TERM), and SIGQUIT,
+# which quit below passes on to it (Go programs take QUIT all the same:
+# the runtime installs its handler also over an inherited SIG_IGN). A
+# trap that does not end bash (quit) ends wait as well; bgwait then
+# waits again while the job runs.
+#
+# guard, a process of the group, ends the group when bash is gone
+# without its traps (KILL): it reads the FIFO $work/guard, which bash
+# holds open for writing (guardw) and no process of the group does, so
+# that the read ends (end of file) only once bash has ended. It opens
+# the FIFO before the group closes guardw (no wait for a writer, also if
+# bash is already gone). When "$@" ends, the group ends guard. A group
+# stopped as a whole (SIGSTOP to it) stops guard as well; when bash then
+# dies, the group is orphaned, and the kernel sends it SIGHUP and
+# SIGCONT, unless a child subreaper in the session of bash adopts it.
+guardw=""
+bgwait() {
+	local pid rc=0
+	if [ -z "$guardw" ]; then
+		mkfifo -- "$work/guard"
+		exec {guardw}<>"$work/guard"
+	fi
+	set -m
+	{
+		trap '' TTOU TTIN QUIT
+		exec {guardr}<"$work/guard" {guardw}>&-
+		# the group, set here: bash expands the words of an
+		# asynchronous command only in the new process
+		job=$BASHPID
+		guard "$job" &
+		guardpid=$!
+		exec {guardr}<&-
+		"$@" || rc=$?
+		kill "$guardpid" 2>/dev/null || true
+		exit "$rc"
+	} </dev/null &
+	set +m
+	pid=$!
+	wait "$pid" || rc=$?
+	while [ "$rc" -gt 128 ] && kill -0 "$pid" 2>/dev/null; do
+		rc=0
+		wait "$pid" || rc=$?
+	done
+	return "$rc"
+}
+
+# guard JOB waits for the end of file on guardr (bash gone), then ends
+# the group JOB (itself spared: TERM ignored first) and names the raw
+# output (removing the FIFO), or removes $work if nothing ran yet, as
+# the EXIT trap would.
+guard() {
+	read -r -u "$guardr" || true
+	trap '' TERM
+	kill -TERM -- "-$1" 2>/dev/null || true
+	kill -CONT -- "-$1" 2>/dev/null || true
+	if [ -s "$rawfile" ]; then
+		rm -f -- "$work/guard"
+		echo "bench.sh: bash ended without its traps; go test was ended; the raw output of the run is in $rawfile (with group-benchtime lines)" >&2
+	else
+		rm -rf -- "$work"
+	fi
+}
+
+# stop is the trap of INT, TERM and HUP: it ends the process group of
+# every job of bgwait with TERM, then CONT (a stopped process, such as
+# one sent SIGSTOP, would take the TERM only once it goes on), waits
+# for them and then ends bash by
+# the signal it got (the caller sees 128 + its number). The EXIT trap
+# keeps the raw output, with why.
+stop() {
+	local p
+	trap - INT TERM HUP QUIT
+	why="the run was stopped (SIG$1)"
+	for p in $(jobs -p); do
+		kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+		kill -CONT -- "-$p" 2>/dev/null || kill -CONT "$p" 2>/dev/null || true
+	done
+	wait 2>/dev/null || true
+	kill -s "$1" "$$"
+	exit 1
+}
+# quit is the trap of QUIT (Ctrl-\): it passes QUIT on to the group of
+# every job of bgwait (see the comment at the top) and leaves bash
+# running; bgwait goes on waiting for go test.
+quit() {
+	local p
+	why="the run got SIGQUIT"
+	for p in $(jobs -p); do
+		kill -QUIT -- "-$p" 2>/dev/null || kill -QUIT "$p" 2>/dev/null || true
+	done
+}
+trap 'stop INT' INT
+trap 'stop TERM' TERM
+trap 'stop HUP' HUP
+trap quit QUIT
 : >"$rawfile"
 
 # load1 prints the load average of the last minute.
@@ -324,7 +518,7 @@ waitload() {
 			exit 1
 		fi
 		i=$((i + 1))
-		sleep 10
+		bgwait sleep 10
 	done
 }
 
@@ -332,15 +526,23 @@ waitload() {
 # and notes the benchtime before the group's lines: the table needs it
 # for the command of every number. Around the group it notes time, load
 # and CPU ticks (group-start, group-end); with -maxload it first waits
-# for a quiet machine.
+# for a quiet machine. go test runs through bgwait (gotest), so that a
+# signal ends it with bash.
 run() {
 	local bt="$1" re="$2"
 	waitload
 	echo "group-benchtime: $bt" >>"$rawfile"
 	echo "group-start: $re $(groupmark)" | tee -a -- "$rawfile" >&2
 	echo "bench.sh: go test -tags gomail_dev -run '^\$' -bench '$re' -benchtime=$bt -count=$count ./internal/bench" >&2
-	go test -tags gomail_dev -run '^$' -bench "$re" -benchtime="$bt" -count="$count" -timeout 0 ./internal/bench | tee -a -- "$rawfile" >&2
+	bgwait gotest
 	echo "group-end: $re $(groupmark)" | tee -a -- "$rawfile" >&2
+}
+
+# gotest is the go test of the group of run (bt and re), its output also
+# in the raw output; with pipefail its status is that of go test if go
+# test fails.
+gotest() {
+	go test -tags gomail_dev -run '^$' -bench "$re" -benchtime="$bt" -count="$count" -timeout 0 ./internal/bench | tee -a -- "$rawfile" >&2
 }
 
 # groups are the -bench patterns of the groups in the order they run;
@@ -357,14 +559,18 @@ groupbt() {
 
 # wantnames are the benchmarks of internal/bench by group, every one by
 # its full name as b.Run makes it: receive_test.go (receiveModes, Sizes,
-# receiveConns), sync_test.go, memory_test.go and index_test.go
-# (indexKinds, BenchmarkIndexSegments); change them together. @SYNC@,
-# @MEMMAILS@ and @MEMCONNS@ stand for the numbers internal/bench takes
-# from GOMAIL_BENCH_SYNC_MAILS, GOMAIL_BENCH_MEM_MAILS and
-# GOMAIL_BENCH_MEM_CONNS (10000, 1000 and 20 if empty or unset). render
+# receiveConns), sync_test.go (syncSubs), memory_test.go (memSizes) and
+# index_test.go (indexKinds, segmentMails); change them together
+# (TestBenchScriptNames compares them, and groups with the benchmark
+# functions). @SYNC@, @MEMMAILS@ and @MEMCONNS@ stand for the numbers
+# internal/bench takes from GOMAIL_BENCH_SYNC_MAILS,
+# GOMAIL_BENCH_MEM_MAILS and GOMAIL_BENCH_MEM_CONNS (syncMailsDefault,
+# memMailsDefault and memConnsDefault, 10000, 1000 and 20, if empty or
+# unset; the test checks these numbers in render as well). render
 # fails if one of them has no line in the raw output: a sub-benchmark
-# that skips or fails before its first iteration prints nothing without
-# -v, and grid sees that only through a sibling with the same name.
+# that skips before its first iteration prints nothing without -v (one
+# that fails prints a --- FAIL line, see render), and grid sees that
+# only through a sibling with the same name.
 wantnames=(
 	BenchmarkReceive/mode={enc,proto,plain}/size={4KiB,64KiB,1MiB,10MiB}/conns={1,4}
 	BenchmarkSync/mails=@SYNC@/{index=off,index=on,list}
@@ -591,8 +797,13 @@ render() {
 	# every message names, does not count them.
 	/^group-benchtime: / { bt = $2; nbt++; next }
 	{ ln = NR - nbt }
-	# A failed or skipped sub-benchmark is reported indented (4 blanks a
-	# level).
+	# go test (go1.26) reports a failed benchmark, also a sub-benchmark,
+	# with "--- FAIL: name" at the start of the line (the log lines below
+	# it are indented by 4 blanks), a skipped one with "--- SKIP: name"
+	# only with -v, which bench.sh does not pass: without it a skip leaves
+	# no line (wantnames and grid see that), a skip after the first
+	# iteration a line with 0 iterations (see below). A FAIL or SKIP line
+	# indented with blanks or tabs counts as well.
 	/^(FAIL|panic: )/ || /^[ \t]*--- (FAIL|SKIP)/ { fail("line " ln " reports a failure or a skip: " $0) }
 	/^group-start: / {
 		if (open) fail("group " gname[ng] " has no group-end")

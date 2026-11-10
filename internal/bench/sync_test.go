@@ -119,6 +119,24 @@ func newSyncRig(tb testing.TB, n int) (*rig, pendingFiles) {
 	return r, snap
 }
 
+// The mails of BenchmarkSync: GOMAIL_BENCH_SYNC_MAILS, syncMailsDefault
+// if it is unset or empty (mails=<n>).
+const (
+	syncMailsEnv     = "GOMAIL_BENCH_SYNC_MAILS"
+	syncMailsDefault = 10_000
+)
+
+// The sub-benchmarks of BenchmarkSync below mails=<n>, in the order they
+// run (syncSubs; TestBenchScriptNames compares the names of the
+// benchmarks with wantnames of scripts/bench.sh).
+const (
+	syncIndexOff = "index=off"
+	syncIndexOn  = "index=on"
+	syncList     = "list"
+)
+
+var syncSubs = []string{syncIndexOff, syncIndexOn, syncList}
+
 // BenchmarkSync measures point 4 of docs/tasks/12: the duration of a
 // client Sync of a mailbox holding GOMAIL_BENCH_SYNC_MAILS mails
 // (default 10,000) of the corpus. Sync keeps the epoch supply and then
@@ -131,10 +149,10 @@ func newSyncRig(tb testing.TB, n int) (*rig, pendingFiles) {
 // inbox, the step whose cost grows with the number of mails as long as
 // Sync does not read mails.
 func BenchmarkSync(b *testing.B) {
-	n := envInt(b, "GOMAIL_BENCH_SYNC_MAILS", 10_000)
+	n := envInt(b, syncMailsEnv, syncMailsDefault)
 	b.Run(fmt.Sprintf("mails=%d", n), func(b *testing.B) {
 		r, snap := newSyncRig(b, n)
-		b.Run("index=off", func(b *testing.B) {
+		b.Run(syncIndexOff, func(b *testing.B) {
 			for b.Loop() {
 				if err := r.user.Client.Sync(); err != nil {
 					b.Fatal(err)
@@ -142,7 +160,7 @@ func BenchmarkSync(b *testing.B) {
 			}
 			b.ReportMetric(b.Elapsed().Seconds()/float64(b.N), "s/sync")
 		})
-		b.Run("index=on", func(b *testing.B) {
+		b.Run(syncIndexOn, func(b *testing.B) {
 			reset := func() {
 				removeSegments(b, r.st, r.mbx)
 				restorePending(b, r.st, r.mbx, snap)
@@ -166,7 +184,7 @@ func BenchmarkSync(b *testing.B) {
 				b.Fatal(err)
 			}
 		})
-		b.Run("list", func(b *testing.B) {
+		b.Run(syncList, func(b *testing.B) {
 			for b.Loop() {
 				l, err := r.user.Client.List(r.mbx, store.ID{})
 				if err != nil || len(l) != n {

@@ -211,6 +211,17 @@ func TestMemLoadChild(t *testing.T) {
 	}
 }
 
+// The mails of a load of BenchmarkServerMemory: GOMAIL_BENCH_MEM_MAILS,
+// memMailsDefault if it is unset or empty.
+const (
+	memMailsEnv     = "GOMAIL_BENCH_MEM_MAILS"
+	memMailsDefault = 1000
+)
+
+// memSizes are the size classes (Sizes) of BenchmarkServerMemory, in
+// the order they run.
+var memSizes = []string{"64KiB", "1MiB"}
+
 // BenchmarkServerMemory measures point 5 of docs/tasks/12: HeapInuse and
 // Sys of runtime.MemStats and VmRSS of /proc/self/status while smtpd +
 // ingest receive GOMAIL_BENCH_MEM_MAILS mails (default 1,000) over
@@ -222,12 +233,12 @@ func TestMemLoadChild(t *testing.T) {
 // -count, starts from the same state; run it with -benchtime=1x.
 func BenchmarkServerMemory(b *testing.B) {
 	testenv.RequireDev(b) // the platform of every run comes from testenv
-	mails := envInt(b, "GOMAIL_BENCH_MEM_MAILS", 1000)
+	mails := envInt(b, memMailsEnv, memMailsDefault)
 	conns, err := memConns()
 	if err != nil {
 		b.Fatal(err)
 	}
-	for _, name := range []string{"64KiB", "1MiB"} {
+	for _, name := range memSizes {
 		sz, _ := SizeByName(name)
 		b.Run(fmt.Sprintf("size=%s/mails=%d/conns=%d", sz.Name, mails, conns), func(b *testing.B) {
 			var peak, rest, base memSample
