@@ -355,3 +355,4 @@ Anweisung des Auftraggebers: „Fahre fort bis morgen 9 Uhr“. M1 ist bedingt e
   - 25D `bench.sh -render`: Quoting, Soll-Liste.
 
   Ihr Volllauf folgt nach dem Merge von 24. Parallel arbeitet 24g (Doku-Nachzug zu 24). Volllauf `fr-n24` (A bis F) läuft.
+- 00:43 UTC: **Paket 25D** (8270349, nur `scripts/bench.sh`) fertig. `envof` quotiert die Werte für die Shell, awk liest sie über `ENVIRON`. Eine Soll-Liste `wantnames` mit den 32 Namen aus `internal/bench` lässt fehlende Kinder mit Exit 1 scheitern. Die vier Rohdateien ergeben weiter dieselbe Tabelle, 12 Mutanten scheitern. Über den Auftrag hinaus verlangt das Skript, dass jede Benchmarkzeile in der Gruppe ihres Benchmarks steht; diese Regel bewertet die Prüfung. Prüfung läuft. Volllauf `fr-n24`: 21 von 67, keiner rot, zurzeit `internal/client`.
