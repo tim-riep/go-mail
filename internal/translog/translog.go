@@ -15,14 +15,14 @@
 // command uses it. The switch --insecure-no-log is gone (task 14 for
 // gomailctl, task 15 for gomail-server and gomail-ceremony): every
 // command runs with the log, and the switch is a usage error. ErrNoLog
-// and Warning, whose texts still name it, remain for Unverified; no
-// command prints Warning.
+// and Warning remain for Unverified; no command returns ErrNoLog or
+// prints Warning, whose text still names the old switch.
 //
 // The interface for milestone M1 (task 03) is laid out in doc.go: the
 // file format of data/log/, the entries and their duplicate keys, the
 // signed heads, who writes, what an attacker with write access to log/
-// achieves, the proofs behind each Check method, and the table of all
-// open phase-3 sites. entry.go, head.go and
+// achieves, the proofs behind each Check method, and the table of the
+// phase-3 sites, all resolved. entry.go, head.go and
 // verifier.go hold the types, log.go the server side and the
 // constructor.
 package translog
@@ -37,8 +37,10 @@ import (
 )
 
 // ErrNoLog is returned when no verifying log is available and the caller
-// did not explicitly accept running without one.
-var ErrNoLog = errors.New("translog: no transparency log available; refusing to start (development only: --insecure-no-log)")
+// did not explicitly accept running without one: by
+// translogtest.NewUnverified without its switch, and by the reading
+// methods of Unverified. No command has a way to run without the log.
+var ErrNoLog = errors.New("translog: no transparency log available; refusing to start")
 
 // Warning is the warning of a start without the log. No command prints
 // it: every command runs with the log, and the switch --insecure-no-log

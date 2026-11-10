@@ -358,9 +358,19 @@ func (s *Store) WritePlatformFile(name string, data []byte) error {
 	return CreateFileAtomic(s.platformFile(name), data)
 }
 
+// platformReadHook, if set, is called with the name of every platform
+// file ReadPlatformFile reads, after the read. Only tests set it
+// (platform23_test.go: ReadPlatformCertRaw reads <role>-<gen>.cert
+// once); it is nil in production.
+var platformReadHook func(name string)
+
 // ReadPlatformFile reads a public platform file.
 func (s *Store) ReadPlatformFile(name string) ([]byte, error) {
-	return ReadFileLimited(s.platformFile(name), MaxRecordFile)
+	data, err := ReadFileLimited(s.platformFile(name), MaxRecordFile)
+	if platformReadHook != nil {
+		platformReadHook(name)
+	}
+	return data, err
 }
 
 // ReadPlatformCert reads and decodes <role>-<gen>.cert and checks that it

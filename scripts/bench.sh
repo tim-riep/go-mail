@@ -30,16 +30,19 @@
 #                GOMAIL_BENCH_MEM_MAILS, GOMAIL_BENCH_MEM_CONNS and TMPDIR
 #                must be those of that run (checked against the command and
 #                env lines of FILE, exactly one of each per group, exit 1
-#                otherwise), the table names no commit
+#                otherwise; an empty variable counts as unset), the table
+#                names no commit
 #
 # An option given with an empty value (-render=, -o "", ...) or with a
 # value that starts with - (-o -render=F, -count -5, ...) ends bench.sh
 # with 2 before anything runs; a path that starts with - is written ./-...
 #
 # The table is fail closed: every group needs at least one benchmark line,
-# every number of a benchmark exactly N values (-count), no line may
-# report a failure or a skipped benchmark; otherwise bench.sh prints what
-# is missing, writes no table (and no -raw file) and exits with 1.
+# every benchmark exactly N lines (-count) with at least one iteration
+# and exactly N values of every number, every sub-benchmark of a group
+# that its siblings have (see render), no line may report a failure or a
+# skipped benchmark, also indented; otherwise bench.sh prints what is
+# missing, writes no table (and no -raw file) and exits with 1.
 #
 # Relative paths of -dir, -o, -raw and -render are taken from the directory
 # bench.sh is called from, not from the root of the repository.
@@ -254,8 +257,46 @@ render() {
 		-v envmem="$(envof GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS)" '
 	# envchk are the variables the table names in its commands (envof
 	# above); with -render, every env line must carry the value of this
-	# call (empty or unset: not in the env line).
+	# call. An env line (internal/bench configLines) names every variable
+	# of the run that was set, also one set to empty (NAME= and two single
+	# quotes), with its value in shell quoting (shellQuote: bare, or in
+	# single quotes, a quote in the value written as quote, backslash,
+	# quote, quote); envval unquotes it before the comparison. A variable
+	# that is not in the env line has the value "". Empty and unset
+	# compare equal: ENVIRON has "" for both, and internal/bench treats an
+	# empty variable as unset.
 	BEGIN { nchk = split("GOMAIL_BENCH_MIN_FREE GOMAIL_BENCH_SYNC_MAILS GOMAIL_BENCH_MEM_MAILS GOMAIL_BENCH_MEM_CONNS TMPDIR", envchk, " ") }
+	# envval returns the unquoted value of variable name in env line rec
+	# ("" if it is not there; the first one if it is there twice). It
+	# reads rec as shell words: outside single quotes a blank ends a word
+	# and a backslash takes the next character literally, inside them
+	# every character up to the next quote is literal. An unterminated
+	# quote or a trailing backslash is an error (fail).
+	function envval(rec, name,   i, n, c, w, q, found, val) {
+		sub(/^env: /, "", rec)
+		n = length(rec); w = ""; q = 0; found = 0; val = ""
+		for (i = 1; i <= n + 1; i++) {
+			c = (i <= n) ? substr(rec, i, 1) : ""
+			if (q) {
+				if (c == "") fail("line " NR " (env) has an unterminated quote")
+				if (c == "\047") q = 0; else w = w c
+				continue
+			}
+			if (c == "" || c == " " || c == "\t") {
+				if (w != "" && !found && index(w, name "=") == 1) { found = 1; val = substr(w, length(name) + 2) }
+				w = ""
+				continue
+			}
+			if (c == "\047") { q = 1; continue }
+			if (c == "\\") {
+				if (i == n) fail("line " NR " (env) ends with a backslash")
+				i++; w = w substr(rec, i, 1)
+				continue
+			}
+			w = w c
+		}
+		return val
+	}
 	function point(name) {
 		if (name ~ /^BenchmarkReceive/) return "1"
 		if (name ~ /^BenchmarkIndexSegments/) return "3"
@@ -303,6 +344,40 @@ render() {
 		for (i = 1; i <= n; i++) if (index(f[i], name "=") == 1) return substr(f[i], length(name) + 2)
 		return ""
 	}
+	# grid fails if a sub-benchmark is missing that its siblings have. A
+	# sub-benchmark that skips (b.Skip) or ends before its first
+	# iteration prints nothing without -v, so the only trace of it is
+	# that the same name is there under the other children of its
+	# parent. The sub-benchmarks of every group form a grid: below a
+	# benchmark, each child has the same sub-benchmarks (names split at
+	# "/"; true for all five groups of internal/bench, BenchmarkReceive
+	# for example has every size and connection count under every mode).
+	# For every parent P, child c and suffix x of a leaf P/c/x, every
+	# other child c2 of P must have the leaf P/c2/x.
+	function grid(   j, k, n, parts, par, suf, key, p, c, x, sib) {
+		for (j = 1; j <= nnames; j++) {
+			n = split(names[j], parts, "/")
+			par = parts[1]
+			for (k = 2; k <= n; k++) {
+				suf = ""
+				for (p = k + 1; p <= n; p++) suf = suf (p > k + 1 ? "/" : "") parts[p]
+				key = gof[names[j]] SUBSEP par
+				if (!((key, parts[k]) in gchild)) { gchild[key, parts[k]] = 1; gnc[key]++; gc[key, gnc[key]] = parts[k] }
+				if (!((key, suf) in gsuf)) { gsuf[key, suf] = parts[k]; gns[key]++; gs[key, gns[key]] = suf }
+				gleaf[key, parts[k], suf] = 1
+				if (!(key in gpar)) { gpar[key] = par; gkeys[++ngkeys] = key }
+				par = par "/" parts[k]
+			}
+		}
+		for (j = 1; j <= ngkeys; j++) {
+			key = gkeys[j]
+			for (c = 1; c <= gnc[key]; c++) for (x = 1; x <= gns[key]; x++) {
+				if ((key, gc[key, c], gs[key, x]) in gleaf) continue
+				sib = gsuf[key, gs[key, x]]
+				fail(gpar[key] "/" gc[key, c] (gs[key, x] != "" ? "/" gs[key, x] : "") " is missing, " gpar[key] "/" sib (gs[key, x] != "" ? "/" gs[key, x] : "") " is there")
+			}
+		}
+	}
 	# fail names what is wrong with the raw output and ends awk with 1;
 	# END then prints nothing.
 	function fail(msg) {
@@ -310,7 +385,9 @@ render() {
 		failed = 1
 		exit 1
 	}
-	/^(FAIL|--- FAIL|--- SKIP|panic: )/ { fail("line " NR " reports a failure or a skip: " $0) }
+	# A failed or skipped sub-benchmark is reported indented (4 blanks a
+	# level).
+	/^(FAIL|panic: )/ || /^[ \t]*--- (FAIL|SKIP)/ { fail("line " NR " reports a failure or a skip: " $0) }
 	/^group-benchtime: / { bt = $2; next }
 	/^group-start: / {
 		if (open) fail("group " gname[ng] " has no group-end")
@@ -332,7 +409,7 @@ render() {
 		fail("line " NR " (" $0 ") does not match -benchtime " bt " and -count " count " of this call")
 	}
 	render && /^env: / {
-		for (ci = 1; ci <= nchk; ci++) if (field($0, envchk[ci]) != ENVIRON[envchk[ci]]) fail("line " NR " (" $0 ") does not match " envchk[ci] "=" ENVIRON[envchk[ci]] " of this call")
+		for (ci = 1; ci <= nchk; ci++) if (envval($0, envchk[ci]) != ENVIRON[envchk[ci]]) fail("line " NR " (" $0 ") does not match " envchk[ci] "=" ENVIRON[envchk[ci]] " of this call")
 	}
 	/^[a-z]+: / {
 		k = $1; sub(/:$/, "", k)
@@ -344,9 +421,13 @@ render() {
 	/^Benchmark/ {
 		if (!open) fail("benchmark line " NR " outside a group: " $1)
 		if (NF < 4 || NF % 2 || $2 !~ /^[0-9]+$/) fail("benchmark line " NR " is not name, iterations and value-unit pairs: " $0)
+		# 0 iterations: the benchmark did not run in this repetition (a
+		# b.Skip after the first one leaves such a line, NaN ns/op).
+		if ($2 !~ /^[1-9]/) fail("benchmark line " NR " reports 0 iterations: " $0)
 		gnb[ng]++
 		name = $1; sub(/-[0-9]+$/, "", name)
-		if (!(name in seen)) { seen[name] = 1; names[++nnames] = name; btof[name] = bt }
+		if (!(name in seen)) { seen[name] = 1; names[++nnames] = name; btof[name] = bt; gof[name] = ng }
+		nlines[name]++
 		for (i = 3; i + 1 <= NF; i += 2) {
 			if ($i !~ /^-?[0-9]+([.][0-9]+)?$/) fail("benchmark line " NR ": value " $i " is not a number")
 			unit = $(i + 1)
@@ -366,6 +447,11 @@ render() {
 			if (gnb[i] < 1) fail("group " gname[i] " has no benchmark line")
 			if (render && !((i, "command:") in hdr && (i, "env:") in hdr)) fail("group " gname[i] " has no command or no env line")
 		}
+		for (j = 1; j <= nnames; j++) {
+			s = names[j]
+			if (nlines[s] != count + 0) fail(s ": " nlines[s] " lines, -count " count " expected")
+		}
+		grid()
 		for (j = 1; j <= nnames; j++) {
 			s = names[j]
 			if (nu[s] < 1) fail(s " reports no number the table shows")

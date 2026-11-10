@@ -1332,9 +1332,17 @@
 //     and server follow in task 21b, the ceremony (succeed
 //     --compromised, revoke, admin-rotate) in task 21c.
 //
-// # Open phase-3 log sites
+// # Phase-3 log sites (all resolved)
 //
-// The sites carry the TODO tag that HANDOFF.md lists under "Alle
+// State after M1: no site is open. Every row of the table below is done
+// in the task of its last column; the 11 marks that remained in
+// translogtest after task 14 were only names, not open log paths
+// (Unverified is used by tests only, see its type comment), and task 24
+// replaced them with comments on what each method of the test double
+// accepts. The grep below now counts 0. The rest of this section is the
+// history of the count.
+//
+// The sites carried the TODO tag that HANDOFF.md lists under "Alle
 // TODO(phase3-...)"; neither this file nor the package comment in
 // translog.go spells the tag out, so that a grep for it finds the sites
 // only (finding 03c-8e). The count (finding 03d-8) is the output of
@@ -1377,9 +1385,13 @@
 // init --dev (InitDev) exists only in a build with the tag gomail_dev.
 // Task 14 resolves the 14 sites of internal/client (the rows marked 14
 // below) and removes the switch of gomailctl: 11 sites remain, all in
-// translogtest (Unverified, used by tests only).
+// translogtest (Unverified, used by tests only). Task 24 (after M1)
+// turns these 11 marks into comments: 0 sites.
 //
-//	file, function                         check today            replaced by (new interface)                          task
+// The column "check" is the call of phase 1 that each site made; every
+// replacement is built (rows without "(done)" by task 14).
+//
+//	file, function                         check (phase 1)        replaced by (new interface)                          task
 //	client/client.go Open                  CheckFresh             Refresh(now), head into state.json, CheckFresh       14
 //	client/client.go Open                  CheckUser (own)        CheckUser (+ErrSuperseded), checkpoint after Refresh 14
 //	client/mailbox.go createEpoch          AppendEpoch            Append(KindEpoch, data), remember index in state;     14
@@ -1398,7 +1410,7 @@
 //	cmd/gomail-server main.go address      AppendAddress          Append(KindAddress, enc) (done by task 11)            11
 //	ceremony/initdev_dev.go InitDev        AppendPlatform         Append(KindPlatform, data) to the operator log        15 (done)
 //	ceremony/publish.go Publish            AppendPlatform         AppendPlatform to the operator log (OpenLog, D80)    15b (done)
-//	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15
+//	translog/translogtest Unverified x11   accept everything      --insecure-no-log removed (moved there by task 07)   15, 24 (marks)
 //
 // Not a tagged site, but changed by this design:
 //
@@ -1413,11 +1425,13 @@
 //	                                                              data dir, supply under the lock (03d-4, 03d-5)
 //	client state.json                      head only              + Verifier.Pending, ErrWithheld                       14
 //
-// Without a call site today (task 14): client checkpoints
-// (Verifier.CheckCheckpoint), successions of the platform identity
-// (CheckPlatform on identity-<gen>.succ), compromised platform
-// generations (pin field 7, D93: tasks 21b and 21c), the identity list of the pin
-// (field 8), the comparison of mailbox.rec with the newest logged epoch
-// (Lookup), withheld own entries (ErrWithheld).
+// Without a call site before task 14, and with one after M1: client
+// checkpoints (Verifier.CheckCheckpoint, client/logcheck.go), successions
+// of the platform identity (identity-<gen>.succ, client/read.go
+// identityKey), compromised platform generations (pin field 7, D93:
+// tasks 21b and 21c), the identity list of the pin (field 8,
+// AnchorFromPin in client and ingest), the comparison of mailbox.rec with
+// the newest logged epoch (Lookup, client/logcheck.go), withheld own
+// entries (ErrWithheld, client/log.go).
 
 package translog

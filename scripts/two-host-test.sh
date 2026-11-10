@@ -14,7 +14,9 @@
 # and --witness say where the pin (client host) and the witness key
 # (server host) from the development ceremony of step b are placed: they
 # must not exist yet, their directories must (task 16b finding 3).
-# TODO(task-15b): pin and witness of a real ceremony.
+# Pin and witness come from the development ceremony of the test build
+# on purpose (docs/RUNBOOK.md 9.1 "Testbuild"); pin and witness of a
+# real ceremony are the production path in docs/RUNBOOK.md 1.
 #
 # Production path (task 15h, docs/RUNBOOK.md "Erstinstallation"): a
 # build without the tag gomail_dev has no "gomail-ceremony init --dev".

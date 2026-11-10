@@ -20,9 +20,17 @@ import (
 // NoIndex is the index Unverified returns for an append.
 const NoIndex int64 = -1
 
-// Unverified accepts everything. It exists so that phase 1 can run
-// before the log is built into the programs; every method is a
-// placeholder for phase 3.
+// Unverified accepts everything: every Append and Check method returns
+// nil without looking at its arguments, and the reading methods report
+// that there is no log. It comes from phase 1, when the programs ran
+// before the log was built. Since task 15 (server, ingest, ceremony) and
+// task 14 (client) every command runs with the verifying log of
+// translog.Open, and no production build links this package
+// (cmd/gomail-ceremony build_test.go checks that for the ceremony). It
+// stays for tests that need a translog.Log where the log is not what
+// they test, such as the server side of testenv for ingest or the
+// receipt benchmarks. A test of a rule of the log uses the real log
+// (testenv.NewLogged, translog.Open), never Unverified.
 type Unverified struct{}
 
 var _ translog.Log = (*Unverified)(nil)
@@ -39,37 +47,48 @@ func NewUnverified(insecureNoLog bool) (*Unverified, error) {
 // Verified is false.
 func (*Unverified) Verified() bool { return false }
 
-// TODO(phase3-translog): append user.rec to the log.
+// AppendUser accepts user.rec and logs nothing (the real log appends a
+// KindUser entry).
 func (*Unverified) AppendUser(store.ID, []byte) error { return nil }
 
-// TODO(phase3-translog): append epoch.rec to the log.
+// AppendEpoch accepts epoch.rec and logs nothing (the real log appends a
+// KindEpoch entry).
 func (*Unverified) AppendEpoch(store.ID, uint32, []byte) error { return nil }
 
-// TODO(phase3-translog): append the signed address assignment.
+// AppendAddress accepts the signed address assignment and logs nothing
+// (the real log appends a KindAddress entry).
 func (*Unverified) AppendAddress([]byte) error { return nil }
 
-// TODO(phase3-translog): append certificates and successions.
+// AppendPlatform accepts a certificate or succession and logs nothing
+// (the real log appends a KindPlatform entry).
 func (*Unverified) AppendPlatform(string, []byte) error { return nil }
 
-// TODO(phase3-translog): inclusion proof for user.rec.
+// CheckUser accepts every user.rec (the real log requires its inclusion).
 func (*Unverified) CheckUser(store.ID, []byte) error { return nil }
 
-// TODO(phase3-translog): a generation is valid only from its log entry on.
+// CheckGeneration accepts every generation (the real log accepts a
+// generation only from its log entry on).
 func (*Unverified) CheckGeneration(store.ID, uint32) error { return nil }
 
-// TODO(phase3-translog): signature of a revoked generation logged before the revocation.
+// CheckRevokedSignature accepts every signature (the real log accepts a
+// signature of a revoked generation only if it was logged before the
+// revocation).
 func (*Unverified) CheckRevokedSignature(store.ID, uint32, []byte) error { return nil }
 
-// TODO(phase3-translog): inclusion proof for epoch.rec.
+// CheckEpoch accepts every epoch.rec (the real log requires its
+// inclusion).
 func (*Unverified) CheckEpoch(store.ID, uint32, []byte) error { return nil }
 
-// TODO(phase3-translog): address assignment at the time of receipt.
+// CheckAddress accepts every assignment (the real log checks the
+// assignment valid at the time of receipt).
 func (*Unverified) CheckAddress(string, store.ID, int64) error { return nil }
 
-// TODO(phase3-translog): certificate in the log, generation not compromised.
+// CheckPlatform accepts every certificate (the real log requires it in
+// the log, of a generation that is not revoked).
 func (*Unverified) CheckPlatform(string, []byte) error { return nil }
 
-// TODO(phase3-translog): tree head with witness signature at most 24 hours old.
+// CheckFresh accepts every time (the real log requires a tree head with
+// witness cosignatures at most 24 hours old).
 func (*Unverified) CheckFresh(time.Time) error { return nil }
 
 // Append accepts the record and logs nothing (NoIndex).
