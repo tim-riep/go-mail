@@ -28,11 +28,19 @@
 // *translog.InvalidEntriesError is an alert: the head is used and the
 // indices are logged.
 //
-// Publication: whenever a cosignature was merged into the candidate,
-// the candidate is passed to Operator.PublishHead, which writes
-// heads/<size>.sig once the quorum of witnesses.rec is reached
-// (translog.ErrWitness before that is no error). Tick retries a
-// publication that failed.
+// Publication: whenever a POST /cosign added a cosignature to the
+// candidate, the candidate is passed to Operator.PublishHead, which
+// writes heads/<size>.sig once the quorum of witnesses.rec is reached
+// (translog.ErrWitness before that is no error). A body that adds no
+// line (a replay, also below the quorum) does not call PublishHead
+// (task 25 C). Tick retries a publication that failed or is still below
+// the quorum, at most once per call and before it calls SignHead (task
+// 25 C2): when the publication of the merge that reached the quorum
+// failed and the same Tick replaces the candidate (a grown size after
+// MinGap) or drops it (SignHead refuses), the head with the quorum gets
+// this one more try first; a new candidate has no cosignatures yet. Only
+// when that try fails as well is the head not published; the witnesses
+// then cosign the next candidate.
 //
 // # HTTP (package witness, "Protocol")
 //
@@ -106,9 +114,19 @@
 //     holds a connection for up to ReadTimeout, no slot; many of them
 //     exhaust connections or memory of the process, which only a limit
 //     of connections per source prevents (not part of this package).
-//     Valid public bodies (the candidate's or the published head's own
-//     note) cost a verification each and nothing more: they merge
-//     nothing new, and the published head is not written again.
+//     Every body that gets a slot costs a read of the committed tree
+//     (Operator.LogKeys, one at a time under the lock of the log) before
+//     note.Open, garbage of the right content type included. Every older
+//     valid note with at least one witness line (an earlier candidate's,
+//     public via GET /head while it was the candidate) costs
+//     Operator.Head under the lock of the server as well and is answered
+//     409 (task 25 C2, no change). Valid public bodies (the candidate's or
+//     the published head's own note, before and after the quorum) cost
+//     the read of the committed tree and a verification each, the
+//     published head's note also Operator.Head under the lock of the
+//     server; they merge nothing new, call no PublishHead (task 25 C,
+//     before it the candidate's note below the quorum did, under the lock
+//     of the log, with a log line each) and write nothing.
 //
 // Responses are text/plain; charset=utf-8; error bodies are one line of
 // ASCII without data from the request. Every answer to a request whose
@@ -134,6 +152,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -174,10 +193,43 @@ const (
 const MaxVerifying = witness.MaxWitnesses
 
 // SlotWait is the longest time a request waits for a slot of
-// MaxVerifying before it answers 503: long enough for a burst of
-// verifications (each well below a millisecond) to drain, short enough
-// that a request does not hold its connection for long.
-const SlotWait = time.Second
+// MaxVerifying before it answers 503 (task 25 C: 5 s, before 1 s).
+//
+// Waiters are served in the order they came (blocked senders on a
+// channel), and every request in the queue holds its own connection, so
+// a witness waits behind at most as many requests as there are open
+// connections, each for the time of one verification (the merge and
+// Operator.Head one at a time under the lock of the server). One request
+// per connection holds because the server speaks HTTP/1.1 only (the
+// server of NewHTTPServer serves without TLS and enables no h2c, see
+// http.Server.Protocols). Behind a proxy that multiplexes the requests
+// of its clients (HTTP/2 on the client side), one client connection
+// carries many requests, each on a connection of its own from the
+// proxy: a limit of connections per source then has to count requests,
+// not client connections.
+//
+// A witness gets its slot when the queue drains within SlotWait: the
+// longer wait lets a witness through five times as many connections
+// that flood the server with valid public bodies (measured with the
+// flood test of the review of task 24 D2, 6000 and 9000 connections
+// posting the published head's note or asking GET /head without
+// candidate: with 1 s a quarter to three quarters of the witness rounds
+// got 503, with 5 s every round got through, after 1.6 s to 3.4 s in the
+// median).
+//
+// The times add up. A request reads its body within ReadTimeout and then
+// waits up to SlotWait, so it lives up to about ReadTimeout + SlotWait,
+// and a waiting request holds its connection and its body (at most
+// translog.MaxHeadNote) up to SlotWait longer than a slow body alone.
+// net/http sets the write deadline (WriteTimeout) once the headers are
+// read, so the time of the body plus SlotWait (plus the verification)
+// has to stay below WriteTimeout, else the answer is not written: a body
+// that takes most of ReadTimeout and then waits the full SlotWait gets
+// no answer. A witness sends its small body at once; SlotWait below
+// WriteTimeout and below witness.RequestTimeout (30 s each, the latter
+// the witness's limit for the whole request) leaves its answer, also a
+// 503 at the end of the wait, the time to be written and to arrive.
+const SlotWait = 5 * time.Second
 
 // ErrConfig reports an unusable configuration.
 var ErrConfig = errors.New("loghttp: invalid configuration")
@@ -276,19 +328,21 @@ func New(cfg Config) (*Server, error) {
 // hashPrefix is the first four bytes of a root hash in hex, for logs.
 func hashPrefix(h tlog.Hash) string { return hex.EncodeToString(h[:4]) }
 
-// Tick runs one step of the cadence (package comment): SignHead when
-// MinGap has passed since the last call, a new candidate when the size
-// grew or HeadInterval passed, and a publication of the candidate when
-// cosignatures were merged since the last one.
+// Tick runs one step of the cadence (package comment): a publication of
+// the candidate when cosignatures were merged since the last one, then
+// SignHead when MinGap has passed since the last call, and a new
+// candidate when the size grew or HeadInterval passed. The publication
+// comes first: sign may replace or drop the candidate, and a new one has
+// no cosignatures to publish (task 25 C2).
 func (s *Server) Tick() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.publish()
 	now := s.now()
 	if s.lastTry.IsZero() || now.Sub(s.lastTry) >= s.cfg.MinGap || now.Before(s.lastTry) {
 		s.lastTry = now
 		s.sign(now)
 	}
-	s.publish()
 }
 
 // sign calls SignHead and adopts the head when it is due.
@@ -357,28 +411,31 @@ func (s *Server) publish() {
 	}
 }
 
-// merge adds cosignatures to c (one line per key) and rebuilds its note.
-func (c *candidate) merge(cos []note.Signature) error {
-	added := false
+// merge adds cosignatures to c (one line per key) and rebuilds its note;
+// added reports whether a line was new. The lines are collected in a
+// copy and taken over together with the note only when note.Sign
+// succeeds, so that a failure leaves c.cos and c.note as they were (task
+// 25 C2).
+func (c *candidate) merge(cos []note.Signature) (added bool, err error) {
+	all := slices.Clip(c.cos)
 	for _, n := range cos {
 		dup := false
-		for _, o := range c.cos {
+		for _, o := range all {
 			dup = dup || (o.Name == n.Name && o.Hash == n.Hash)
 		}
 		if !dup {
-			c.cos = append(c.cos, n)
-			added = true
+			all = append(all, n)
 		}
 	}
-	if !added {
-		return nil
+	if len(all) == len(c.cos) {
+		return false, nil
 	}
-	msg, err := note.Sign(&note.Note{Text: c.text, Sigs: append([]note.Signature{c.logSig}, c.cos...)})
+	msg, err := note.Sign(&note.Note{Text: c.text, Sigs: append([]note.Signature{c.logSig}, all...)})
 	if err != nil {
-		return err
+		return false, err
 	}
-	c.note = msg
-	return nil
+	c.cos, c.note = all, msg
+	return true, nil
 }
 
 // Candidate returns a copy of the candidate as a signed head, nil
@@ -729,10 +786,17 @@ func (s *Server) cosign(body []byte) (int, string, []any) {
 	// The candidate carries the signature of the configured log key; a
 	// body for it with another generation's line is not merged.
 	if c := s.cand; c != nil && c.text == n.Text && logSigs[0].Hash == s.cfg.LogKey.KeyHash() {
-		if err := c.merge(cos); err != nil {
+		added, err := c.merge(cos)
+		if err != nil {
 			return http.StatusInternalServerError, "internal error\n", attrs
 		}
-		s.publish()
+		// Only a new line is passed on: a replay of the candidate's own
+		// note (public, GET /head) below the quorum would otherwise call
+		// PublishHead, under the lock of the log, every time (task 25 C).
+		// A publication that failed is retried by Tick.
+		if added {
+			s.publish()
+		}
 		return http.StatusOK, "stored\n", append(attrs, "cosignatures", len(c.cos))
 	}
 	// The newest published head (a witness that fetched it while the

@@ -116,8 +116,18 @@ func TestVerifyingLimit(t *testing.T) {
 	if MaxVerifying < witness.MaxWitnesses {
 		t.Fatalf("MaxVerifying %d below the number of witnesses %d", MaxVerifying, witness.MaxWitnesses)
 	}
-	if SlotWait <= 0 || SlotWait > 5*time.Second {
-		t.Fatalf("SlotWait %v", SlotWait)
+	// SlotWait (its comment): positive and at most the 5 s measured there,
+	// since every second more keeps a waiting request with its connection
+	// and body that much longer (up to ReadTimeout + SlotWait). A witness
+	// sends its body at once, so a request of it that waits the full
+	// SlotWait has to write its answer (the slot's or 503) before the
+	// write deadline, which net/http sets to WriteTimeout once the headers
+	// are read, and the witness has to receive it within its own
+	// RequestTimeout for the whole request: both need SlotWait below the
+	// timeout. How far below is the time of the verification and of the
+	// transfer, which the code does not fix.
+	if SlotWait <= 0 || SlotWait > 5*time.Second || SlotWait >= WriteTimeout || SlotWait >= witness.RequestTimeout {
+		t.Fatalf("SlotWait %v, WriteTimeout %v, witness.RequestTimeout %v", SlotWait, WriteTimeout, witness.RequestTimeout)
 	}
 	e := newEnv(t, 1, 1)
 	e.grow(2)
