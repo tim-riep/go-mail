@@ -452,3 +452,4 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
   - P2: Bei voller Gesamtgrenze schließt der Listener die älteste ruhende Verbindung statt der neuen.
 
   Begründung: Lokal schützen Grenzen je Quelle nicht, weil ein lokaler Prozess beliebige Adressen aus 127/8 nutzen kann; sie träfen nur die Zeugen hinter dem Tunnel. Die Entscheidung kommt als Nachtrag zu D80 in den Doku-Nachzug, zur Prüfung durch den Auftraggeber. **26B**: beide Prüfungen ohne Funde über niedrig. Nacharbeit 26B2 für die niedrigen Punkte (Inode-Wiederverwendung, Pfade in Meldungen, Testlücken) läuft.
+- 09:41 UTC: Prüfung **26C** ohne Funde über niedrig. Ausdrücklich belegt: Der Messcode ist unverändert. Eine kleine Nacharbeit 26C2 für die niedrigen Punkte läuft (Hänger bei angehaltenem Prozess, Signale an die ganze Gruppe, Socket als Ziel, Namenstest).
