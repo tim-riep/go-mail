@@ -434,3 +434,4 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
   - 26D: Testlücken (Nr. 66, 69, 79);
   - 26E: Fuzz-Ziele für die Prüfpfade des Clients und die Zeremonie (Nr. 25).
 - 08:32 UTC: **26D** fertig (f2697ae, nur Tests). Nr. 66: ein Test-Wrapper um `Lookup` trennt den Zweig `sc.Verify`. Nr. 69: Öffnungen der `.cert` per inotify gezählt, M4direct scheitert jetzt. Nr. 79: ohne `CAP_CHOWN` fällt nur der Teil mit fremdem Besitzer weg. Prüfung läuft. Volllauf `fr-n25`: 20 von 67.
+- 08:40 UTC: Prüfung **26D**: ein Fund mittel im Test zu Nr. 69 (inotify fasst Ereignisse zusammen, ein überlappendes zweites Öffnen bleibt unentdeckt). Nacharbeit 26D2 läuft.
