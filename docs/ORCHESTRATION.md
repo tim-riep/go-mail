@@ -513,3 +513,36 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 19:22 UTC: 28C2 (23d5f55 auf 3a9b333) fertig, zwei Nachprüfer gestartet. Entscheidung: `TestUnprocessedMailGrewBeyond` erreicht „grew beyond“ jetzt sicher über fanotify `FAN_ACCESS_PERM` und braucht dafür CAP_SYS_ADMIN; ohne es überspringt er sich mit Grund. Annehmbar, weil es nur ein Test ist, die Volläufe als root laufen und es ohne Eingriff in `store` keinen sicheren Weg ohne Privilegien gibt (→ Liste als Hinweis).
 - 19:54 UTC: 28C abnahmefähig mit 23d5f55 (auf 28D). 28B2 (40fa7ab) in Nachprüfung. Volllauf fr-n28 (ffb7eac, mit 28B in der ersten Fassung 077f5cc) läuft; nach der Nachprüfung von 28B2 wird 077f5cc gegen 40fa7ab getauscht, danach laufen e2e, gofmt und vet neu.
 - 19:55 UTC: 28B abnahmefähig mit 40fa7ab. Damit alle vier Pakete abnahmefähig: 28A 8f15bbf, 28B 40fa7ab, 28D 3a9b333, 28C 23d5f55. Doku-Nachzug 28g (`docs/tasks/28g-docs.md`) gestartet.
+
+## 11. Stand beim Anhalten (11.11.2026, 06:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+**Unterbrechung:** Von etwa 20:00 UTC (10.11.) bis 05:00 UTC (11.11.) ruhte die Arbeit, weil das Wochenlimit der API erreicht war; der Agent für 28g brach dabei ab, und diese Sitzung lief erst um 05:00 UTC wieder an. Der Container wurde dazwischen neu gestartet. Es laufen keine Agenten und keine Volläufe; der stündliche Check-in ist gelöscht.
+
+**Seit dem letzten Bericht (10.11., 09:00 MEZ) zusammengeführt:**
+- Auftrag 26: 26B 5d59f7a, 26C b774de1, 26D 9f2a21d, 26E d7096e1, 26F ed76444, Dokumente 26g 4be6031 (Volllauf fr-n26 67/67). 26A angehalten.
+- Auftrag 27: 27A 6bb71a0, 27B 265b260, 27C c940f98, 27D ea79494 (ohne Nr. 88), Dokumente 27g/27g2 2ffad36 (Volllauf fr-n27 67/67).
+
+**Auftrag 28: alle vier Pakete geprüft und abnahmefähig, aber nicht zusammengeführt.**
+- Endstände (lokale Branches der Worktrees, nicht gepusht; zusätzlich als Patches in `docs/tasks/28-patches/` gesichert):
+  - 28A 8f15bbf auf f8fe095 (z. B. `worktree-agent-a0d5871ea72f22ca2`), Nr. 85, 93, 94, 95 (Tests);
+  - 28B 40fa7ab auf f8fe095 (`worktree-agent-a5cef06a2962917cf`), Nr. 96, 97;
+  - 28D 3a9b333 auf f8fe095 (`worktree-agent-a02c4c884a61e3efb`), Nr. 105;
+  - 28C 23d5f55 auf 3a9b333 (`worktree-agent-a2dd1ff39bb153e58`), Nr. 102, 103, 104, 106, Testteile von 107.
+- Gemeinsame Quelle `orch/n28` (ffb7eac, scratchpad `orch/src-n28`) mit 28B in der ersten Fassung 077f5cc; Volllauf fr-n28 dort 67/67 grün.
+- Fehlt vor dem Zusammenführen:
+  1. In `orch/n28` 077f5cc durch 40fa7ab ersetzen (Reihenfolge 28A, 28B, 28D, 28C); `fr-n28/{gofmt,vet,race-internal_e2e,racetag-internal_e2e}.ok` löschen und `fullrun2.sh` fortsetzen.
+  2. Doku-Nachzug 28g fertigstellen (Auftrag `docs/tasks/28g-docs.md`; angefangener Worktree `agent-a2b7a7a7d5fce0592`, ungeprüft, oder neu beginnen), dann prüfen lassen.
+  3. Zusammenführen je Paket ein Commit wie bei 27, Hashes in HANDOFF, AUDIT und Liste.
+
+**Offene Haltepunkte und Entscheidungen des Auftraggebers** (Liste nach M1, HANDOFF Punkt 9): 26A Grenzen am Listener (Nr. 7, drei Wege); Origin-Fund aus `FuzzState` (Nr. 92); Nr. 88 Namensauswertung (drei Wege); 27C F2 Größenprüfung vorab (Nr. 99); Frage aus `TODO(ask)` in `keygen_pipe_tagged.go` (Nr. 98); offene Teile von Nr. 40; Nr. 100 (Kopf bei jeder `unprocessed`-Mail lesen).
+
+**Entscheidungen des Orchestrators in dieser Nacht (zur Prüfung):**
+- 27A: strengere Ablehnung nicht regulärer Einträge unter `admin-/ingest-<g>.pub` beibehalten (fail closed), Meldung mit Pfad und Abhilfe.
+- 27A2, 27C2, 28D2: niedrige Reste nach zwei Prüfrunden nicht in eine dritte Runde, sondern in die Liste.
+- 27C2 F2 („niedrig bis mittel“) als niedrig eingeordnet (Begründung 20-notes und D91 Nachtrag 27 C).
+- Nr. 88 nach drei Runden angehalten, 27D ohne Nr. 88 zusammengeführt.
+- 28A: Callback-Feld `PublishOptions.WitnessesReplacing` gilt nicht als „neue Option“ (keine Bedienänderung außer einer Ausgabezeile).
+- 28C2: Test für „grew beyond“ über fanotify, braucht CAP_SYS_ADMIN, sonst SKIP.
+- Volläufe vorab auf Ständen gestartet, deren Nachprüfung noch lief; betroffene Schritte danach neu.
+
+**Zwischenfälle:** `/usr/local/go/bin/go` wurde von einem Prüfskript etwa 14:25–14:27 UTC (10.11.) überschrieben und wiederhergestellt (seitdem Regel in allen Aufträgen); Dateimodi im Modulcache kurz geändert und zurückgesetzt; ein Prüftest lief in den Speicher (OOM, nur Testbinary). Die Bitte um Erlaubnis, alte `/tmp/go-build*`-Reste zu löschen, bleibt offen.

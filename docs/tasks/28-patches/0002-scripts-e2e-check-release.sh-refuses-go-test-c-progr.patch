@@ -1,0 +1,797 @@
+From 40fa7abd676f6705dcfa0d52f3b650c8b37c86a7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 19:25:39 +0000
+Subject: [PATCH] scripts, e2e: check-release.sh refuses go test -c programs,
+ GOFLAGS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+scripts/check-release.sh (list after M1 no. 97):
+
+- H3: go version -m shows no safe mark of a test program that
+  go test -c builds of a main package: its build information equals
+  that of a production build without VCS stamp (path, mod "(devel)",
+  same settings; only a non-main package gets the path suffix .test).
+  Check 3 therefore searches for two functions of package testing,
+  which no program of cmd/... imports: testing.tRunner (runs each
+  test) and testing.MainStart (called by the main function that
+  go test generates). A test program whose TestMain never calls m.Run
+  holds no testing.tRunner (the linker drops it), but always
+  testing.MainStart. Each mark found is refused with
+  'enthält "<mark>" (Testprogramm von go test -c)'.
+- H1: the search of check 3 also passes the line GOOS through grep and
+  requires it where check 1 found the setting GOOS: the build
+  information in the file holds "\tGOOS=", so a tr that exits with 0
+  but prints nothing (or drops that part) makes the search fail.
+- H4: the script sets GOFLAGS=-json=false for go. That overrides -json
+  from the environment and from the go env file; an empty GOFLAGS
+  would not reach the latter. Older go versions ignore the flag.
+- H2: the branch "go version with status 0 and no output" is tested.
+
+The header names the remaining limits.
+
+TestCheckRelease (internal/e2e/release27b_test.go) additionally builds
+the test program of gomail-witness with go test -c without tags
+(refused for the two marks alone), the test program of a module it
+writes to a temporary directory whose TestMain calls os.Exit(0) without
+m.Run (refused for testing.MainStart alone), runs the production
+programs with GOFLAGS=-json in the environment and in a go env file
+(exit status 0), a go that exits with 0 and prints nothing, a tr that
+exits with 0 and prints nothing, and a tr that prints its whole output
+and then fails.
+
+TestReleaseSwitches (internal/e2e/release28b_test.go, no. 96) collects
+with go/ast every os.Getenv and os.LookupEnv in the non-test files that
+only a build with gomail_test or gomail_dev compiles, and requires each
+name to be in switches of the script or to match its pattern. A name
+that is not a constant (a literal, a constant of the package, + of
+those) fails the test, and so does, in such a file, any other selector
+named Environ, Getenv, LookupEnv or ExpandEnv whatever its receiver and
+whether called or not ((*exec.Cmd).Environ, os.Environ, syscall.Getenv,
+Getenv of another package, a method value), and any dot import; so
+does an entry of switches that does not match the pattern or that no
+such file reads.
+
+Task: docs/tasks/28-nach-m1-nacht2c.md (Paket 28B)
+---
+ internal/e2e/release27b_test.go | 140 +++++++++++-
+ internal/e2e/release28b_test.go | 393 ++++++++++++++++++++++++++++++++
+ scripts/check-release.sh        |  79 +++++--
+ 3 files changed, 593 insertions(+), 19 deletions(-)
+ create mode 100644 internal/e2e/release28b_test.go
+
+diff --git a/internal/e2e/release27b_test.go b/internal/e2e/release27b_test.go
+index ff944e6..7f09303 100644
+--- a/internal/e2e/release27b_test.go
++++ b/internal/e2e/release27b_test.go
+@@ -139,10 +139,18 @@ func toolPath(t *testing.T, env []string, dir, name string, omit []string, stubs
+ // setting GOOS (also under a file name that holds a line of build
+ // information), files without build information, a directory, an
+ // unreadable file, a missing file, no argument, a PATH without go or
+-// without awk, a go command that fails, and a tool that fails or prints
+-// no number. A production program that ends with a capital letter (as a
++// without awk, a go command that fails or prints nothing, a tool that
++// fails or prints no number, and a tr that exits with 0 but prints
++// nothing. A production program that ends with a capital letter (as a
+ // darwin/arm64 program may) passes. Programs named -m and a\cb are
+-// checked as files and named as given.
++// checked as files and named as given. The test program of
++// gomail-witness that go test -c builds without tags (its build
++// information is that of a production build) is refused for the marks
++// testing.tRunner and testing.MainStart (task 28 package 28B, list after
++// M1 no. 97 H3); a test program whose TestMain exits without m.Run (it
++// holds no testing.tRunner), of a module the test writes, for
++// testing.MainStart. GOFLAGS=-json in the environment or in the go env
++// file does not keep a production program from passing (H4).
+ //
+ // The test builds the programs itself, with exactly the tags of each
+ // case, without VCS stamp and without GOFLAGS, whatever the tags of the
+@@ -328,6 +336,11 @@ func TestCheckRelease(t *testing.T) {
+ 			if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+ 				t.Fatalf("%q: exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", name, code, want, stdout, stderr)
+ 			}
++			// The search of check 3 requires the word GOOS only where
++			// check 1 found the setting.
++			if strings.Contains(stderr, "gescheitert") {
++				t.Fatalf("%q: a search failed:\n%s", name, stderr)
++			}
+ 		}
+ 	})
+ 
+@@ -431,12 +444,25 @@ func TestCheckRelease(t *testing.T) {
+ 		if code != 1 || stdout != "" || stderr != want {
+ 			t.Fatalf("failing go: exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
+ 		}
++
++		// A go command that exits with 0 but prints nothing (list after
++		// M1 no. 97 H2): nothing is checked either.
++		silentGo := toolPath(t, env, dir, "silent-go", nil, map[string]string{"go": "exit 0"})
++		code, stdout, stderr = checkRelease(t, shell, script, "", silentGo, paths(prod)...)
++		want = "check-release.sh: go version gescheitert (Status 0: keine Ausgabe); nichts geprüft\n"
++		if code != 1 || stdout != "" || stderr != want {
++			t.Fatalf("silent go: exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
++		}
+ 	})
+ 
+ 	t.Run("failing tools", func(t *testing.T) {
+ 		// A tool that fails, or awk that prints no number, makes the
+ 		// program not clean.
+ 		p := filepath.Join(prod, "gomail-witness")
++		tr, err := exec.LookPath("tr")
++		if err != nil {
++			t.Fatal(err)
++		}
+ 		for i, c := range []struct {
+ 			tool, stub string
+ 			want       []string
+@@ -444,6 +470,13 @@ func TestCheckRelease(t *testing.T) {
+ 			{"awk", "exit 2", []string{"Auswertung der Build-Informationen gescheitert (awk)"}},
+ 			{"awk", "echo x", []string{"Auswertung der Build-Informationen gescheitert (awk)"}},
+ 			{"tr", "exit 2", []string{"Suche nach Testschaltern gescheitert"}},
++			// A tr that prints its whole output and then fails: the word
++			// GOOS is there, only the missing line -end- tells.
++			{"tr", "'" + tr + "' \"$@\"\nexit 2", []string{"Suche nach Testschaltern gescheitert"}},
++			// A tr that exits with 0 and prints nothing (list after M1
++			// no. 97 H1): the word GOOS of the build information is
++			// missing from its output.
++			{"tr", "exit 0", []string{"Suche nach Testschaltern gescheitert"}},
+ 			{"grep", "exit 2", []string{"Suche nach Testschaltern gescheitert", `Suche nach "INSECURE - DEVELOPMENT ONLY" gescheitert (grep)`}},
+ 			{"sort", "exit 2", []string{"Suche nach Testschaltern gescheitert"}},
+ 		} {
+@@ -459,4 +492,105 @@ func TestCheckRelease(t *testing.T) {
+ 			}
+ 		}
+ 	})
++
++	t.Run("test program", func(t *testing.T) {
++		// go test -c without tags (list after M1 no. 97 H3): the build
++		// information of the test program of a main package is that of
++		// a production build without VCS stamp, and gomail-witness holds
++		// no test switch; only the marks testing.tRunner and
++		// testing.MainStart refuse it.
++		bin := filepath.Join(dir, "testprog")
++		if err := os.Mkdir(bin, 0o700); err != nil {
++			t.Fatal(err)
++		}
++		defer os.RemoveAll(bin)
++		p := filepath.Join(bin, "gomail-witness.test")
++		build := exec.Command(goBin, "test", "-c", "-tags=", "-o", p, "github.com/tim-riep/go-mail/cmd/gomail-witness")
++		build.Env = releaseEnv()
++		if b, err := build.CombinedOutput(); err != nil {
++			t.Fatalf("go test -c: %v\n%s", err, b)
++		}
++		code, stdout, stderr := checkRelease(t, shell, script, "", env, p)
++		for _, m := range []string{"testing.tRunner", "testing.MainStart"} {
++			want := p + `: enthält "` + m + `" (Testprogramm von go test -c)`
++			if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
++				t.Fatalf("exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
++			}
++		}
++		if strings.Count(stderr, p+": ") != 2 {
++			t.Fatalf("another finding; the case no longer tests the marks alone:\n%s", stderr)
++		}
++	})
++
++	t.Run("TestMain without m.Run", func(t *testing.T) {
++		// A test program whose TestMain exits without calling m.Run
++		// holds no testing.tRunner (the linker drops it), but
++		// testing.MainStart, which the main function that go test
++		// generates calls. The module is written here: a main package
++		// with such a TestMain and one test.
++		mod := t.TempDir()
++		for name, text := range map[string]string{
++			"go.mod":       "module example.com/nomrun\n\ngo 1.21\n",
++			"main.go":      "package main\n\nfunc main() {}\n",
++			"main_test.go": "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(0) }\n\nfunc TestNothing(t *testing.T) {}\n",
++		} {
++			if err := os.WriteFile(filepath.Join(mod, name), []byte(text), 0o600); err != nil {
++				t.Fatal(err)
++			}
++		}
++		p := filepath.Join(mod, "nomrun.test")
++		build := exec.Command(goBin, "test", "-c", "-o", p, ".")
++		build.Env, build.Dir = append(releaseEnv(), "GOWORK=off"), mod
++		if b, err := build.CombinedOutput(); err != nil {
++			t.Fatalf("go test -c: %v\n%s", err, b)
++		}
++		code, stdout, stderr := checkRelease(t, shell, script, "", env, p)
++		want := p + `: enthält "testing.MainStart" (Testprogramm von go test -c)`
++		if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
++			t.Fatalf("exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
++		}
++		if strings.Count(stderr, p+": ") != 1 || strings.Contains(stderr, "testing.tRunner") {
++			t.Fatalf("another finding; the case no longer tests testing.MainStart alone:\n%s", stderr)
++		}
++	})
++
++	t.Run("GOFLAGS", func(t *testing.T) {
++		// GOFLAGS=-json makes go version -m print JSON (list after M1
++		// no. 97 H4); the script overrides it, from the environment and
++		// from the go env file (an empty GOFLAGS would not reach the
++		// latter). The go env file of the test is the one go uses, with
++		// GOFLAGS=-json added.
++		var base []string
++		for _, kv := range env {
++			if !strings.HasPrefix(kv, "GOFLAGS=") && !strings.HasPrefix(kv, "GOENV=") {
++				base = append(base, kv)
++			}
++		}
++		out, err := exec.Command(goBin, "env", "GOENV").Output()
++		if err != nil {
++			t.Fatal(err)
++		}
++		var file []byte
++		if name := strings.TrimSpace(string(out)); name != "" && name != "off" {
++			if file, err = os.ReadFile(name); err != nil && !errors.Is(err, os.ErrNotExist) {
++				t.Fatal(err)
++			}
++		}
++		goenv := filepath.Join(dir, "goenv")
++		if err := os.WriteFile(goenv, append(append([]byte{}, file...), "\nGOFLAGS=-json\n"...), 0o600); err != nil {
++			t.Fatal(err)
++		}
++		for _, c := range []struct {
++			name string
++			env  []string
++		}{
++			{"environment", append(append([]string{}, base...), "GOFLAGS=-json")},
++			{"go env file", append(append([]string{}, base...), "GOENV="+goenv)},
++		} {
++			code, stdout, stderr := checkRelease(t, shell, script, "", c.env, paths(prod)...)
++			if code != 0 || stderr != "" || strings.Count(stdout, ": Produktionsbuild (") != len(releasePrograms) {
++				t.Fatalf("%s: exit status %d, want 0\nstdout:\n%s\nstderr:\n%s", c.name, code, stdout, stderr)
++			}
++		}
++	})
+ }
+diff --git a/internal/e2e/release28b_test.go b/internal/e2e/release28b_test.go
+new file mode 100644
+index 0000000..f68faec
+--- /dev/null
++++ b/internal/e2e/release28b_test.go
+@@ -0,0 +1,393 @@
++package e2e
++
++import (
++	"fmt"
++	"go/ast"
++	"go/build/constraint"
++	"go/parser"
++	"go/token"
++	"go/types"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"regexp"
++	"sort"
++	"strconv"
++	"strings"
++	"testing"
++)
++
++// releaseTags are the tags of a test build that scripts/check-release.sh
++// refuses.
++var releaseTags = []string{"gomail_test", "gomail_dev"}
++
++// releaseScriptVar returns the value of the line name='value' of the
++// script src; exactly one such line must exist.
++func releaseScriptVar(t *testing.T, src, name string) string {
++	t.Helper()
++	m := regexp.MustCompile(`(?m)^`+name+`='([^']*)'$`).FindAllStringSubmatch(src, -1)
++	if len(m) != 1 {
++		t.Fatalf("scripts/check-release.sh: %d lines %s='...', want 1", len(m), name)
++	}
++	return m[0][1]
++}
++
++// testBuildOnly reports whether the build constraint of a file names one
++// of releaseTags and keeps the file out of a build without them: the
++// constraint is false with both tags false, once with every other tag
++// true and once with every other tag false. Where that is wrong for
++// some other mix of tags, the file counts as well (more names to check,
++// never fewer).
++func testBuildOnly(expr constraint.Expr) bool {
++	// Eval calls its function for every tag of the expression.
++	named := false
++	expr.Eval(func(tag string) bool {
++		for _, r := range releaseTags {
++			named = named || tag == r
++		}
++		return true
++	})
++	if !named {
++		return false
++	}
++	for _, others := range []bool{true, false} {
++		if expr.Eval(func(tag string) bool {
++			for _, r := range releaseTags {
++				if tag == r {
++					return false
++				}
++			}
++			return others
++		}) {
++			return false
++		}
++	}
++	return true
++}
++
++// fileConstraint returns the build constraint of the Go file f (nil:
++// none): the //go:build line, or else the // +build lines.
++func fileConstraint(f *ast.File) (constraint.Expr, error) {
++	var plus []constraint.Expr
++	for _, g := range f.Comments {
++		if g.Pos() >= f.Package {
++			break
++		}
++		for _, c := range g.List {
++			switch {
++			case constraint.IsGoBuild(c.Text):
++				return constraint.Parse(c.Text)
++			case constraint.IsPlusBuild(c.Text):
++				e, err := constraint.Parse(c.Text)
++				if err != nil {
++					return nil, err
++				}
++				plus = append(plus, e)
++			}
++		}
++	}
++	if len(plus) == 0 {
++		return nil, nil
++	}
++	e := plus[0]
++	for _, p := range plus[1:] {
++		e = &constraint.AndExpr{X: e, Y: p}
++	}
++	return e, nil
++}
++
++// envRead is one environment variable that a file reads.
++type envRead struct {
++	pos  string
++	name string
++}
++
++// envSelectors are the names of the functions and methods that read the
++// environment: of os and syscall, and methods such as (*exec.Cmd).Environ.
++// A selector with one of these names in a file of releaseEnvReads is a
++// problem whatever its receiver, unless it is os.Getenv or os.LookupEnv
++// called with a constant name.
++var envSelectors = map[string]bool{"Environ": true, "Getenv": true, "LookupEnv": true, "ExpandEnv": true}
++
++// releaseEnvReads returns the names of the environment variables that
++// the non-test Go files of the module under root read when only a build
++// with gomail_test or gomail_dev compiles them, and the problems: a read
++// whose name is not a constant, any other selector named in envSelectors
++// (whatever its receiver), and any dot import.
++func releaseEnvReads(t *testing.T, root string) ([]envRead, []string) {
++	t.Helper()
++	fset := token.NewFileSet()
++	// pkgs holds the parsed non-test files of each directory, for
++	// constants declared in another file of the package.
++	pkgs := map[string][]*ast.File{}
++	var tagged []*ast.File
++	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		name := d.Name()
++		if d.IsDir() {
++			if path != root {
++				if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "vendor" {
++					return filepath.SkipDir
++				}
++				// Another module: not built with this one.
++				if _, err := os.Lstat(filepath.Join(path, "go.mod")); err == nil {
++					return filepath.SkipDir
++				}
++			}
++			return nil
++		}
++		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || !d.Type().IsRegular() {
++			return nil
++		}
++		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
++		if err != nil {
++			return err
++		}
++		dir := filepath.Dir(path)
++		pkgs[dir] = append(pkgs[dir], f)
++		expr, err := fileConstraint(f)
++		if err != nil {
++			return fmt.Errorf("%s: %v", path, err)
++		}
++		if expr != nil && testBuildOnly(expr) {
++			tagged = append(tagged, f)
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	var reads []envRead
++	var problems []string
++	for _, f := range tagged {
++		file := fset.Position(f.Package).Filename
++		pkg := pkgs[filepath.Dir(file)]
++		imports := map[string]string{} // local name -> import path
++		for _, imp := range f.Imports {
++			path, _ := strconv.Unquote(imp.Path.Value)
++			local := path[strings.LastIndex(path, "/")+1:]
++			if imp.Name != nil {
++				local = imp.Name.Name
++			}
++			// A dot import hides the package of a call (Getenv of any
++			// package would read as a plain function); none is allowed.
++			if local == "." {
++				problems = append(problems, fmt.Sprintf("%s: dot import of %s", fset.Position(imp.Pos()), path))
++			}
++			imports[local] = path
++		}
++		// calls are the selectors that are called directly; any other use
++		// of os.Getenv and os.LookupEnv is a problem.
++		calls := map[*ast.SelectorExpr]*ast.CallExpr{}
++		ast.Inspect(f, func(n ast.Node) bool {
++			if c, ok := n.(*ast.CallExpr); ok {
++				if sel, ok := c.Fun.(*ast.SelectorExpr); ok {
++					calls[sel] = c
++				}
++			}
++			return true
++		})
++		ast.Inspect(f, func(n ast.Node) bool {
++			sel, ok := n.(*ast.SelectorExpr)
++			if !ok || !envSelectors[sel.Sel.Name] {
++				return true
++			}
++			pos := fset.Position(sel.Pos()).String()
++			// imported is the import path where the selector is a name
++			// of an imported package (an identifier that the parser did
++			// not resolve in the file and that an import of the file
++			// declares); what is that path and the name, or else the
++			// expression as written (only for the message: an expression
++			// os.Getenv whose os is not the import of os is not
++			// os.Getenv).
++			imported, what := "", types.ExprString(sel)
++			if x, ok := sel.X.(*ast.Ident); ok && x.Obj == nil {
++				if path, ok := imports[x.Name]; ok {
++					imported, what = path, path+"."+sel.Sel.Name
++				}
++			}
++			switch {
++			case imported == "os" && (sel.Sel.Name == "Getenv" || sel.Sel.Name == "LookupEnv"):
++				c := calls[sel]
++				if c == nil || len(c.Args) != 1 {
++					problems = append(problems, fmt.Sprintf("%s: %s not called with one argument", pos, what))
++					return true
++				}
++				name, err := constString(c.Args[0], f, pkg, 0)
++				if err != nil {
++					problems = append(problems, fmt.Sprintf("%s: %s: name not a constant: %v", pos, what, err))
++					return true
++				}
++				reads = append(reads, envRead{pos, name})
++			default:
++				problems = append(problems, fmt.Sprintf("%s: %s: selector %s may read the environment; only os.Getenv and os.LookupEnv with a constant name are allowed", pos, what, sel.Sel.Name))
++			}
++			return true
++		})
++	}
++	return reads, problems
++}
++
++// constString returns the value of the string constant expression e of
++// file f in package pkg: a string literal, a constant of the file or of
++// the package (by name), and + of those.
++func constString(e ast.Expr, f *ast.File, pkg []*ast.File, depth int) (string, error) {
++	if depth > 16 {
++		return "", fmt.Errorf("constants nested too deep")
++	}
++	switch e := e.(type) {
++	case *ast.BasicLit:
++		if e.Kind != token.STRING {
++			return "", fmt.Errorf("literal %s", e.Value)
++		}
++		return strconv.Unquote(e.Value)
++	case *ast.ParenExpr:
++		return constString(e.X, f, pkg, depth+1)
++	case *ast.BinaryExpr:
++		if e.Op != token.ADD {
++			return "", fmt.Errorf("operator %s", e.Op)
++		}
++		x, err := constString(e.X, f, pkg, depth+1)
++		if err != nil {
++			return "", err
++		}
++		y, err := constString(e.Y, f, pkg, depth+1)
++		if err != nil {
++			return "", err
++		}
++		return x + y, nil
++	case *ast.Ident:
++		if e.Obj != nil {
++			// Declared in this file (the parser resolves its scopes).
++			if e.Obj.Kind != ast.Con {
++				return "", fmt.Errorf("%s is a %s", e.Name, e.Obj.Kind)
++			}
++			return specValue(e.Obj.Decl, e.Name, f, pkg, depth)
++		}
++		// Declared at package level in another file of the package;
++		// every declaration found (files of other tags or systems) must
++		// agree.
++		var vals []string
++		for _, g := range pkg {
++			if g == f {
++				continue
++			}
++			obj := g.Scope.Lookup(e.Name)
++			if obj == nil {
++				continue
++			}
++			if obj.Kind != ast.Con {
++				return "", fmt.Errorf("%s is a %s", e.Name, obj.Kind)
++			}
++			v, err := specValue(obj.Decl, e.Name, g, pkg, depth)
++			if err != nil {
++				return "", err
++			}
++			vals = append(vals, v)
++		}
++		if len(vals) == 0 {
++			return "", fmt.Errorf("%s not declared in the package", e.Name)
++		}
++		for _, v := range vals[1:] {
++			if v != vals[0] {
++				return "", fmt.Errorf("%s declared with different values", e.Name)
++			}
++		}
++		return vals[0], nil
++	}
++	return "", fmt.Errorf("expression %T", e)
++}
++
++// specValue returns the value of the constant name declared by decl in
++// file f.
++func specValue(decl any, name string, f *ast.File, pkg []*ast.File, depth int) (string, error) {
++	spec, ok := decl.(*ast.ValueSpec)
++	if !ok {
++		return "", fmt.Errorf("%s: declaration %T", name, decl)
++	}
++	for i, n := range spec.Names {
++		if n.Name == name {
++			if i >= len(spec.Values) {
++				return "", fmt.Errorf("%s: no value of its own", name)
++			}
++			return constString(spec.Values[i], f, pkg, depth+1)
++		}
++	}
++	return "", fmt.Errorf("%s: not in its declaration", name)
++}
++
++// TestReleaseSwitches (task 28 package 28B; list after M1 no. 96): every
++// environment variable that a non-test file of the module reads, when
++// only a build with gomail_test or gomail_dev compiles that file, is
++// named in switches of scripts/check-release.sh or matches its pattern;
++// so the script finds the name in a test build. The names are collected
++// with go/ast from os.Getenv and os.LookupEnv; a name that is not a
++// constant (a string literal, a constant of the package, + of those)
++// fails the test, and so does, in such a file, any other selector named
++// Environ, Getenv, LookupEnv or ExpandEnv, whatever its receiver and
++// whether called or not (os.Environ, os.ExpandEnv, syscall.Getenv,
++// (*exec.Cmd).Environ, Getenv of another package, os.Getenv or
++// os.LookupEnv not called directly), and any dot import (of any
++// package). Each name in switches matches pattern
++// (otherwise grep would not pass it to the script) and is read by such a
++// file: the list is the one its comment names, and the collection is
++// not empty.
++//
++// Not covered: a read through a function of a file that production
++// builds compile as well (the name then passes as an argument), through
++// a function or method of another package under another name, or
++// through cgo; files of another module or under testdata.
++func TestReleaseSwitches(t *testing.T) {
++	root, err := filepath.Abs(filepath.Join("..", ".."))
++	if err != nil {
++		t.Fatal(err)
++	}
++	src, err := os.ReadFile(filepath.Join(root, "scripts", "check-release.sh"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	switches := strings.Fields(releaseScriptVar(t, string(src), "switches"))
++	pat := releaseScriptVar(t, string(src), "pattern")
++	pattern, err := regexp.Compile(pat)
++	if err != nil {
++		t.Fatalf("pattern %q: %v", pat, err)
++	}
++	if len(switches) == 0 {
++		t.Fatal("scripts/check-release.sh: switches is empty")
++	}
++	for _, s := range switches {
++		if !pattern.MatchString(s) {
++			t.Errorf("switch %s does not match the pattern %s; grep would never pass it to the script", s, pat)
++		}
++	}
++
++	reads, problems := releaseEnvReads(t, root)
++	for _, p := range problems {
++		t.Error(p)
++	}
++	read := map[string]bool{}
++	for _, r := range reads {
++		read[r.name] = true
++		known := false
++		for _, s := range switches {
++			known = known || r.name == s
++		}
++		if !known && !pattern.MatchString(r.name) {
++			t.Errorf("%s: %q is neither in switches of scripts/check-release.sh nor matches its pattern %s", r.pos, r.name, pat)
++		}
++	}
++	for _, s := range switches {
++		if !read[s] {
++			t.Errorf("switch %s of scripts/check-release.sh is read by no file of the tags %s", s, strings.Join(releaseTags, ", "))
++		}
++	}
++	var names []string
++	for n := range read {
++		names = append(names, n)
++	}
++	sort.Strings(names)
++	t.Logf("names read under %s: %s", strings.Join(releaseTags, ", "), strings.Join(names, " "))
++}
+diff --git a/scripts/check-release.sh b/scripts/check-release.sh
+index d61530a..9754515 100755
+--- a/scripts/check-release.sh
++++ b/scripts/check-release.sh
+@@ -22,9 +22,18 @@
+ #   3. The file contains no known mark of a test build: no name of a
+ #      test switch (the four above, and any name that matches
+ #      GOMAIL[A-Z_]*_TEST_, that is only capital letters and underscores
+-#      between GOMAIL and _TEST_, no digits) and neither the text nor the
++#      between GOMAIL and _TEST_, no digits), neither the text nor the
+ #      name of the root file of the development ceremony
+-#      (internal/ceremony: initdev_dev.go, RootFile).
++#      (internal/ceremony: initdev_dev.go, RootFile), and neither the
++#      name testing.tRunner nor testing.MainStart: functions of package
++#      testing, which no program of cmd/... imports. A test program that
++#      "go test -c" builds holds testing.MainStart always (the main
++#      function that go test generates calls it) and testing.tRunner
++#      (it runs each test) unless its TestMain never calls m.Run (the
++#      linker then drops it). The build information of such a test
++#      program of a main package is that of a production build without
++#      VCS stamp (go version -m shows no difference), so only these marks
++#      tell it.
+ #
+ # Exit status 0 when every program is clean, 1 otherwise: a program that
+ # is not clean or not checkable, a file that is missing or not a
+@@ -36,10 +45,18 @@
+ # does not run the programs it checks. It needs go (any version that
+ # reads the build information of the programs), awk, tr, grep and sort;
+ # when one of them is missing, or "go version" fails, it checks nothing.
++# It runs go with GOFLAGS=-json=false: that replaces GOFLAGS from the
++# environment and from the go env file (go env -w), so that -json there
++# cannot turn the output of go version -m into JSON; the build flags
++# that GOFLAGS usually holds do not concern go version.
+ # A tool that fails (exit status not 0) during a check makes that
+-# program not clean, never clean. A tool that exits with 0 but prints
+-# wrong output (an awk that prints a number whatever it reads, a grep
+-# that passes lines it should not) is not detected.
++# program not clean, never clean. So does a tr that exits with 0 but
++# prints nothing, or drops the line of the build setting GOOS (check 3
++# requires the word GOOS, which the build information in the file
++# holds; see check 1). A tool that exits with 0 but prints other wrong
++# output (an awk that prints a number whatever it reads, a grep that
++# passes lines it should not, a tr that drops other parts of the file)
++# is not detected.
+ #
+ # The script guards against shipping a test build by mistake, not against
+ # a build made to pass it: a build that swaps the files of a tag in
+@@ -52,6 +69,9 @@ me=check-release.sh
+ 
+ # switches are the names of the test switches of the tag gomail_test;
+ # any other name that matches pattern is a finding as well.
++# TestReleaseSwitches (internal/e2e/release28b_test.go) holds that every
++# environment variable a file of the tag gomail_test or gomail_dev reads
++# is named here or matches pattern, and that each name here is read.
+ switches='GOMAIL_TEST_MIN_FREE GOMAIL_TEST_DEV_IDENTITY GOMAIL_TEST_HEAD_GAP GOMAILCTL_TEST_KEYGEN_PIPE'
+ pattern='GOMAIL[A-Z_]*_TEST_'
+ 
+@@ -60,6 +80,13 @@ pattern='GOMAIL[A-Z_]*_TEST_'
+ devText='INSECURE - DEVELOPMENT ONLY'
+ devFile='platform-root.INSECURE-DEV-ONLY.txt'
+ 
++# testMark and testMain are names of functions of package testing that a
++# test program of go test -c holds: testMark runs each test, testMain is
++# called by the main function that go test generates, also where TestMain
++# never calls m.Run and the linker drops testMark.
++testMark='testing.tRunner'
++testMain='testing.MainStart'
++
+ nl='
+ '
+ cr=$(printf '\r')
+@@ -83,9 +110,15 @@ if [ $missing -ne 0 ]; then
+ 	printf '%s: Hilfsprogramm fehlt; nichts geprüft\n' "$me" >&2
+ 	exit 1
+ fi
+-# A go command that cannot run (GOTOOLCHAIN or GOFLAGS not usable, the
+-# toolchain not available) would fail on every program; it is named once
+-# with its last line of output instead.
++# GOFLAGS=-json in the environment or in the go env file would make go
++# version -m print JSON, which the checks below do not read; -json=false
++# overrides it. An empty GOFLAGS would not: go then reads GOFLAGS from
++# the go env file.
++GOFLAGS=-json=false
++export GOFLAGS
++# A go command that cannot run (GOTOOLCHAIN not usable, the toolchain not
++# available) would fail on every program; it is named once with its last
++# line of output instead.
+ gov=$(go version 2>&1)
+ rc=$?
+ if [ $rc -ne 0 ] || [ -z "$gov" ]; then
+@@ -187,15 +220,25 @@ for arg in "$@"; do
+ 	# underscore leaves the last line of tr open (a darwin/arm64 program
+ 	# ends with a hash of its code signature); where the output of tr
+ 	# ends with a newline already, it makes an empty line, which grep
+-	# does not pass on.
+-	names=$({ LC_ALL=C tr -c 'A-Z0-9_' '\n' <"$f" && printf '\n%s\n' -end-; } | LC_ALL=C grep -E -e "$pattern" -e '^-end-$' | LC_ALL=C sort -u)
++	# does not pass on. The line GOOS comes from tr itself: where check 1
++	# found the setting GOOS, the build information in the file holds
++	# "\tGOOS=". Without the line tr printed nothing, or not the whole
++	# file, though it exited with 0; the search failed as well. (Without
++	# the setting, check 1 has refused the program already.)
++	names=$({ LC_ALL=C tr -c 'A-Z0-9_' '\n' <"$f" && printf '\n%s\n' -end-; } | LC_ALL=C grep -E -e "$pattern" -e '^-end-$' -e '^GOOS$' | LC_ALL=C sort -u)
++	searched=1
+ 	case $nl$names$nl in
+ 	*"$nl-end-$nl"*) ;;
+-	*)
++	*) searched=0 ;;
++	esac
++	case $nl$names$nl in
++	*"${nl}GOOS$nl"*) ;;
++	*) [ "$settings" -eq 0 ] || searched=0 ;;
++	esac
++	if [ $searched -eq 0 ]; then
+ 		printf '%s: %s: Suche nach Testschaltern gescheitert (tr, grep, sort); nicht geprüft\n' "$me" "$arg" >&2
+ 		found=1
+-		;;
+-	esac
++	fi
+ 	for s in $switches; do
+ 		case $names in
+ 		*"$s"*)
+@@ -205,7 +248,7 @@ for arg in "$@"; do
+ 		esac
+ 	done
+ 	for n in $names; do
+-		[ "$n" = -end- ] && continue
++		case $n in -end- | GOOS) continue ;; esac
+ 		known=0
+ 		for s in $switches; do
+ 			case $n in *"$s"*) known=1 ;; esac
+@@ -217,11 +260,15 @@ for arg in "$@"; do
+ 	done
+ 	# grep reads the file itself: exit status 0 found, 1 not found,
+ 	# anything else an error.
+-	for m in "$devText" "$devFile"; do
++	for m in "$devText" "$devFile" "$testMark" "$testMain"; do
+ 		LC_ALL=C grep -q -F -e "$m" <"$f"
+ 		case $? in
+ 		0)
+-			printf '%s: %s: enthält "%s" (Entwicklungszeremonie)\n' "$me" "$arg" "$m" >&2
++			if [ "$m" = "$testMark" ] || [ "$m" = "$testMain" ]; then
++				printf '%s: %s: enthält "%s" (Testprogramm von go test -c)\n' "$me" "$arg" "$m" >&2
++			else
++				printf '%s: %s: enthält "%s" (Entwicklungszeremonie)\n' "$me" "$arg" "$m" >&2
++			fi
+ 			found=1
+ 			;;
+ 		1) ;;
+-- 
+2.43.0
+

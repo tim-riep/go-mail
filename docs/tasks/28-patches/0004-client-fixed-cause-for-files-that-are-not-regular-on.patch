@@ -1,0 +1,1295 @@
+From 23d5f557ef133c379d5326fe6f49d2c2a3b29b10 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 18:55:56 +0000
+Subject: [PATCH] client: fixed cause for files that are not regular, one
+ warning for many unreadable mails
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+warnCause gives "Datei nicht lesbar" for store.ErrNotRegular, after every
+other cause, so only what was "Prüfung fehlgeschlagen" changes (Nr. 104).
+unprocessedTerms keeps the local rule only for *fs.PathError
+(unreadableCause): warnCause does not know it, as elsewhere it is also an
+error of writing or of a directory. The one warning of Read that changes
+is "Epochenkette von <id> bricht bei Epoche <n> ab: Datei nicht lesbar."
+for an epoch.rec that is not a regular file.
+
+Index and Search collect the mails marked unprocessed that they cannot
+read (no verdict on their bytes) and warn when the call ends, also on an
+early return: one warning per mail up to nine, from ten on one warning
+with their number, the fixed causes and the first five mail IDs; a mail
+named by several entries counts once (Nr. 103). Verdicts stay a warning
+per mail, at once; Search repeats one on each call until Index has
+deleted the marker. Which mails are accepted, which markers are deleted
+and the terms are unchanged.
+
+Tests: TestUnprocessedMailEACCES (runs only where a file with mode 000
+gives EACCES, else skips with the reason; Nr. 102),
+TestUnprocessedUnreadableTogether, TestUnprocessedUnreadableMany (more
+than ten mails, the first five in the order met, an early return of
+Search) and TestWarnUnreadable (two causes; Nr. 103), TestMailWithTrailer
+(a mail file with a signature trailer, which envelope.Parse accepts, is
+refused by openMail; Nr. 106), TestUnprocessedMailGrewBeyond (the branch
+"grew beyond" of store.ReadFileLimited for a mail file, reached without
+a change of package store: a fanotify permission event holds the first
+read of the file until it has grown by one byte, so the append does not
+race the reader; without CAP_SYS_ADMIN it skips with the reason; Nr.
+107), TestTermsAddressesFromRawHeader in internal/ingest (the server
+takes from: and to: from the raw header, encoded words with a comma;
+Nr. 107), cases in TestWarnCause (store.ErrNotRegular, and after a cause
+such as errResign).
+
+Task: docs/tasks/28-nach-m1-nacht2c.md (Paket 28C)
+---
+ internal/client/export27c_test.go             |   7 +-
+ internal/client/generations3_test.go          |   7 +
+ internal/client/index.go                      |  10 +-
+ internal/client/search.go                     |   6 +-
+ internal/client/terms.go                      | 105 ++++-
+ internal/client/unprocessed28c_linux_test.go  | 294 +++++++++++++
+ internal/client/unprocessed28c_test.go        | 391 ++++++++++++++++++
+ internal/client/unprocessed28c_unix_test.go   |  90 ++++
+ .../client/unreadable28c2_internal_test.go    |  90 ++++
+ internal/client/warncause.go                  |  17 +
+ internal/ingest/terms28c_test.go              |  53 +++
+ 11 files changed, 1047 insertions(+), 23 deletions(-)
+ create mode 100644 internal/client/unprocessed28c_linux_test.go
+ create mode 100644 internal/client/unprocessed28c_test.go
+ create mode 100644 internal/client/unprocessed28c_unix_test.go
+ create mode 100644 internal/client/unreadable28c2_internal_test.go
+ create mode 100644 internal/ingest/terms28c_test.go
+
+diff --git a/internal/client/export27c_test.go b/internal/client/export27c_test.go
+index 1c82e0a..a5363bd 100644
+--- a/internal/client/export27c_test.go
++++ b/internal/client/export27c_test.go
+@@ -5,6 +5,9 @@ import "github.com/tim-riep/go-mail/internal/store"
+ // MetaCut is metaCut, for tests.
+ var MetaCut = metaCut
+ 
++// ErrResign is errResign, for tests (TestWarnCause).
++var ErrResign = errResign
++
+ // UnprocessedTerms returns the terms unprocessedTerms derives for mail id
+ // of mbx, its metadata checked as in List, for tests.
+ func (c *Client) UnprocessedTerms(mbx, id store.ID) ([]string, error) {
+@@ -20,7 +23,9 @@ func (c *Client) UnprocessedTerms(mbx, id store.ID) ([]string, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return c.unprocessedTerms(ch, folder, m)
++	var un unreadable
++	defer c.warnUnreadable(&un)
++	return c.unprocessedTerms(ch, folder, m, &un)
+ }
+ 
+ // SetUnprocessedOpenHook sets the hook that runs each time
+diff --git a/internal/client/generations3_test.go b/internal/client/generations3_test.go
+index 925ebc7..f3fdf47 100644
+--- a/internal/client/generations3_test.go
++++ b/internal/client/generations3_test.go
+@@ -572,6 +572,13 @@ func TestWarnCause(t *testing.T) {
+ 		{fmt.Errorf("%w: epoch 2", store.ErrChain), "Epochenkette"},
+ 		{notFound, "Datei fehlt"},
+ 		{fmt.Errorf("%w: x", envelope.ErrTruncated), "Format"},
++		{fmt.Errorf("store: abc.gml is %w", store.ErrNotRegular), "Datei nicht lesbar"},
++		// store.ErrNotRegular comes after every other cause (task 28,
++		// Nr. 104): a lock file that is not a regular file while a file
++		// is signed again names the failure to sign again (review 28C,
++		// F6, mutant MD).
++		{fmt.Errorf("%w: %w", client.ErrResign, fmt.Errorf("store: lock abc is %w", store.ErrNotRegular)), "Postfachsperre"},
++		{fmt.Errorf("%w: %w", store.ErrNotFound, store.ErrNotRegular), "Datei fehlt"},
+ 		{errors.New("abc.accept: something"), "Prüfung fehlgeschlagen"},
+ 		{nil, "ohne Angabe"},
+ 	} {
+diff --git a/internal/client/index.go b/internal/client/index.go
+index 01a9289..d988751 100644
+--- a/internal/client/index.go
++++ b/internal/client/index.go
+@@ -327,6 +327,10 @@ func (c *Client) Index(mbx store.ID) (int, error) {
+ 		return 0, err
+ 	}
+ 	var where map[store.ID]store.ID
++	// Mails that cannot be read are warned about once this call ends
++	// (unprocessedTerms, warnUnreadable).
++	var un unreadable
++	defer c.warnUnreadable(&un)
+ 	total := 0
+ 	var first error
+ 	note := func(err error) {
+@@ -340,7 +344,7 @@ func (c *Client) Index(mbx store.ID) (int, error) {
+ 		if ch.discarded[e.Number] || !c.isUserMember(e) || !c.ownWrapExists(mbx, e.Number) {
+ 			continue
+ 		}
+-		n, err := c.indexEpoch(ch, e, dev, &where)
++		n, err := c.indexEpoch(ch, e, dev, &where, &un)
+ 		total += n
+ 		note(err)
+ 		note(c.mergeSegments(ch, e, dev))
+@@ -353,7 +357,7 @@ func (c *Client) Index(mbx store.ID) (int, error) {
+ }
+ 
+ // indexEpoch indexes pending/<n>/ of epoch e (see Index).
+-func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[store.ID]store.ID) (int, error) {
++func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[store.ID]store.ID, un *unreadable) (int, error) {
+ 	mbx := ch.mailbox.ID
+ 	files, err := c.st.ListPending(mbx, e.Number)
+ 	if err != nil || len(files) == 0 {
+@@ -390,7 +394,7 @@ func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[
+ 					complete = false
+ 					break
+ 				}
+-				if terms, err = c.unprocessedTerms(ch, (*where)[en.MailID], m); err != nil {
++				if terms, err = c.unprocessedTerms(ch, (*where)[en.MailID], m, un); err != nil {
+ 					// The mail cannot be read now (gone since
+ 					// the listing, not a regular file, an I/O
+ 					// error): the marker stays for a later run.
+diff --git a/internal/client/search.go b/internal/client/search.go
+index 65c4354..9f4e4e2 100644
+--- a/internal/client/search.go
++++ b/internal/client/search.go
+@@ -123,6 +123,10 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
+ 	// per call; nothing is kept beyond it.
+ 	addressTerm := strings.HasPrefix(term, terms.From) || strings.HasPrefix(term, terms.FromDomain) || strings.HasPrefix(term, terms.To)
+ 	opened := map[store.ID][]string{}
++	// Mails that cannot be read are warned about once this call ends
++	// (unprocessedTerms, warnUnreadable).
++	var un unreadable
++	defer c.warnUnreadable(&un)
+ 	var first error
+ 	for i, e := range ch.epochs {
+ 		if ch.discarded[e.Number] || !ch.inPeriod(i, since) {
+@@ -179,7 +183,7 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
+ 						// A mail file that cannot be read: the
+ 						// terms of the metadata (see
+ 						// unprocessedTerms).
+-						terms, _ = c.unprocessedTerms(ch, where[en.MailID], m)
++						terms, _ = c.unprocessedTerms(ch, where[en.MailID], m, &un)
+ 						opened[m.ID] = terms
+ 					}
+ 				}
+diff --git a/internal/client/terms.go b/internal/client/terms.go
+index d38614c..6ef5e17 100644
+--- a/internal/client/terms.go
++++ b/internal/client/terms.go
+@@ -4,6 +4,7 @@ import (
+ 	"errors"
+ 	"io/fs"
+ 	"net/mail"
++	"slices"
+ 	"strings"
+ 	"time"
+ 	"unicode/utf8"
+@@ -106,10 +107,16 @@ func metaCut(m *store.MailMeta) bool {
+ // takes the terms of the metadata meanwhile. Index and Search only get
+ // here for a mail whose file they listed (mailFolders, pendingMeta), so a
+ // file that is not there went between the listing and the reading, a
+-// race; it is not warned about. Every other such failure is, with the
+-// mail ID and a fixed cause: "Datei nicht lesbar" if the file cannot be
+-// read (fileUnreadable), else that of warnCause.
+-func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail) ([]string, error) {
++// race; it is not warned about. Every other such failure is noted in un,
++// with the mail ID and a fixed cause (unreadableCause), and warned about
++// when the call of Index or Search ends (warnUnreadable): one warning per
++// mail, or one for all of them from unreadableTogether mails on (task 28,
++// Nr. 103). A verdict is warned about at once, per mail, and is not
++// collected: Search gives it again on each call, until a run of Index has
++// indexed the entry with the terms of the metadata and deleted its
++// marker; Index gives it once per entry, so twice in one run for a mail
++// that two markers name.
++func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail, un *unreadable) ([]string, error) {
+ 	out := metaTerms(m.Meta)
+ 	if !metaCut(m.Meta) {
+ 		return out, nil
+@@ -134,11 +141,7 @@ func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail) ([]string
+ 	}
+ 	if !checked {
+ 		if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
+-			cause := warnCause(err)
+-			if fileUnreadable(err) {
+-				cause = "Datei nicht lesbar"
+-			}
+-			c.warn("WARNUNG: Mail %s lässt sich nicht lesen: %s. Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.", m.ID, cause)
++			un.add(m.ID, unreadableCause(err))
+ 		}
+ 		return out, err
+ 	}
+@@ -146,16 +149,82 @@ func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail) ([]string
+ 	return out, nil
+ }
+ 
+-// fileUnreadable reports whether err of openMail is one of reading the
+-// mail file that is no verdict on its bytes: a file that is not a regular
+-// one (store.ErrNotRegular) or an error of the system on its open, stat
+-// or read (*fs.PathError: EACCES, EIO, ELOOP, ...), whose text names the
+-// path. warnCause knows neither and gives "Prüfung fehlgeschlagen".
+-// openMail returns no *fs.PathError for the epoch or its keys: keysFor
+-// wraps the error of reading the wrap with %v (ErrWrap).
+-func fileUnreadable(err error) bool {
++// unreadableCause returns the fixed cause of err of openMail that is no
++// verdict on the bytes of the mail file: "Datei nicht lesbar"
++// (causeUnreadable) for an error of the system on its open, stat or read
++// (*fs.PathError: EACCES, EIO, ELOOP, ...), whose text names the path,
++// else that of warnCause, which gives the same cause for a file that is
++// not a regular one (store.ErrNotRegular). warnCause does not know
++// *fs.PathError: elsewhere it is also an error of writing, or of a
++// directory. openMail returns no *fs.PathError for the epoch or its keys:
++// keysFor wraps the error of reading the wrap with %v (ErrWrap).
++func unreadableCause(err error) string {
+ 	var pe *fs.PathError
+-	return errors.Is(err, store.ErrNotRegular) || errors.As(err, &pe)
++	if errors.As(err, &pe) {
++		return causeUnreadable
++	}
++	return warnCause(err)
++}
++
++// unreadableTogether is the number of mails that cannot be read from
++// which one call of Index or Search warns once for all of them, and
++// unreadableNamed the number of their IDs that warning names (task 28,
++// Nr. 103).
++const (
++	unreadableTogether = 10
++	unreadableNamed    = 5
++)
++
++// unreadable collects the mails marked unprocessed that one call of Index
++// or Search cannot read (unprocessedTerms), each once, in the order met.
++// It keeps the IDs and causes of the first unreadableTogether mails,
++// their number and the distinct causes; never content or the text of an
++// error.
++type unreadable struct {
++	seen   map[store.ID]bool
++	ids    []store.ID
++	causes []string // of ids
++	all    []string // the distinct causes, in the order met
++}
++
++// add notes mail id with cause.
++func (u *unreadable) add(id store.ID, cause string) {
++	if u.seen[id] {
++		return
++	}
++	if u.seen == nil {
++		u.seen = map[store.ID]bool{}
++	}
++	u.seen[id] = true
++	if len(u.ids) < unreadableTogether {
++		u.ids = append(u.ids, id)
++		u.causes = append(u.causes, cause)
++	}
++	if !slices.Contains(u.all, cause) {
++		u.all = append(u.all, cause)
++	}
++}
++
++// warnUnreadable warns about the mails u holds: one warning per mail, or
++// from unreadableTogether mails on one warning with their number, the
++// causes and the IDs of the first unreadableNamed.
++func (c *Client) warnUnreadable(u *unreadable) {
++	n := len(u.seen)
++	if n == 0 {
++		return
++	}
++	if n < unreadableTogether {
++		for i, id := range u.ids {
++			c.warn("WARNUNG: Mail %s lässt sich nicht lesen: %s. Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.", id, u.causes[i])
++		}
++		return
++	}
++	named := make([]string, 0, unreadableNamed)
++	for _, id := range u.ids[:unreadableNamed] {
++		named = append(named, id.String())
++	}
++	c.warn("WARNUNG: %d Mails lassen sich nicht lesen (%s); die ersten: %s. Ihre Einträge in pending/ bleiben für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.",
++		n, strings.Join(u.all, "; "), strings.Join(named, ", "))
+ }
+ 
+ // unprocessedOpenHook is called by tests each time unprocessedTerms opens
+diff --git a/internal/client/unprocessed28c_linux_test.go b/internal/client/unprocessed28c_linux_test.go
+new file mode 100644
+index 0000000..96d5333
+--- /dev/null
++++ b/internal/client/unprocessed28c_linux_test.go
+@@ -0,0 +1,294 @@
++//go:build linux
++
++package client_test
++
++import (
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++	"unsafe"
++
++	"github.com/tim-riep/go-mail/internal/client"
++	"github.com/tim-riep/go-mail/internal/store"
++	"github.com/tim-riep/go-mail/internal/testenv"
++	"github.com/tim-riep/go-mail/internal/translog"
++)
++
++// fanotify(7), as package syscall has no wrappers for it.
++const (
++	fanCloexec      = 0x1
++	fanNonblock     = 0x2
++	fanClassContent = 0x4
++	fanMarkAdd      = 0x1
++	fanAccessPerm   = 0x20000
++	fanAllow        = 0x1
++	fanEventSize    = 24 // struct fanotify_event_metadata
++	atFDCWD         = -100
++)
++
++// grower makes a file one byte longer before it is first read.
++type grower struct {
++	events *os.File   // the fanotify group, nonblocking
++	done   chan error // the outcome of the append, once
++}
++
++// errNoFanotify: the system has no fanotify permission events for this
++// process (no CAP_SYS_ADMIN, or a kernel without
++// CONFIG_FANOTIFY_ACCESS_PERMISSIONS).
++var errNoFanotify = errors.New("no fanotify permission events here")
++
++// growOnRead puts a sparse regular file of store.MaxMailFile bytes at
++// path and makes it one byte longer within the first read(2) of it, after
++// the reader's fstat and before the read gets any byte: a fanotify
++// permission event (FAN_ACCESS_PERM) holds that read until the byte is
++// appended through the event's file descriptor and the read is allowed.
++// So the reader always sees the file grow beyond the size its fstat gave;
++// there is no race with the reader, whatever the load and GOMAXPROCS. The
++// group allows every later read unchanged; close ends it.
++func growOnRead(path string) (*grower, error) {
++	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
++	if err != nil {
++		return nil, err
++	}
++	err = fh.Truncate(store.MaxMailFile)
++	if cerr := fh.Close(); err == nil {
++		err = cerr
++	}
++	if err != nil {
++		return nil, err
++	}
++	fd, _, errno := syscall.Syscall(syscall.SYS_FANOTIFY_INIT, fanCloexec|fanNonblock|fanClassContent,
++		uintptr(syscall.O_WRONLY|syscall.O_APPEND|syscall.O_LARGEFILE|syscall.O_CLOEXEC), 0)
++	if errno != 0 {
++		return nil, fmt.Errorf("%w: fanotify_init: %v", errNoFanotify, errno)
++	}
++	if err := fanotifyMark(int(fd), path, fanAccessPerm); err != nil {
++		syscall.Close(int(fd))
++		return nil, fmt.Errorf("%w: fanotify_mark: %v", errNoFanotify, err)
++	}
++	g := &grower{events: os.NewFile(fd, "fanotify"), done: make(chan error, 1)}
++	go g.serve()
++	return g, nil
++}
++
++// fanotifyMark adds mask to the marks of group fd on path. On a 32-bit
++// system the 64-bit mask takes two arguments, in the order of its bytes
++// in memory.
++func fanotifyMark(fd int, path string, mask uint64) error {
++	p, err := syscall.BytePtrFromString(path)
++	if err != nil {
++		return err
++	}
++	at := atFDCWD
++	var errno syscall.Errno
++	if unsafe.Sizeof(uintptr(0)) == 8 {
++		_, _, errno = syscall.Syscall6(syscall.SYS_FANOTIFY_MARK, uintptr(fd), fanMarkAdd, uintptr(mask),
++			uintptr(at), uintptr(unsafe.Pointer(p)), 0)
++	} else {
++		lo, hi := uintptr(uint32(mask)), uintptr(uint32(mask>>32))
++		if binary.NativeEndian.Uint16([]byte{1, 0}) != 1 {
++			lo, hi = hi, lo
++		}
++		_, _, errno = syscall.Syscall6(syscall.SYS_FANOTIFY_MARK, uintptr(fd), fanMarkAdd, lo, hi,
++			uintptr(at), uintptr(unsafe.Pointer(p)))
++	}
++	if errno != 0 {
++		return errno
++	}
++	return nil
++}
++
++// serve answers the permission events of g: the first one after the byte
++// is appended, every one with FAN_ALLOW. It ends when g is closed.
++func (g *grower) serve() {
++	buf := make([]byte, 4096)
++	first := true
++	for {
++		n, err := g.events.Read(buf)
++		if err != nil {
++			if first {
++				g.done <- err
++			}
++			return
++		}
++		for b := buf[:n]; len(b) >= fanEventSize; {
++			size := binary.NativeEndian.Uint32(b)
++			fd := int32(binary.NativeEndian.Uint32(b[16:]))
++			if size < fanEventSize || int(size) > len(b) {
++				break
++			}
++			b = b[size:]
++			if fd < 0 {
++				continue // overflow: no read is held
++			}
++			var werr error
++			if first {
++				_, werr = syscall.Write(int(fd), []byte{0})
++			}
++			syscall.Close(int(fd))
++			resp := make([]byte, 8) // struct fanotify_response
++			binary.NativeEndian.PutUint32(resp, uint32(fd))
++			binary.NativeEndian.PutUint32(resp[4:], fanAllow)
++			if _, err := g.events.Write(resp); werr == nil {
++				werr = err
++			}
++			if first {
++				first = false
++				g.done <- werr
++			}
++		}
++	}
++}
++
++// close ends the group: a read held meanwhile is allowed by the kernel.
++func (g *grower) close() { g.events.Close() }
++
++// wait waits for g to append its byte, then ends the group.
++func (g *grower) wait(t *testing.T) {
++	t.Helper()
++	defer g.close()
++	select {
++	case err := <-g.done:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Minute):
++		t.Fatal("the file was not read")
++	}
++}
++
++// TestUnprocessedMailGrewBeyond: a mail file that grows beyond
++// store.MaxMailFile while it is read, after fstat gave a size within the
++// limit (the branch "grew beyond" of store.ReadFileLimited), is a verdict
++// like one whose size fstat gives above the limit: Search takes the terms
++// of the metadata, Index indexes the entry with them and deletes the
++// marker, each with one warning "Format ungültig" (task 28, Nr. 107). The
++// branch is reached without a change of package store: the mail file is
++// replaced since the listing by a sparse file of store.MaxMailFile bytes
++// that grows by one byte within the first read of it (growOnRead, a
++// fanotify permission event that holds the read). The append does not
++// race the reader (review 28C, F1: an append after the read, on inotify
++// IN_ACCESS, came too late once store read the whole file with one
++// read(2)), so every stage reaches the branch. Without fanotify
++// permission events (they need CAP_SYS_ADMIN) the test is skipped with
++// the reason.
++func TestUnprocessedMailGrewBeyond(t *testing.T) {
++	dir := t.TempDir()
++	// The mechanism, read without package store and like it (open,
++	// fstat, one read of up to the limit plus one byte): the file grows
++	// within the read.
++	g, err := growOnRead(filepath.Join(dir, "probe"))
++	if errors.Is(err, errNoFanotify) {
++		t.Skipf("the file cannot be made to grow within a read here: %v", err)
++	}
++	if err != nil {
++		t.Fatal(err)
++	}
++	fh, err := os.OpenFile(filepath.Join(dir, "probe"), os.O_RDONLY|syscall.O_NONBLOCK, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	fi, err := fh.Stat()
++	if err != nil {
++		t.Fatal(err)
++	}
++	n, err := io.ReadFull(fh, make([]byte, store.MaxMailFile+2))
++	fh.Close()
++	if err != io.ErrUnexpectedEOF {
++		g.close()
++		t.Fatal(err)
++	}
++	if fi.Size() != store.MaxMailFile || n != store.MaxMailFile+1 {
++		// No permission event held the read (a file system without
++		// them, for example).
++		g.close()
++		t.Skipf("the file did not grow within a read here: fstat %d, read %d", fi.Size(), n)
++	}
++	g.wait(t)
++	// The branch of store.ReadFileLimited this test is about.
++	path := filepath.Join(dir, "file")
++	if g, err = growOnRead(path); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := store.ReadFileLimited(path, store.MaxMailFile); !errors.Is(err, store.ErrTooLarge) || !strings.Contains(err.Error(), "grew beyond") {
++		g.close()
++		t.Fatalf("ReadFileLimited: %v, want the branch \"grew beyond\"", err)
++	}
++	g.wait(t)
++	f := newFixture(t)
++	f.send(t, envFrom, msgLongTo)
++	m := mailBySubject(t, f, "longto")
++	path = f.env.Store.MailFile(f.mbx, f.inbox(t), m.ID)
++	f.u.Client.Close()
++	armed := false
++	g = nil
++	t.Cleanup(func() {
++		if g != nil {
++			g.close()
++		}
++	})
++	client.SetLogHook(t, func(l translog.Log) translog.Log {
++		return &vanishLog{Log: l, path: path, armed: &armed, then: func(path string) {
++			if g, err = growOnRead(path); err != nil {
++				t.Error(err)
++			}
++		}}
++	})
++	c, err := client.Open(f.env.ClientConfig(f.u.Dir), testenv.Passphrase)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	restore := func() {
++		t.Helper()
++		if armed || g == nil {
++			t.Fatal("the mail file was not replaced since the listing")
++		}
++		g.wait(t)
++		g = nil
++		if err := os.Remove(path); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Rename(path+".away", path); err != nil {
++			t.Fatal(err)
++		}
++	}
++	want := "WARNUNG: Suchbegriffe der Mail " + m.ID.String() + " nur aus ihren Metadaten: Format ungültig."
++	warnings := func(stage string, n int) {
++		t.Helper()
++		if w := f.env.Warnings.Take(); len(w) != n || n == 1 && w[0] != want {
++			t.Fatalf("%s: warnings %q", stage, w)
++		}
++	}
++	armed = true
++	if got := search(t, c, f.mbx, "to:addr139@recipients.example", ""); got != "" {
++		t.Fatalf("search: %q", got)
++	}
++	restore()
++	warnings("search", 1)
++	armed = true
++	if n, err := c.Index(f.mbx); err != nil || n != 1 {
++		t.Fatal(n, err)
++	}
++	restore()
++	warnings("index", 1)
++	if pendingCount(t, f.env, f.mbx, 1) != 0 {
++		t.Fatal("marker left")
++	}
++	for _, tc := range []struct{ q, want string }{
++		{"to:addr000@recipients.example", "longto"},
++		{"to:addr139@recipients.example", ""},
++	} {
++		if got := search(t, c, f.mbx, tc.q, ""); got != tc.want {
++			t.Fatalf("%s after index: %q, want %q", tc.q, got, tc.want)
++		}
++	}
++	warnings("end", 0)
++}
+diff --git a/internal/client/unprocessed28c_test.go b/internal/client/unprocessed28c_test.go
+new file mode 100644
+index 0000000..d0542f7
+--- /dev/null
++++ b/internal/client/unprocessed28c_test.go
+@@ -0,0 +1,391 @@
++package client_test
++
++import (
++	"crypto/ecdh"
++	"crypto/ed25519"
++	"crypto/rand"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"regexp"
++	"slices"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/tim-riep/go-mail/internal/client"
++	"github.com/tim-riep/go-mail/internal/envelope"
++	"github.com/tim-riep/go-mail/internal/store"
++	"github.com/tim-riep/go-mail/internal/testenv"
++	"github.com/tim-riep/go-mail/internal/translog"
++)
++
++// Task 28, package 28C (Nr. 103, 106 of the list after M1).
++
++// swapLog puts a directory in place of each file of *paths since the
++// listing of the mail files: on the first address check after armed is
++// set it renames each file away and makes a directory under its name
++// (store.ErrNotRegular when the mail is read).
++type swapLog struct {
++	translog.Log
++	paths *[]string
++	armed *bool
++	fail  func(error)
++}
++
++func (l *swapLog) CheckAddress(address string, mailbox store.ID, at int64) error {
++	if *l.armed {
++		*l.armed = false
++		for _, p := range *l.paths {
++			if err := os.Rename(p, p+".away"); err != nil {
++				l.fail(err)
++			}
++			if err := os.Mkdir(p, 0o700); err != nil {
++				l.fail(err)
++			}
++		}
++	}
++	return l.Log.CheckAddress(address, mailbox, at)
++}
++
++// TestUnprocessedUnreadableTogether: one call of Search or Index warns
++// about each mail marked unprocessed that it cannot read, once per mail,
++// up to unreadableTogether-1 (9) mails; from 10 on it warns once, with
++// their number, the fixed cause and the first five mail IDs, and with
++// nothing else (task 28, Nr. 103). A verdict on the bytes of a mail is
++// warned about per mail all the same. Two markers of one mail count it
++// once. The markers of the mails that cannot be read stay; once they can
++// be read, Index takes their terms without a warning.
++func TestUnprocessedUnreadableTogether(t *testing.T) {
++	f := newFixture(t)
++	msg := func(subject string) string {
++		return "From: s@x.example\r\nTo: " + longList(140) + "\r\nSubject: " + subject + "\r\nMessage-ID: <" + subject + "@x.example>\r\n\r\nbody\r\n"
++	}
++	const n = 10
++	for i := 0; i < n; i++ {
++		f.send(t, envFrom, msg(fmt.Sprintf("u%02d", i)))
++	}
++	f.send(t, envFrom, msg("verdict"))
++	inbox := f.inbox(t)
++	var ids []store.ID
++	var paths []string
++	var verdict store.ID
++	list, err := f.u.Client.List(f.mbx, store.ID{})
++	if err != nil || len(list) != n+1 {
++		t.Fatal(len(list), err)
++	}
++	for _, m := range list {
++		if !client.MetaCut(m.Meta) {
++			t.Fatal("not cut")
++		}
++		if m.Meta.Subject == "verdict" {
++			verdict = m.ID
++			continue
++		}
++		ids = append(ids, m.ID)
++		paths = append(paths, f.env.Store.MailFile(f.mbx, inbox, m.ID))
++	}
++	// The mail "verdict" fails its hash: a verdict, warned about per mail.
++	vpath := f.env.Store.MailFile(f.mbx, inbox, verdict)
++	b, err := os.ReadFile(vpath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	b[len(b)-1] ^= 1
++	if err := store.WriteFileAtomic(vpath, b); err != nil {
++		t.Fatal(err)
++	}
++	verdictWarning := "WARNUNG: Suchbegriffe der Mail " + verdict.String() + " nur aus ihren Metadaten: die Mail passt nicht zu ihren Metadaten."
++	// A second marker for the first mail: counted once.
++	e, _, err := f.env.Store.ReadEpoch(f.mbx, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	f.forgePendingFor(t, e, ids[0], testenv.Start.Add(2*time.Second))
++	f.u.Client.Close()
++	armed := false
++	var swapped []string
++	client.SetLogHook(t, func(l translog.Log) translog.Log {
++		return &swapLog{Log: l, paths: &swapped, armed: &armed, fail: func(err error) { t.Error(err) }}
++	})
++	c, err := client.Open(f.env.ClientConfig(f.u.Dir), testenv.Passphrase)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	restore := func() {
++		t.Helper()
++		if armed {
++			t.Fatal("the mail files were not replaced since the listing")
++		}
++		for _, p := range swapped {
++			if err := os.Remove(p); err != nil {
++				t.Fatal(err)
++			}
++			if err := os.Rename(p+".away", p); err != nil {
++				t.Fatal(err)
++			}
++		}
++	}
++	single := func(id store.ID) string {
++		return "WARNUNG: Mail " + id.String() + " lässt sich nicht lesen: Datei nicht lesbar. " +
++			"Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten."
++	}
++	together := regexp.MustCompile(`^WARNUNG: (\d+) Mails lassen sich nicht lesen \(Datei nicht lesbar\); die ersten: ([a-z2-7, ]+)\. ` +
++		`Ihre Einträge in pending/ bleiben für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten\.$`)
++	// checkTogether checks that w is the one warning for count mails
++	// that cannot be read, naming five distinct of unread.
++	checkTogether := func(stage, w string, count int, unread []store.ID) {
++		t.Helper()
++		m := together.FindStringSubmatch(w)
++		if m == nil || m[1] != fmt.Sprint(count) {
++			t.Fatalf("%s: warning %q, want one for %d mails", stage, w, count)
++		}
++		named := strings.Split(m[2], ", ")
++		seen := map[string]bool{}
++		for _, s := range named {
++			if seen[s] || !slices.ContainsFunc(unread, func(id store.ID) bool { return id.String() == s }) {
++				t.Fatalf("%s: %q named", stage, s)
++			}
++			seen[s] = true
++		}
++		if len(named) != 5 {
++			t.Fatalf("%s: %d IDs named, want 5", stage, len(named))
++		}
++	}
++	// Nine mails that cannot be read: a warning for each, and the verdict.
++	swapped, armed = paths[:n-1], true
++	if got := search(t, c, f.mbx, "to:addr000@recipients.example", ""); strings.Count(got, ",") != n {
++		t.Fatalf("search, nine: %q", got)
++	}
++	restore()
++	want := []string{verdictWarning}
++	for _, id := range ids[:n-1] {
++		want = append(want, single(id))
++	}
++	w := f.env.Warnings.Take()
++	slices.Sort(w)
++	slices.Sort(want)
++	if !slices.Equal(w, want) {
++		t.Fatalf("search, nine: warnings %q, want %q", w, want)
++	}
++	// Ten: one warning for all of them, and the verdict.
++	swapped, armed = paths, true
++	if got := search(t, c, f.mbx, "to:addr000@recipients.example", ""); strings.Count(got, ",") != n {
++		t.Fatalf("search, ten: %q", got)
++	}
++	restore()
++	w = f.env.Warnings.Take()
++	if len(w) != 2 || w[0] != verdictWarning {
++		t.Fatalf("search, ten: warnings %q", w)
++	}
++	checkTogether("search, ten", w[1], n, ids)
++	// Index: the verdict is indexed, the ten markers (eleven files) stay.
++	armed = true
++	if got, err := c.Index(f.mbx); err != nil || got != 1 {
++		t.Fatal(got, err)
++	}
++	restore()
++	w = f.env.Warnings.Take()
++	if len(w) != 2 || w[0] != verdictWarning {
++		t.Fatalf("index: warnings %q", w)
++	}
++	checkTogether("index", w[1], n, ids)
++	if pendingCount(t, f.env, f.mbx, 1) != n+1 {
++		t.Fatal("markers of mails that cannot be read must stay")
++	}
++	// A second run: the one warning only.
++	armed = true
++	if got, err := c.Index(f.mbx); err != nil || got != 0 {
++		t.Fatal(got, err)
++	}
++	restore()
++	w = f.env.Warnings.Take()
++	if len(w) != 1 {
++		t.Fatalf("index 2: warnings %q", w)
++	}
++	checkTogether("index 2", w[0], n, ids)
++	// Readable again: every entry indexed with the terms of its mail.
++	if got, err := c.Index(f.mbx); err != nil || got != n+1 {
++		t.Fatal(got, err)
++	}
++	if pendingCount(t, f.env, f.mbx, 1) != 0 {
++		t.Fatal("markers left")
++	}
++	if got := search(t, c, f.mbx, "to:addr139@recipients.example", ""); strings.Count(got, ",") != n-1 || strings.Contains(got, "verdict") {
++		t.Fatalf("after the mails could be read: %q", got)
++	}
++	if w := f.env.Warnings.Take(); len(w) != 0 {
++		t.Fatalf("end: warnings %q", w)
++	}
++}
++
++// trailerElement returns a signature trailer element, taken from an
++// envelope sealed and signed for that purpose: appended to a sealed mail
++// it is a valid trailer after the last block, which envelope.Parse
++// accepts on a file of any kind.
++func trailerElement(t *testing.T) []byte {
++	t.Helper()
++	_, sk, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	k, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	id, _ := store.NewID(nil)
++	h := envelope.Header{Kind: envelope.KindMail, MailboxID: id, Epoch: 1, FileID: id, Created: 1}
++	r := []envelope.Recipient{{Type: envelope.RecipientEpochContent, ID: id, Gen: 1, PublicKey: k.PublicKey()}}
++	plain, err := envelope.Seal(h, r, []byte("x"), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	signed, err := envelope.Seal(h, r, []byte("x"), &envelope.SealOptions{Signer: &envelope.Signer{Type: envelope.SignerIngest, Gen: 1, Key: sk}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return signed[len(plain):]
++}
++
++// TestMailWithTrailer: a mail file with a signature trailer, whose hash
++// the signed metadata carry (only a holder of the ingest key can make
++// one), is not a mail (a mail is unsigned, openMail checks f.Trailer):
++// envelope.Parse accepts it, so the check in openMail is the only one.
++// Read refuses it with ErrMismatch and the warning of a header that does
++// not match (as in TestMailHeaderChecks, "signed mail"); for an entry
++// marked unprocessed it is a verdict (task 28, Nr. 106).
++func TestMailWithTrailer(t *testing.T) {
++	f := newFixture(t)
++	content := "From: s@x.example\r\nTo: " + longList(140) + "\r\n\r\nbody\r\n"
++	tr := trailerElement(t)
++	withTrailer := func(b []byte) []byte { return append(slices.Clip(b), tr...) }
++	id := f.forgeParsedRaw(t, content, longList(140), nil, withTrailer)
++	data, err := os.ReadFile(f.env.Store.MailFile(f.mbx, f.inbox(t), id))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if p, err := envelope.Parse(data); err != nil || p.Trailer == nil {
++		t.Fatalf("the mail file must parse with a trailer: %v", err)
++	}
++	f.env.Warnings.Take()
++	if _, content, err := f.u.Client.Read(f.mbx, id); !errors.Is(err, client.ErrMismatch) || content != nil {
++		t.Fatalf("read: %v, %d bytes", err, len(content))
++	}
++	if w := f.env.Warnings.Take(); len(w) != 1 || w[0] != "WARNUNG: Kopf der Mail "+id.String()+" passt nicht zu den Metadaten." {
++		t.Fatalf("read: warnings %q", w)
++	}
++	checkFailsVerdict(t, nil, withTrailer, "die Datei passt nicht zu ihrem Ort oder ihren Metadaten")
++}
++
++// TestUnprocessedUnreadableMany: with more than ten mails that cannot be
++// read, the one warning of a call of Search or Index gives their number,
++// not that of the IDs it keeps, and names the first five in the order
++// the call met them (review 28C, F6: mutants MH and MB). Search warns
++// also when it returns early with an error after it met them (mutant
++// MA): here the pending directory of the next epoch cannot be listed.
++func TestUnprocessedUnreadableMany(t *testing.T) {
++	f := newFixture(t)
++	const n = 12
++	for i := 0; i < n; i++ {
++		f.send(t, envFrom, "From: s@x.example\r\nTo: "+longList(140)+"\r\nSubject: "+fmt.Sprintf("u%02d", i)+"\r\n\r\nbody\r\n")
++	}
++	inbox := f.inbox(t)
++	list, err := f.u.Client.List(f.mbx, store.ID{})
++	if err != nil || len(list) != n {
++		t.Fatal(len(list), err)
++	}
++	var paths []string
++	for _, m := range list {
++		if !client.MetaCut(m.Meta) {
++			t.Fatal("not cut")
++		}
++		paths = append(paths, f.env.Store.MailFile(f.mbx, inbox, m.ID))
++	}
++	if _, _, err := f.env.Store.ReadEpoch(f.mbx, 2); err != nil {
++		t.Fatalf("a second epoch is needed: %v", err)
++	}
++	f.u.Client.Close()
++	armed := false
++	client.SetLogHook(t, func(l translog.Log) translog.Log {
++		return &swapLog{Log: l, paths: &paths, armed: &armed, fail: func(err error) { t.Error(err) }}
++	})
++	var met []store.ID
++	client.SetUnprocessedOpenHook(t, func(id store.ID) { met = append(met, id) })
++	c, err := client.Open(f.env.ClientConfig(f.u.Dir), testenv.Passphrase)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	restore := func() {
++		t.Helper()
++		if armed {
++			t.Fatal("the mail files were not replaced since the listing")
++		}
++		for _, p := range paths {
++			if err := os.Remove(p); err != nil {
++				t.Fatal(err)
++			}
++			if err := os.Rename(p+".away", p); err != nil {
++				t.Fatal(err)
++			}
++		}
++	}
++	// check checks that the warnings are the one for the n mails met,
++	// naming the first five met, in that order.
++	check := func(stage string) {
++		t.Helper()
++		if len(met) != n {
++			t.Fatalf("%s: %d mails opened, want %d", stage, len(met), n)
++		}
++		var first []string
++		for _, id := range met[:5] {
++			first = append(first, id.String())
++		}
++		want := fmt.Sprintf("WARNUNG: %d Mails lassen sich nicht lesen (Datei nicht lesbar); die ersten: %s. "+
++			"Ihre Einträge in pending/ bleiben für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.",
++			n, strings.Join(first, ", "))
++		if w := f.env.Warnings.Take(); len(w) != 1 || w[0] != want {
++			t.Fatalf("%s: warnings %q, want %q", stage, w, want)
++		}
++		met = nil
++	}
++	f.env.Warnings.Take()
++	armed = true
++	if got := search(t, c, f.mbx, "to:addr000@recipients.example", ""); strings.Count(got, ",") != n-1 {
++		t.Fatalf("search: %q", got)
++	}
++	restore()
++	check("search")
++	armed = true
++	if got, err := c.Index(f.mbx); err != nil || got != 0 {
++		t.Fatal(got, err)
++	}
++	restore()
++	check("index")
++	// Search returns early: pending/ of epoch 2, listed after the
++	// entries of epoch 1, is a file.
++	p2 := f.env.Store.PendingDir(f.mbx, 2)
++	if err := os.MkdirAll(filepath.Dir(p2), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(p2, nil, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	armed = true
++	if got, err := c.Search(f.mbx, "to:addr000@recipients.example", client.SearchOptions{}); err == nil || got != nil {
++		t.Fatalf("search with pending/ of epoch 2 a file: %d mails, %v", len(got), err)
++	}
++	restore()
++	check("search, early return")
++	if err := os.Remove(p2); err != nil {
++		t.Fatal(err)
++	}
++	if got, err := c.Index(f.mbx); err != nil || got != n {
++		t.Fatal(got, err)
++	}
++	if w := f.env.Warnings.Take(); len(w) != 0 {
++		t.Fatalf("end: warnings %q", w)
++	}
++}
+diff --git a/internal/client/unprocessed28c_unix_test.go b/internal/client/unprocessed28c_unix_test.go
+new file mode 100644
+index 0000000..d361c48
+--- /dev/null
++++ b/internal/client/unprocessed28c_unix_test.go
+@@ -0,0 +1,90 @@
++//go:build unix
++
++package client_test
++
++import (
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++)
++
++// TestUnprocessedMailEACCES: a mail file marked unprocessed that the
++// client may not read (mode 000, EACCES on open, a *fs.PathError) is no
++// verdict on the mail: Search takes the terms of the metadata and Index
++// leaves the marker, each with the warning "Datei nicht lesbar"; Read
++// returns the error of the system without a warning. Once the file can
++// be read, Index takes from: and to: from it (task 28, Nr. 102). It runs
++// only where a file with mode 000 gives EACCES, that is without
++// CAP_DAC_OVERRIDE and CAP_DAC_READ_SEARCH; as root, for example, it is
++// skipped (run it once with setpriv
++// --bounding-set=-dac_override,-dac_read_search).
++func TestUnprocessedMailEACCES(t *testing.T) {
++	probe := filepath.Join(t.TempDir(), "probe")
++	if err := os.WriteFile(probe, []byte("x"), 0); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(probe, 0); err != nil {
++		t.Fatal(err)
++	}
++	if fh, err := os.Open(probe); !errors.Is(err, syscall.EACCES) {
++		if err == nil {
++			fh.Close()
++		}
++		t.Skipf("a file with mode 000 gives no EACCES here (%v): the process may read it anyway (CAP_DAC_OVERRIDE or CAP_DAC_READ_SEARCH, as root)", err)
++	}
++	f := newFixture(t)
++	f.send(t, envFrom, msgLongTo)
++	c := f.u.Client
++	m := mailBySubject(t, f, "longto")
++	path := f.env.Store.MailFile(f.mbx, f.inbox(t), m.ID)
++	if err := os.Chmod(path, 0); err != nil {
++		t.Fatal(err)
++	}
++	want := "WARNUNG: Mail " + m.ID.String() + " lässt sich nicht lesen: Datei nicht lesbar. " +
++		"Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten."
++	warnings := func(stage string, n int) {
++		t.Helper()
++		if w := f.env.Warnings.Take(); len(w) != n || n == 1 && w[0] != want {
++			t.Fatalf("%s: warnings %q", stage, w)
++		}
++	}
++	for _, tc := range []struct{ q, want string }{
++		{"to:addr000@recipients.example", "longto"},
++		{"to:addr139@recipients.example", ""},
++	} {
++		if got := search(t, c, f.mbx, tc.q, ""); got != tc.want {
++			t.Fatalf("%s: %q, want %q", tc.q, got, tc.want)
++		}
++		warnings(tc.q, 1)
++	}
++	for run := 0; run < 2; run++ {
++		if n, err := c.Index(f.mbx); err != nil || n != 0 {
++			t.Fatal(n, err)
++		}
++		warnings("index", 1)
++		if pendingCount(t, f.env, f.mbx, 1) != 1 || segmentCount(t, f.env, f.mbx, 1) != 0 {
++			t.Fatal("the marker must stay while the mail cannot be read")
++		}
++	}
++	var pe *fs.PathError
++	if _, _, err := c.Read(f.mbx, m.ID); !errors.Is(err, syscall.EACCES) || !errors.As(err, &pe) {
++		t.Fatalf("read: %v", err)
++	}
++	warnings("read", 0)
++	if err := os.Chmod(path, 0o660); err != nil {
++		t.Fatal(err)
++	}
++	if n, err := c.Index(f.mbx); err != nil || n != 1 {
++		t.Fatal(n, err)
++	}
++	if pendingCount(t, f.env, f.mbx, 1) != 0 {
++		t.Fatal("marker left")
++	}
++	if got := search(t, c, f.mbx, "to:addr139@recipients.example", ""); got != "longto" {
++		t.Fatalf("after the mail could be read: %q", got)
++	}
++	warnings("end", 0)
++}
+diff --git a/internal/client/unreadable28c2_internal_test.go b/internal/client/unreadable28c2_internal_test.go
+new file mode 100644
+index 0000000..b1dea05
+--- /dev/null
++++ b/internal/client/unreadable28c2_internal_test.go
+@@ -0,0 +1,90 @@
++package client
++
++import (
++	"fmt"
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/store"
++)
++
++// TestWarnUnreadable: the warnings of one call about the mails it cannot
++// read (unreadable, warnUnreadable). Below unreadableTogether mails one
++// per mail, with its own cause, in the order met; from there on one
++// warning with the number of mails (each counted once, also those beyond
++// the IDs kept), every distinct cause in the order met (also one met
++// only after the IDs kept) and the first unreadableNamed IDs in the
++// order met (review 28C, F6: mutants MH, MB and MC).
++func TestWarnUnreadable(t *testing.T) {
++	const other = "Epochenschlüssel nicht verfügbar"
++	ids := make([]store.ID, 14)
++	for i := range ids {
++		var err error
++		if ids[i], err = store.NewID(nil); err != nil {
++			t.Fatal(err)
++		}
++	}
++	single := func(id store.ID, cause string) string {
++		return "WARNUNG: Mail " + id.String() + " lässt sich nicht lesen: " + cause +
++			". Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten."
++	}
++	together := func(n int, causes string, first []store.ID) string {
++		var named []string
++		for _, id := range first {
++			named = append(named, id.String())
++		}
++		return fmt.Sprintf("WARNUNG: %d Mails lassen sich nicht lesen (%s); die ersten: %s. "+
++			"Ihre Einträge in pending/ bleiben für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.",
++			n, causes, strings.Join(named, ", "))
++	}
++	for _, tc := range []struct {
++		name   string
++		mails  []int // indexes into ids, in the order met
++		causes func(i int) string
++		want   []string
++	}{
++		{"none", nil, nil, nil},
++		{"nine, two causes", []int{3, 1, 4, 1, 5, 0, 2, 6, 8, 7}, func(i int) string {
++			if i%2 == 1 {
++				return other
++			}
++			return causeUnreadable
++		}, []string{
++			single(ids[3], other), single(ids[1], other), single(ids[4], causeUnreadable), single(ids[5], other),
++			single(ids[0], causeUnreadable), single(ids[2], causeUnreadable), single(ids[6], causeUnreadable),
++			single(ids[8], causeUnreadable), single(ids[7], other),
++		}},
++		{"ten", []int{9, 8, 7, 6, 5, 4, 3, 2, 1, 0}, func(int) string { return causeUnreadable },
++			[]string{together(10, causeUnreadable, []store.ID{ids[9], ids[8], ids[7], ids[6], ids[5]})}},
++		{"fourteen, twice each, the second cause after the tenth mail",
++			[]int{13, 0, 12, 1, 11, 2, 10, 3, 9, 4, 5, 6, 7, 8, 13, 0, 12, 1, 11, 2, 10, 3, 9, 4, 5, 6, 7, 8},
++			func(i int) string {
++				if i == 6 || i == 8 {
++					return other
++				}
++				return causeUnreadable
++			},
++			[]string{together(14, causeUnreadable+"; "+other, []store.ID{ids[13], ids[0], ids[12], ids[1], ids[11]})}},
++		{"twelve, two causes from the first",
++			[]int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13},
++			func(i int) string {
++				if i == 2 {
++					return other
++				}
++				return causeUnreadable
++			},
++			[]string{together(12, other+"; "+causeUnreadable, []store.ID{ids[2], ids[3], ids[4], ids[5], ids[6]})}},
++	} {
++		var got []string
++		c := &Client{cfg: Config{Warn: func(s string) { got = append(got, s) }}}
++		var u unreadable
++		for _, i := range tc.mails {
++			u.add(ids[i], tc.causes(i))
++		}
++		c.warnUnreadable(&u)
++		if !slices.Equal(got, tc.want) {
++			t.Errorf("%s: warnings\n%q\nwant\n%q", tc.name, got, tc.want)
++		}
++	}
++}
+diff --git a/internal/client/warncause.go b/internal/client/warncause.go
+index 7300cc9..74280b1 100644
+--- a/internal/client/warncause.go
++++ b/internal/client/warncause.go
+@@ -9,6 +9,12 @@ import (
+ 	"github.com/tim-riep/go-mail/internal/translog"
+ )
+ 
++// causeUnreadable is the fixed cause for a file that cannot be read: not
++// a regular file (store.ErrNotRegular, warnCause), or for a mail file of
++// an entry marked unprocessed an error of the system on its open, stat or
++// read (unreadableCause).
++const causeUnreadable = "Datei nicht lesbar"
++
+ // warnCause returns a fixed description of err for a warning. A warning
+ // names IDs, numbers and this cause only, never the text of an error: it
+ // may name files of the data directory or carry text of other parties
+@@ -80,6 +86,17 @@ func warnCause(err error) string {
+ 		errors.Is(err, envelope.ErrEmptyBlock), errors.Is(err, envelope.ErrElementType), errors.Is(err, envelope.ErrElement),
+ 		errors.Is(err, envelope.ErrTrailer), errors.Is(err, envelope.ErrTrailerSize):
+ 		return "Format ungültig"
++	case errors.Is(err, store.ErrNotRegular):
++		// A directory, a FIFO, a device or a socket in place of a file
++		// that is read (store.OpenRegular, store.OpenRegularIn) or of
++		// a lock file (store: lock ... is not a regular file, from
++		// openExistingLock: the lock of a mailbox, for example while a
++		// file is signed again). The cause names no file, so for a
++		// lock file it fits only loosely. Checked after every other
++		// cause, so that it only names what was "Prüfung
++		// fehlgeschlagen" before (task 28, Nr. 104) and a cause of the
++		// step, such as errResign, wins (TestWarnCause).
++		return causeUnreadable
+ 	default:
+ 		return "Prüfung fehlgeschlagen"
+ 	}
+diff --git a/internal/ingest/terms28c_test.go b/internal/ingest/terms28c_test.go
+new file mode 100644
+index 0000000..e9636c1
+--- /dev/null
++++ b/internal/ingest/terms28c_test.go
+@@ -0,0 +1,53 @@
++package ingest
++
++import (
++	"net/mail"
++	"slices"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/testenv"
++)
++
++// TestTermsAddressesFromRawHeader: the server takes the addresses for
++// from: and to: from the header as received, not from the values it
++// decodes for the metadata (task 28, Nr. 107; DECISIONS D91 Nachtrag
++// 27 C). A display name in an encoded word whose text holds a comma
++// parses as one address in the raw value, but its decoded value no longer
++// parses as an address list: decoding first would lose from: and to:.
++func TestTermsAddressesFromRawHeader(t *testing.T) {
++	h := []byte("From: =?UTF-8?Q?Doe=2C_John?= <John@X.example>\r\n" +
++		"To: =?UTF-8?Q?M=C3=BCller=2C_Hans?= <hans@a.example>, b@b.example\r\n" +
++		"Cc: =?UTF-8?B?THVkd2lnLCBDYXJs?= <carl@c.example>\r\n" +
++		"Subject: s\r\nMessage-ID: <m@x.example>\r\n\r\nbody\r\n")
++	f, ok := parseHeader(h)
++	if !ok {
++		t.Fatal("header not evaluated")
++	}
++	// The metadata keep the decoded values, with the comma.
++	if f.from != "Doe, John <John@X.example>" || f.to != "Müller, Hans <hans@a.example>, b@b.example" || f.cc != "Ludwig, Carl <carl@c.example>" {
++		t.Fatalf("decoded values %q %q %q", f.from, f.to, f.cc)
++	}
++	// Decoded, the values are no address (list) any more.
++	if _, err := mail.ParseAddress(f.from); err == nil {
++		t.Fatal("decoded From parses: the test would not tell raw from decoded")
++	}
++	for _, v := range []string{f.to, f.cc} {
++		if _, err := mail.ParseAddressList(v); err == nil {
++			t.Fatalf("decoded %q parses: the test would not tell raw from decoded", v)
++		}
++	}
++	list, ok := Terms(h, testenv.Start, "env@e.example", []string{"rcpt@r.example"})
++	if !ok {
++		t.Fatal("header not evaluated")
++	}
++	for _, want := range []string{"from:john@x.example", "fromdomain:x.example", "to:hans@a.example", "to:b@b.example", "to:carl@c.example", "to:rcpt@r.example"} {
++		if !slices.Contains(list, want) {
++			t.Errorf("term %q missing in %q", want, list)
++		}
++	}
++	for _, not := range []string{"from:env@e.example", "fromdomain:e.example"} {
++		if slices.Contains(list, not) {
++			t.Errorf("term %q: From taken from the envelope", not)
++		}
++	}
++}
+-- 
+2.43.0
+

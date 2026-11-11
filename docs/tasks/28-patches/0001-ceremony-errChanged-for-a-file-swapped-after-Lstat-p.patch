@@ -1,0 +1,1909 @@
+From 8f15bbfb714825a32e7b6d3f15a387409edb9144 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 18:34:32 +0000
+Subject: [PATCH] ceremony: errChanged for a file swapped after Lstat, path and
+ remedy for ErrNotRegular, witnesses line before the rename
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Backlog 93: lreadEntry refuses an entry that os.Lstat shows as no
+regular file with store.ErrNotRegular, before it opens it (27A). A
+regular file replaced after that os.Lstat by a FIFO, a directory or a
+device with a driver was opened and refused with the same
+store.ErrNotRegular, so the message was that of an entry that is no
+regular file ("remove it by hand" in checkDataPlatform), not errChanged.
+Now an open that finds no regular file is errChanged ("was replaced
+before it was opened"); after any other error of the open the entry is
+looked at again, and a link, an entry that is no regular file now (also
+one that got the inode number of the removed file), another file or a
+name gone by now is errChanged as well ("is gone" for the last).
+store.ErrNotRegular is left for an entry that os.Lstat showed as no
+regular file. The comments name the window left: what is put in place
+of the regular file between os.Lstat and the open is opened where it
+can be (O_RDONLY|O_NONBLOCK|O_NOCTTY), a device with a driver as well,
+and a device node that exists on the same file system gets there
+without CAP_MKNOD; for a socket the open is only tried. New test hook
+"<at>-failed <name>" after a failed open; its error stands for a failing
+second os.Lstat.
+
+Backlog 94: store.ErrNotRegular of readEntry in runPublish (witnesses.rec
+with and without ReplaceWitnesses, the comparison with the export,
+freeName, the succession succChain.need would relog, and the branch
+"written meanwhile") is completed by notRegularErr with the path, the
+kinds, "nothing written or logged" and the remedy of checkDataPlatform;
+in the branch "written meanwhile" it says instead that nothing is logged
+and other files of the export may be written already.
+errors.Is(err, store.ErrNotRegular) stays true; readEntry's own error is
+unchanged.
+
+Backlog 85: PublishOptions.WitnessesReplacing (a callback, no new
+command-line option) is called after the export's files are written,
+before the temporary file is written and renamed over witnesses.rec
+with ReplaceWitnesses, when WitnessesReplaced or WitnessesLinkReplaced
+follows the rename; gomail-ceremony publish prints a line
+"platform/witnesses.rec wird jetzt ersetzt: ..." (or "... ist ein
+symbolischer Link und wird jetzt ... ersetzt: ...") ending in "fehlt die
+nächste Zeile, platform/witnesses.rec selbst ansehen." before the line it
+prints after the rename, which is unchanged. A publish killed between
+the rename and that line (SIGKILL) has printed the first one. When the
+temporary file or the rename fails after that line, the error names
+witnesses.rec, says that it is unchanged (every error of
+store.ReplaceFileIn leaves it so; the fsync of platform/ after the
+rename is not part of it), that nothing is logged and that files of the
+export may be written already, and gives the remedy: run the same
+publish again. No file format changes.
+
+Backlog 95, tests: TestPublishMeanwhileSameContent (written meanwhile
+with the export's content is not counted as written, mutant A11/W4),
+TestPublishDeviceAtLstatNeverOpened (inotify IN_OPEN on platform/; the
+device 0:0 needs no CAP_MKNOD, so mutant Y1 fails without root as
+well), listDir shows a directory that shows nothing below it as
+"<path>/", so platformSnapshot sees a directory under a name
+(TestListDir). Further tests: TestPublishEntrySwappedAfterLstat,
+TestPublishEntryGoneAfterFailedOpen, TestPublishEntryBackAfterNotRegularOpen
+(the file back after a FIFO failed the open), TestPublishEntryInodeReused
+(a socket or the device 0:0 with the inode number of the removed file),
+TestPublishEMFILEAtOpen (RLIMIT_NOFILE 0 at the open, also with a
+failing second os.Lstat; no root needed), TestPublishNotRegularWrapped,
+TestPublishWitnessesAnnouncedBeforeKill (regular file, symbolic and
+hard link; child killed with SIGKILL right after the rename),
+TestPublishReplacingAfterExportFiles, TestPublishReplaceFailsAfterLine,
+TestReplacingText; the expected output of the publish tests of the
+command line has the new line.
+
+No file format, signed record, signature domain or check rule of the
+clients changes.
+
+Task: docs/tasks/28-nach-m1-nacht2c.md (Paket 28A)
+---
+ cmd/gomail-ceremony/main.go                   |  28 ++
+ cmd/gomail-ceremony/main_test.go              |   5 +-
+ cmd/gomail-ceremony/publish25_unix_test.go    |   6 +-
+ cmd/gomail-ceremony/publish25a4_unix_test.go  |  14 +-
+ cmd/gomail-ceremony/publish28a_test.go        |  32 ++
+ internal/ceremony/api.go                      |  20 +-
+ internal/ceremony/api_test.go                 |  31 +-
+ internal/ceremony/publish.go                  | 166 +++++--
+ internal/ceremony/publish26b2_unix_test.go    |   8 +-
+ internal/ceremony/publish27a_linux_test.go    |  11 +-
+ internal/ceremony/publish28a2_linux_test.go   | 402 +++++++++++++++++
+ internal/ceremony/publish28a2_unix_test.go    | 106 +++++
+ internal/ceremony/publish28a_linux_test.go    | 284 ++++++++++++
+ internal/ceremony/publish28a_unix_test.go     | 413 ++++++++++++++++++
+ internal/ceremony/publishlink24b_unix_test.go |   4 +-
+ 15 files changed, 1473 insertions(+), 57 deletions(-)
+ create mode 100644 cmd/gomail-ceremony/publish28a_test.go
+ create mode 100644 internal/ceremony/publish28a2_linux_test.go
+ create mode 100644 internal/ceremony/publish28a2_unix_test.go
+ create mode 100644 internal/ceremony/publish28a_linux_test.go
+ create mode 100644 internal/ceremony/publish28a_unix_test.go
+
+diff --git a/cmd/gomail-ceremony/main.go b/cmd/gomail-ceremony/main.go
+index b9020f3..affc76a 100644
+--- a/cmd/gomail-ceremony/main.go
++++ b/cmd/gomail-ceremony/main.go
+@@ -2547,6 +2547,12 @@ func (e *env) publish(args []string) int {
+ 		WitnessesLinkReplaced: func(link string, after *witness.Witnesses) {
+ 			fmt.Fprint(e.stdout, linkReplacedText(link, after))
+ 		},
++		// Before the temporary file is written and renamed over
++		// witnesses.rec (backlog 85): a publish killed between the
++		// rename and the line above has printed this one.
++		WitnessesReplacing: func(before *witness.Witnesses, link string, after *witness.Witnesses) {
++			fmt.Fprint(e.stdout, replacingText(before, link, after))
++		},
+ 		// Named at once on standard error, also when publish refuses
+ 		// afterwards (RUNBOOK 7.3: nothing is removed unseen).
+ 		TempRemoved: func(name string) {
+@@ -2600,6 +2606,28 @@ func replacedText(before, after *witness.Witnesses) string {
+ 		before.Min, len(before.List), witnessNames(before.List), quorumText(after))
+ }
+ 
++// replacingText is the line of publish --replace-witnesses before the
++// temporary file is written and renamed over platform/witnesses.rec
++// (ceremony
++// PublishOptions.WitnessesReplacing; backlog 85): the working copy
++// before (nil when there is none to name) or the kind of link, and the
++// witnesses after. The line replacedText or linkReplacedText follows it
++// once the rename is done; a publish killed in between (SIGKILL) leaves
++// this line alone, and then platform/witnesses.rec may be replaced or
++// not.
++func replacingText(before *witness.Witnesses, link string, after *witness.Witnesses) string {
++	const look = "; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"
++	if link != "" {
++		return fmt.Sprintf("platform/witnesses.rec ist %s und wird jetzt durch die Zeugen des Pins ersetzt: künftig %s%s",
++			linkText(link), quorumText(after), look)
++	}
++	if before == nil {
++		return fmt.Sprintf("platform/witnesses.rec wird jetzt ersetzt: künftig %s%s", quorumText(after), look)
++	}
++	return fmt.Sprintf("platform/witnesses.rec wird jetzt ersetzt: bisher Quorum %d von %d (%s), künftig %s%s",
++		before.Min, len(before.List), witnessNames(before.List), quorumText(after), look)
++}
++
+ // linkReplacedText is the line of publish --replace-witnesses for a
+ // platform/witnesses.rec that was a link (ceremony
+ // PublishOptions.WitnessesLinkReplaced): a symbolic link is never read,
+diff --git a/cmd/gomail-ceremony/main_test.go b/cmd/gomail-ceremony/main_test.go
+index 850be64..f6c773b 100644
+--- a/cmd/gomail-ceremony/main_test.go
++++ b/cmd/gomail-ceremony/main_test.go
+@@ -1150,8 +1150,9 @@ func TestPublishReplaceWitnesses(t *testing.T) {
+ 		t.Fatal(tt.msgs.String())
+ 	}
+ 	// Exactly, the line once and before the closing lines (review of task
+-	// 25 A3, N2).
+-	if o, want := tt.out.String(), "platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
++	// 25 A3, N2), announced before the rename (backlog 85).
++	if o, want := tt.out.String(), "platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 1 von 1 (w1), künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"+
++		"platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
+ 		succ+" in "+dataDir+" veröffentlicht und ins Log eingetragen.\n"+
+ 		"Den Server jetzt mit diesem Pin starten: gomail-server serve --pin "+pin2Path+" ...\n"; o != want {
+ 		t.Fatalf("stdout\n%q, want\n%q", o, want)
+diff --git a/cmd/gomail-ceremony/publish25_unix_test.go b/cmd/gomail-ceremony/publish25_unix_test.go
+index bc7ae96..399a1bc 100644
+--- a/cmd/gomail-ceremony/publish25_unix_test.go
++++ b/cmd/gomail-ceremony/publish25_unix_test.go
+@@ -106,8 +106,10 @@ func TestPublishLinksAndTmpOutput(t *testing.T) {
+ 		t.Fatalf("%d %s", code, tt.msgs.String())
+ 	}
+ 	// Exactly, the line once and before the closing lines (review of task
+-	// 25 A3, N2).
+-	if o, want := tt.out.String(), "platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt "+
++	// 25 A3, N2), announced before the rename (backlog 85).
++	if o, want := tt.out.String(), "platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: "+
++		"künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"+
++		"platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt "+
+ 		"(der Link wurde nicht gelesen, ein bisheriges Quorum gibt es nicht): jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
+ 		publishedText(succ, dataDir, pin2Path); o != want {
+ 		t.Fatalf("stdout\n%q, want\n%q", o, want)
+diff --git a/cmd/gomail-ceremony/publish25a4_unix_test.go b/cmd/gomail-ceremony/publish25a4_unix_test.go
+index 364c138..ec25d1a 100644
+--- a/cmd/gomail-ceremony/publish25a4_unix_test.go
++++ b/cmd/gomail-ceremony/publish25a4_unix_test.go
+@@ -122,9 +122,12 @@ func TestPublishWitnessesLineBeforeFailure(t *testing.T) {
+ 	old := mustRead(t, wrec)
+ 	symlinkOutside(t, wrec, filepath.Join(base, "outside-witnesses.rec"))
+ 	for _, c := range []struct{ kind, line string }{
+-		{"link", "platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
++		{"link", "platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: " +
++			"künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
++			"platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
+ 			"(der Link wurde nicht gelesen, ein bisheriges Quorum gibt es nicht): jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"},
+-		{"regular", "platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"},
++		{"regular", "platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 1 von 1 (w1), künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
++			"platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"},
+ 	} {
+ 		if c.kind == "regular" {
+ 			// The working copy of pin 1 again, as a regular file.
+@@ -184,8 +187,11 @@ func TestPublishRevokedReplacedOutput(t *testing.T) {
+ 	}
+ 	replaceFile(t, wrec, other)
+ 	for _, c := range []struct{ kind, line string }{
+-		{"regular", "platform/witnesses.rec ersetzt: bisher Quorum 2 von 2 (w1, w9), jetzt Quorum 1 von 1 (w1) wie im Pin.\n"},
+-		{"link", "platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
++		{"regular", "platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 2 von 2 (w1, w9), künftig Quorum 1 von 1 (w1) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
++			"platform/witnesses.rec ersetzt: bisher Quorum 2 von 2 (w1, w9), jetzt Quorum 1 von 1 (w1) wie im Pin.\n"},
++		{"link", "platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: " +
++			"künftig Quorum 1 von 1 (w1) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
++			"platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
+ 			"(der Link wurde nicht gelesen, ein bisheriges Quorum gibt es nicht): jetzt Quorum 1 von 1 (w1) wie im Pin.\n"},
+ 	} {
+ 		if c.kind == "link" {
+diff --git a/cmd/gomail-ceremony/publish28a_test.go b/cmd/gomail-ceremony/publish28a_test.go
+new file mode 100644
+index 0000000..b7a4b7d
+--- /dev/null
++++ b/cmd/gomail-ceremony/publish28a_test.go
+@@ -0,0 +1,32 @@
++package main
++
++import (
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/witness"
++)
++
++// TestReplacingText (backlog 85): the line publish --replace-witnesses
++// prints right before platform/witnesses.rec is replaced, for a regular
++// working copy (old and new quorum), for a symbolic and a hard link (no
++// old quorum) and without a working copy to name; each says to look at
++// the file when the line after the rename does not follow.
++func TestReplacingText(t *testing.T) {
++	w := &witness.Witnesses{List: []witness.Key{{Name: "w1"}, {Name: "w2"}}, Min: 2}
++	const look = "; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"
++	for _, c := range []struct {
++		got, want string
++	}{
++		{replacingText(&witness.Witnesses{List: w.List[:1], Min: 1}, "", w),
++			"platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 1 von 1 (w1), künftig Quorum 2 von 2 (w1, w2) wie im Pin" + look},
++		{replacingText(nil, "a symbolic link", w),
++			"platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: künftig Quorum 2 von 2 (w1, w2) wie im Pin" + look},
++		{replacingText(nil, "a hard link", nil),
++			"platform/witnesses.rec ist ein harter Link und wird jetzt durch die Zeugen des Pins ersetzt: künftig Zeugen und Quorum wie im Pin" + look},
++		{replacingText(nil, "", w), "platform/witnesses.rec wird jetzt ersetzt: künftig Quorum 2 von 2 (w1, w2) wie im Pin" + look},
++	} {
++		if c.got != c.want {
++			t.Fatalf("%q, want %q", c.got, c.want)
++		}
++	}
++}
+diff --git a/internal/ceremony/api.go b/internal/ceremony/api.go
+index e45ef42..3015ae6 100644
+--- a/internal/ceremony/api.go
++++ b/internal/ceremony/api.go
+@@ -697,6 +697,21 @@ type PublishOptions struct {
+ 	// for a working copy, so there is no working copy before;
+ 	// WitnessesReplaced is not called then (review of task 25 A, H4).
+ 	WitnessesLinkReplaced func(link string, after *witness.Witnesses)
++	// WitnessesReplacing, when not nil, is called after the export's
++	// files are written, before the temporary file is written and
++	// renamed over witnesses.rec with ReplaceWitnesses, when
++	// WitnessesReplaced or WitnessesLinkReplaced would follow the
++	// rename: with the working copy before (nil for a link) or the kind
++	// of link ("" for a regular file), and the witnesses and the quorum
++	// after (backlog 85). A process killed between the rename and those
++	// callbacks (SIGKILL) has reported the replacement that may have
++	// happened; without one of them afterwards it is open whether the
++	// rename happened. When the temporary file or the rename fails
++	// after this callback, Publish returns that error with the path of
++	// witnesses.rec, which is unchanged then, "nothing is logged" and
++	// the remedy (run the same publish again). It is not called when
++	// witnesses.rec is written for the first time.
++	WitnessesReplacing func(before *witness.Witnesses, link string, after *witness.Witnesses)
+ 	// TempRemoved, when not nil, is called with the name of every
+ 	// temporary file (".tmp-", left by a crash of an atomic write) that
+ 	// Publish removes from platform/ of Data under the server lock before
+@@ -757,7 +772,10 @@ type PublishOptions struct {
+ //     nor a symbolic link (a FIFO, a device, a directory, a socket) is
+ //     store.ErrNotRegular by the kind os.Lstat shows, never opened
+ //     (backlog 40; review of task 27 A, N2), also under a name the
+-//     export does not hold: the operator removes it by hand (N1);
++//     export does not hold: the operator removes it by hand (N1); a
++//     regular file replaced by such an entry after os.Lstat is
++//     errChanged (backlog 93), and what is put there in that window is
++//     opened, a device with a driver as well (the window left);
+ //   - witnesses.rec of the export and of the data directory against the
+ //     witnesses and the quorum of Pin (fields 5 and 6): a difference is
+ //     translog.ErrMismatch, the working copy is never replaced silently;
+diff --git a/internal/ceremony/api_test.go b/internal/ceremony/api_test.go
+index 3ce4f1c..720e3f5 100644
+--- a/internal/ceremony/api_test.go
++++ b/internal/ceremony/api_test.go
+@@ -7,8 +7,10 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"io"
++	"io/fs"
+ 	"os"
+ 	"path/filepath"
++	"slices"
+ 	"sort"
+ 	"strings"
+ 	"testing"
+@@ -197,16 +199,35 @@ func parseShares(t *testing.T, m map[int][]string, idx ...int) []*shamir.Share {
+ 	return ss
+ }
+ 
++// listDir lists everything below dir that is no directory, by its path
++// relative to dir, and every directory below dir that shows nothing
++// below it (empty, or not readable) as "<path>/" (backlog 95: a
++// directory under a name of platform/ is seen, so a check "nothing
++// written" sees the entry itself). A directory with entries is seen
++// through their paths, so the lists of exports and key directories stay
++// as they are.
+ func listDir(t *testing.T, dir string) []string {
+ 	t.Helper()
+-	var names []string
+-	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+-		if err == nil && !fi.IsDir() {
+-			rel, _ := filepath.Rel(dir, p)
+-			names = append(names, filepath.ToSlash(rel))
++	var names, dirs []string
++	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
++		if d == nil || p == dir {
++			return nil
++		}
++		rel, _ := filepath.Rel(dir, p)
++		rel = filepath.ToSlash(rel)
++		if !d.IsDir() {
++			names = append(names, rel)
++		} else if err == nil {
++			dirs = append(dirs, rel+"/")
+ 		}
+ 		return nil
+ 	})
++	for _, d := range dirs {
++		if !slices.ContainsFunc(names, func(n string) bool { return strings.HasPrefix(n, d) }) &&
++			!slices.ContainsFunc(dirs, func(o string) bool { return o != d && strings.HasPrefix(o, d) }) {
++			names = append(names, d)
++		}
++	}
+ 	sort.Strings(names)
+ 	return names
+ }
+diff --git a/internal/ceremony/publish.go b/internal/ceremony/publish.go
+index 2a8216a..b1fd328 100644
+--- a/internal/ceremony/publish.go
++++ b/internal/ceremony/publish.go
+@@ -149,17 +149,29 @@ var errChanged = errors.New("ceremony: an entry of platform/ changed while publi
+ // socket or of a device without a driver, no EACCES of a directory
+ // without permission, no open of a device), refused before anything is
+ // written (none of them is replaced: a directory cannot be renamed
+-// over). A regular file is opened with store.OpenRegularIn and read from
+-// that descriptor (a FIFO or a directory by then is ErrNotRegular of the
+-// open). The descriptor must be the file os.Lstat saw, and after
+-// the read the name must still be that file and no link (os.SameFile on
+-// both sides, review of task 24 A, F3): an entry replaced in between,
+-// also by a symbolic link to the same file, is errChanged, never taken
+-// for the export's file. The hard link check uses the last os.Lstat; a
+-// failure of that os.Lstat other than a missing name is reported with
+-// its own error (review of task 25 A). Everything goes through pd,
+-// platform/ as Publish opened it (openPlatformDir, backlog 72): os.Lstat
+-// is Root.Lstat, the open store.OpenRegularIn; st names the entry in
++// over); runPublish completes that error with the path and the remedy
++// (notRegularErr, backlog 94). A regular file is opened with
++// store.OpenRegularIn and read from that descriptor. The descriptor
++// must be the file os.Lstat saw, and after the read the name must still
++// be that file and no link (os.SameFile on both sides, review of task
++// 24 A, F3): an entry replaced in between, also by a symbolic link to
++// the same file, is errChanged, never taken for the export's file. So
++// is a regular file replaced after os.Lstat by an entry that is no
++// regular file (backlog 93): a FIFO, a directory or a device with a
++// driver is opened in this window (O_RDONLY|O_NONBLOCK|O_NOCTTY, never
++// read) and found to be no regular file, a socket or a device without
++// a driver fails the open (ENXIO); either is errChanged, never
++// store.ErrNotRegular, which is only for an entry that os.Lstat showed
++// as no regular file. Opening a device put there in this window cannot
++// be ruled out without a descriptor of the file os.Lstat saw (the
++// window left; it needs write access to platform/ during publish, and
++// either CAP_MKNOD or a device node that exists on the same file
++// system, which a rename or a hard link puts there without
++// CAP_MKNOD). The hard link check uses the last os.Lstat; a failure of
++// that os.Lstat other than a missing name is reported with its own
++// error (review of task 25 A). Everything goes through pd, platform/ as
++// Publish opened it (openPlatformDir, backlog 72): os.Lstat is
++// Root.Lstat, the open store.OpenRegularIn; st names the entry in
+ // messages.
+ func readEntry(st *store.Store, pd *os.Root, name string) ([]byte, string, error) {
+ 	b, link, err := lreadEntry(st, pd, name, "publish")
+@@ -178,7 +190,10 @@ const (
+ // lreadEntry is readEntry that also returns the content of a hard link
+ // (link linkHard), for checkDataPlatform, which checks every regular
+ // file of platform/ whatever its other names. at names the hook points
+-// ("<at>-open <name>", "<at>-recheck <name>", for tests).
++// ("<at>-open <name>", "<at>-failed <name>" after an open that failed
++// otherwise than with store.ErrNotRegular, "<at>-recheck <name>", for
++// tests); an error of the hook "<at>-failed <name>" stands for a
++// failing os.Lstat of the second look (that os.Lstat is not made then).
+ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, error) {
+ 	p := st.Path("platform", name)
+ 	fi, err := lstatIn(pd, name, p)
+@@ -195,7 +210,13 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string,
+ 	// os.Lstat saw it, before anything opens it (review of task 27 A, N2
+ 	// and F3): a socket or a device without a driver fails the open with
+ 	// ENXIO, a directory without permission with EACCES, and a device
+-	// would be opened.
++	// with a driver would be opened. Only this refusal is
++	// store.ErrNotRegular (backlog 93). What is put in place of a
++	// regular file between this os.Lstat and the open below is opened
++	// (O_RDONLY|O_NONBLOCK|O_NOCTTY) where it can be, a FIFO, a
++	// directory and a device with a driver as well: that is the window
++	// left. For a socket or a device without a driver the open is only
++	// tried, and fails with ENXIO. Either is refused below (errChanged).
+ 	if !fi.Mode().IsRegular() {
+ 		return nil, "", fmt.Errorf("store: %s is %w", name, store.ErrNotRegular)
+ 	}
+@@ -207,22 +228,43 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string,
+ 		return nil, "", changedErr(p, "is gone")
+ 	}
+ 	if err != nil {
+-		// os.Root refuses a symbolic link that leaves platform/ (an
+-		// absolute one as well) instead of following it: an entry
+-		// replaced by one before the open is reported as replaced, as
+-		// one replaced by a link inside it (SameFile below). The entry
+-		// os.Lstat saw was no link, so a link now is a replacement even
+-		// when it got the inode number of the file it replaced, which
+-		// the removal freed (review of task 26 package B, N3:
+-		// os.SameFile alone missed that). A regular file replaced by
+-		// a socket or a device after os.Lstat fails the open here with
+-		// ENXIO, neither missing nor ErrNotRegular: only os.SameFile
+-		// tells that it was replaced (backlog 86, X6). One replaced by a
+-		// FIFO or a directory is ErrNotRegular of the open, as before.
+-		if !errors.Is(err, store.ErrNotRegular) {
+-			if now, lerr := pd.Lstat(name); lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !os.SameFile(fi, now)) {
+-				return nil, "", changedErr(p, "was replaced before it was opened")
+-			}
++		// os.Lstat saw a regular file, so an open that finds no regular
++		// file (store.ErrNotRegular: a FIFO, a device with a driver or a
++		// directory, opened and found so by fstat) opened another entry:
++		// the file was replaced after os.Lstat, and publish says so
++		// instead of the refusal of an entry that is no regular file,
++		// which is for an entry os.Lstat showed as one (backlog 93).
++		// After any other error of the open the entry is looked at
++		// again: os.Root refuses a symbolic link that leaves platform/
++		// (an absolute one as well) instead of following it, a socket or
++		// a device without a driver fails the open with ENXIO, and such
++		// an error alone does not tell that the entry was replaced
++		// (backlog 86, X6). The entry os.Lstat saw was no link, so a link
++		// now is a replacement even when it got the inode number of the
++		// file it replaced, which the removal freed (review of task 26
++		// package B, N3: os.SameFile alone missed that); so is any other
++		// entry that is no regular file now, a socket or a device
++		// without a driver that got the inode number of the removed file
++		// as well (review of task 28 A, N1); so is another file, and a
++		// name gone by now. Only the same regular file under the name
++		// returns the error of the open (EACCES of a file without read
++		// permission, EMFILE, for example, or the error of an entry that
++		// was put there and taken away again before this look: the
++		// window left), and so does a failure of this os.Lstat other
++		// than a missing name.
++		if errors.Is(err, store.ErrNotRegular) {
++			return nil, "", changedErr(p, "was replaced before it was opened")
++		}
++		var now fs.FileInfo
++		lerr := hook(at + "-failed " + name)
++		if lerr == nil {
++			now, lerr = pd.Lstat(name)
++		}
++		if errors.Is(lerr, fs.ErrNotExist) {
++			return nil, "", changedErr(p, "is gone")
++		}
++		if lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !now.Mode().IsRegular() || !os.SameFile(fi, now)) {
++			return nil, "", changedErr(p, "was replaced before it was opened")
+ 		}
+ 		return nil, "", err
+ 	}
+@@ -324,6 +366,29 @@ const (
+ 	notRegularHint  = "look at the entry, remove it by hand and run the same publish again"
+ )
+ 
++// notRegularErr completes store.ErrNotRegular of readEntry for platform/
++// <name> of the data directory st (backlog 94): witnesses.rec, a name of
++// the export in the comparison and in freeName, a succession that
++// succChain.need would relog, and a name written meanwhile. Such an
++// entry was no regular file when os.Lstat looked at it (one replaced
++// after that is errChanged, backlog 93), and the message names its path
++// and the remedy as checkDataPlatform does. Before the writes nothing is
++// written or logged; in the branch "written meanwhile" (why written)
++// other files of the export may be written already, and the message
++// says so there only. Any other error is returned as it is;
++// errors.Is(err, store.ErrNotRegular) stays true.
++func notRegularErr(st *store.Store, name, why string, err error) error {
++	if !errors.Is(err, store.ErrNotRegular) {
++		return err
++	}
++	done := "nothing written or logged"
++	if why == written {
++		done = "nothing logged, other files of the export may be written already"
++	}
++	return fmt.Errorf("ceremony: %s is %w (%s)%s: publish never reads or replaces such an entry; %s: %s",
++		st.Path("platform", name), store.ErrNotRegular, notRegularKinds, why, done, notRegularHint)
++}
++
+ // checkDataPlatform applies the start check of gomail-server
+ // (checkPlatformPin, Q10 point 5) to platform/ of the data directory:
+ // no identity generation the pin does not know (identity-<g>.pub,
+@@ -595,7 +660,7 @@ func (c *succChain) need(g uint32, by string) error {
+ 		// symbolic or hard link is never logged through.
+ 		data, link, err := readEntry(c.st, c.pd, name)
+ 		if err != nil {
+-			return err
++			return notRegularErr(c.st, name, "", err)
+ 		}
+ 		if link != "" {
+ 			return fmt.Errorf("%w: %s is %s, never logged through it: %s needs %s, which is neither in the export nor a valid entry of the log; nothing written: look at the link and remove it by hand, then publish the export of the succession to generation %d",
+@@ -860,7 +925,7 @@ func runPublish(opts PublishOptions) error {
+ 	// that frees this name), refused otherwise before anything is written.
+ 	haveW, wlink, err := readEntry(st, pd, WitnessesFile)
+ 	if err != nil {
+-		return err
++		return notRegularErr(st, WitnessesFile, "", err)
+ 	}
+ 	if wlink != "" && !opts.ReplaceWitnesses {
+ 		return witnessLinkErr(st, wlink)
+@@ -1058,7 +1123,7 @@ func runPublish(opts PublishOptions) error {
+ 	for _, n := range names {
+ 		have, link, err := readEntry(st, pd, n)
+ 		if err != nil {
+-			return err
++			return notRegularErr(st, n, "", err)
+ 		}
+ 		if have == nil && link == "" {
+ 			if err := loggedOther(opts.From, st, log, files[n], "is missing"); err != nil {
+@@ -1118,7 +1183,7 @@ func runPublish(opts PublishOptions) error {
+ 			// meanwhile is never taken for the export's file either.
+ 			have, link, rerr := readEntry(st, pd, n)
+ 			if rerr != nil {
+-				return rerr
++				return notRegularErr(st, n, written, rerr)
+ 			}
+ 			if link != "" {
+ 				return linkErr(opts.From, st, files[n], link, written)
+@@ -1144,7 +1209,20 @@ func runPublish(opts PublishOptions) error {
+ 				return err
+ 			}
+ 		}
++		after := &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}
++		// Announced after the export's files are written, before the
++		// temporary file is written and renamed over witnesses.rec
++		// (backlog 85): a process killed between the rename and the
++		// callbacks below (SIGKILL) has reported the replacement that
++		// may have happened.
++		announced := oldW != nil || wlink != ""
++		if announced && opts.WitnessesReplacing != nil {
++			opts.WitnessesReplacing(oldW, wlink, after)
++		}
+ 		if err := store.ReplaceFileIn(pd, WitnessesFile, w); err != nil {
++			if announced {
++				return replaceFailedErr(st, err)
++			}
+ 			return err
+ 		}
+ 		wrote = true
+@@ -1153,7 +1231,6 @@ func runPublish(opts PublishOptions) error {
+ 		// returns that error after them (backlog 83: before, the
+ 		// replacement went unreported for good).
+ 		serr := syncPlatform(pd)
+-		after := &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}
+ 		if oldW != nil && opts.WitnessesReplaced != nil {
+ 			opts.WitnessesReplaced(oldW, after)
+ 		}
+@@ -1208,6 +1285,25 @@ func runPublish(opts PublishOptions) error {
+ 	return nil
+ }
+ 
++// replaceFailedErr completes the error of store.ReplaceFileIn for
++// witnesses.rec after WitnessesReplacing announced the replacement
++// (review of task 28 A, F3): the line of the command line says "fehlt
++// die nächste Zeile, platform/witnesses.rec selbst ansehen", and this
++// error says what there is to see. Every error of store.ReplaceFileIn
++// leaves witnesses.rec as it was: writing, syncing and closing the
++// temporary file come before the rename, and a rename that fails
++// (renameat(2), or the check of os.Root for a directory under the name)
++// does not replace it; the temporary file is removed again. The fsync
++// of platform/ after the rename is not part of it (syncPlatform): the
++// callbacks after the rename report the replacement first. Nothing is
++// logged yet; the export's files are written before witnesses.rec, so
++// they may be in platform/ already. The remedy is the same publish
++// again. errors.Is holds for err.
++func replaceFailedErr(st *store.Store, err error) error {
++	return fmt.Errorf("ceremony: replacing %s: %w; %s is unchanged and nothing is logged (files of the export may be written already): run the same publish again",
++		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile))
++}
++
+ // syncPlatform fsyncs platform/ through pd after witnesses.rec was
+ // renamed into it. The hook "publish-sync witnesses.rec" stands for a
+ // failing fsync in tests (backlog 83): its error is returned instead,
+@@ -1282,7 +1378,7 @@ func freeName(st *store.Store, pd *os.Root, log translog.Log, files map[string]p
+ 		// (readEntry): the certificate is replaced, and its key with it.
+ 		have, link, err := readEntry(st, pd, cert)
+ 		if err != nil {
+-			return false, "", err
++			return false, "", notRegularErr(st, cert, "", err)
+ 		}
+ 		if link == "" && (have == nil || bytes.Equal(have, files[cert].data)) {
+ 			return false, fmt.Sprintf(", while platform/%s is missing there or the same and is no valid entry of the log: a public key is replaced only together with its certificate or under its logged certificate", cert), nil
+diff --git a/internal/ceremony/publish26b2_unix_test.go b/internal/ceremony/publish26b2_unix_test.go
+index 7a45618..9ffc656 100644
+--- a/internal/ceremony/publish26b2_unix_test.go
++++ b/internal/ceremony/publish26b2_unix_test.go
+@@ -27,8 +27,10 @@ import (
+ // it was read (hook "publish-open admin-1.cert"), so the rename of the
+ // new witnesses.rec fails. No callback is called (witnesses.rec was not
+ // replaced), the error of the rename is returned with the paths of both
+-// names (review N2: as at 3ea40f0), no temporary file is left, and the
+-// log is not reached.
++// names (review N2: as at 3ea40f0), completed by the path of
++// witnesses.rec, "unchanged", "nothing is logged" and the remedy, as
++// after the line of WitnessesReplacing (review of task 28 A, F3), no
++// temporary file is left, and the log is not reached.
+ func TestPublishWitnessesRenameFailsNoCallback(t *testing.T) {
+ 	f := newFixture(t)
+ 	out := filepath.Join(f.base, "out")
+@@ -76,7 +78,7 @@ func TestPublishWitnessesRenameFailsNoCallback(t *testing.T) {
+ 	}
+ 	var le *os.LinkError
+ 	if !errors.As(err, &le) || le.Op != "rename" || filepath.Dir(le.Old) != plat || !strings.HasPrefix(filepath.Base(le.Old), ".tmp-") || le.New != p ||
+-		err.Error() != "rename "+le.Old+" "+p+": file exists" {
++		err.Error() != replaceFailedMsg(p, "rename "+le.Old+" "+p+": file exists") {
+ 		t.Fatalf("message: %v", err)
+ 	}
+ 	ents, err := os.ReadDir(plat)
+diff --git a/internal/ceremony/publish27a_linux_test.go b/internal/ceremony/publish27a_linux_test.go
+index 938d638..c76f3e9 100644
+--- a/internal/ceremony/publish27a_linux_test.go
++++ b/internal/ceremony/publish27a_linux_test.go
+@@ -71,9 +71,11 @@ func TestPublishEntryReplacedBySocket(t *testing.T) {
+ // identity-1.succ), under one it holds (ingest-1.cert) and under
+ // witnesses.rec. Each is store.ErrNotRegular by the kind os.Lstat shows,
+ // never opened (the writer of the FIFO still waits), never ENXIO or
+-// EACCES; under a name of section 4 with the path of the entry,
+-// "nothing written or logged" and the remedy. Nothing is written or
+-// logged. readEntry refuses each the same way, also called directly.
++// EACCES; with the path of the entry, "nothing written or logged" and
++// the remedy (under witnesses.rec since backlog 94, without "under a
++// name of section 4"). Nothing is written or logged. readEntry refuses
++// each with store.ErrNotRegular, also called directly (the short error
++// that runPublish completes).
+ // Devices need CAP_MKNOD; without it their cases are skipped.
+ func TestPublishNonRegularKinds(t *testing.T) {
+ 	kinds := []struct {
+@@ -138,7 +140,8 @@ func TestPublishNonRegularKinds(t *testing.T) {
+ 				}
+ 				want := notRegularMsg(p)
+ 				if name == WitnessesFile {
+-					want = "store: " + WitnessesFile + " is not a regular file"
++					// With path and remedy since backlog 94.
++					want = notRegularReadMsg(p, "")
+ 				}
+ 				if !errors.Is(err, store.ErrNotRegular) || errors.Is(err, syscall.ENXIO) || errors.Is(err, syscall.EACCES) || err.Error() != want {
+ 					t.Fatalf("%s as %s: %v", name, k.name, err)
+diff --git a/internal/ceremony/publish28a2_linux_test.go b/internal/ceremony/publish28a2_linux_test.go
+new file mode 100644
+index 0000000..2064d6e
+--- /dev/null
++++ b/internal/ceremony/publish28a2_linux_test.go
+@@ -0,0 +1,402 @@
++//go:build linux
++
++package ceremony
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/store"
++	"github.com/tim-riep/go-mail/internal/witness"
++)
++
++// Tests of the rework of task 28 package 28A on Linux: the second look
++// after a failed open (a FIFO and the file back, an inode number reused,
++// EMFILE with a failing os.Lstat), and the error of a failed replacement
++// of witnesses.rec after its line.
++
++// changedOpenMsg is the refusal of the entry p of platform/ that was
++// replaced between os.Lstat and the open (backlog 93).
++func changedOpenMsg(p string) string {
++	return "ceremony: an entry of platform/ changed while publish read it: " + p +
++		" was replaced before it was opened; another process writes platform/ during publish: stop it, look at the entry and run the same publish again"
++}
++
++// TestPublishEntryBackAfterNotRegularOpen (review of task 28 A, F1; probe
++// of the specification review): ingest-1.cert is replaced by a FIFO
++// right before publish opens it (hook "<at>-open ingest-1.cert"), in
++// checkDataPlatform and in the comparison with the export, and the file
++// is put back if a hook after the failed open is reached
++// ("<at>-failed"). The open found no regular file under a name os.Lstat
++// showed as one: errChanged at once, never the second look, which would
++// find the file again and pass on store.ErrNotRegular of the open with
++// "remove it by hand" for a regular file (mutant N1: the branch for
++// store.ErrNotRegular of the open removed). Nothing written or logged.
++func TestPublishEntryBackAfterNotRegularOpen(t *testing.T) {
++	for _, at := range []string{"check", "publish"} {
++		t.Run(at, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			out := filepath.Join(f.base, "out")
++			p, aside := st.Path("platform", "ingest-1.cert"), filepath.Join(f.base, "aside")
++			before := platformSnapshot(t, st)
++			logged := len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert"))
++			var serr error
++			var hits []string
++			crashHook = func(pt string) error {
++				switch {
++				case pt == at+"-open ingest-1.cert" && len(hits) == 0:
++					hits = append(hits, pt)
++					if serr = os.Rename(p, aside); serr == nil {
++						serr = syscall.Mkfifo(p, 0o644)
++					}
++				case pt == at+"-failed ingest-1.cert" && len(hits) == 1:
++					hits = append(hits, pt)
++					if serr = os.Remove(p); serr == nil {
++						serr = os.Rename(aside, p)
++					}
++				}
++				return nil
++			}
++			t.Cleanup(func() { crashHook = nil })
++			err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
++			crashHook = nil
++			if serr != nil || len(hits) == 0 {
++				t.Fatalf("swap: %v %v", serr, hits)
++			}
++			if !errors.Is(err, errChanged) || errors.Is(err, store.ErrNotRegular) || err.Error() != changedOpenMsg(p) {
++				t.Fatalf("FIFO at the open, file back afterwards (hooks %q): %v", hits, err)
++			}
++			if len(hits) == 1 {
++				if err := os.Remove(p); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.Rename(aside, p); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if platformSnapshot(t, st) != before || len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert")) != logged {
++				t.Fatal("written or logged before the refusal")
++			}
++		})
++	}
++}
++
++// TestPublishEntryInodeReused (review of task 28 A, N1; after
++// TestRev28ARInodeReuse of the robustness review): ingest-1.cert is
++// removed right before publish opens it (hook "check-open
++// ingest-1.cert"), not put aside, and a socket or the device 0:0 (no
++// driver, no CAP_MKNOD needed) is made under its name. The open fails
++// with ENXIO; when the new entry got the inode number of the removed
++// file, os.SameFile in the second look is true, and only its kind tells
++// that the entry was replaced: errChanged, not ENXIO. The file system
++// does not always give the freed number again (ext4 mostly does), so
++// publish is run until it does, at most 50 times; the case is skipped
++// with the count otherwise. Nothing written or logged.
++func TestPublishEntryInodeReused(t *testing.T) {
++	kinds := []struct {
++		name string
++		make func(p string) error
++	}{
++		{"socket", func(p string) error { return syscall.Mknod(p, syscall.S_IFSOCK|0o644, 0) }},
++		{"chr-0-0", func(p string) error { return syscall.Mknod(p, syscall.S_IFCHR|0o644, 0) }},
++	}
++	for _, k := range kinds {
++		t.Run(k.name, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			out := filepath.Join(f.base, "out")
++			p := st.Path("platform", "ingest-1.cert")
++			if err := k.make(filepath.Join(f.base, "probe")); err != nil {
++				if errors.Is(err, syscall.EPERM) {
++					t.Skipf("%s: %v", k.name, err)
++				}
++				t.Fatal(err)
++			}
++			orig := mustReadFile(t, p)
++			before := platformSnapshot(t, st)
++			logged := len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert"))
++			t.Cleanup(func() { crashHook = nil })
++			const tries = 50
++			reused := false
++			for i := 0; i < tries && !reused; i++ {
++				var serr error
++				hit := false
++				crashHook = func(pt string) error {
++					if pt != "check-open ingest-1.cert" || hit {
++						return nil
++					}
++					hit = true
++					fi1, err := os.Lstat(p)
++					if serr = err; err != nil {
++						return nil
++					}
++					if serr = os.Remove(p); serr != nil {
++						return nil
++					}
++					if serr = k.make(p); serr != nil {
++						return nil
++					}
++					fi2, err := os.Lstat(p)
++					serr = err
++					reused = err == nil && os.SameFile(fi1, fi2)
++					return nil
++				}
++				err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
++				crashHook = nil
++				if serr != nil || !hit {
++					t.Fatalf("swap: %v %v", serr, hit)
++				}
++				if !errors.Is(err, errChanged) || errors.Is(err, syscall.ENXIO) || err.Error() != changedOpenMsg(p) {
++					t.Fatalf("try %d, %s, inode number reused %v: %v", i+1, k.name, reused, err)
++				}
++				if err := os.Remove(p); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.WriteFile(p, orig, 0o644); err != nil {
++					t.Fatal(err)
++				}
++				if reused {
++					t.Logf("inode number reused in try %d", i+1)
++				}
++			}
++			if platformSnapshot(t, st) != before || len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert")) != logged {
++				t.Fatal("written or logged before the refusal")
++			}
++			if !reused {
++				t.Skipf("the file system never gave the %s the inode number of the removed file in %d tries", k.name, tries)
++			}
++		})
++	}
++}
++
++// setNofile sets the soft RLIMIT_NOFILE to cur, the hard one stays max.
++func setNofile(cur, max uint64) error {
++	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: cur, Max: max})
++}
++
++// TestPublishEMFILEAtOpen (review of task 28 A, H1): the open of
++// ingest-1.cert in checkDataPlatform fails with EMFILE (the soft
++// RLIMIT_NOFILE set to 0 at the hook "check-open ingest-1.cert" and put
++// back at "check-failed ingest-1.cert"; no root needed). The second look
++// finds the same regular file: the error of the open, neither
++// errChanged nor store.ErrNotRegular. With "emfile-lstat-fails" the
++// hook "check-failed" stands for a failing os.Lstat of the second look
++// (EIO): still the error of the open, never "is gone" (mutant M12 of
++// the robustness review: every failure of that os.Lstat taken for a
++// name gone). Nothing written or logged.
++func TestPublishEMFILEAtOpen(t *testing.T) {
++	for _, c := range []string{"emfile", "emfile-lstat-fails"} {
++		t.Run(c, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			out := filepath.Join(f.base, "out")
++			p := st.Path("platform", "ingest-1.cert")
++			before := platformSnapshot(t, st)
++			logged := len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert"))
++			var old syscall.Rlimit
++			if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { crashHook = nil; setNofile(old.Cur, old.Max) })
++			lstatErr := fmt.Errorf("lstat in the test: %w", syscall.EIO)
++			var serr error
++			var hits []string
++			crashHook = func(pt string) error {
++				switch {
++				case pt == "check-open ingest-1.cert" && len(hits) == 0:
++					hits = append(hits, pt)
++					serr = setNofile(0, old.Max)
++				case pt == "check-failed ingest-1.cert" && len(hits) == 1:
++					hits = append(hits, pt)
++					serr = setNofile(old.Cur, old.Max)
++					if c == "emfile-lstat-fails" {
++						return lstatErr
++					}
++				}
++				return nil
++			}
++			err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
++			crashHook = nil
++			if rerr := setNofile(old.Cur, old.Max); rerr != nil {
++				t.Fatal(rerr)
++			}
++			if serr != nil || len(hits) != 2 {
++				t.Fatalf("hooks: %v %q (err %v)", serr, hits, err)
++			}
++			if !errors.Is(err, syscall.EMFILE) || errors.Is(err, errChanged) || errors.Is(err, store.ErrNotRegular) || errors.Is(err, syscall.EIO) ||
++				!strings.Contains(err.Error(), "ingest-1.cert") {
++				t.Fatalf("%s: %v", c, err)
++			}
++			if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
++				t.Fatalf("ingest-1.cert afterwards: %v %v", fi, err)
++			}
++			if platformSnapshot(t, st) != before || len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert")) != logged {
++				t.Fatal("written or logged before the refusal")
++			}
++		})
++	}
++}
++
++// TestPublishReplaceFailsAfterLine (review of task 28 A, F3; probe
++// rev28a_announce_unix_test.go of the specification review):
++// witnesses.rec is a regular working copy with other witnesses, a
++// symbolic or a hard link, ReplaceWitnesses is set, and admin-1.pub is
++// missing, so publish writes it first. Right after that write (hook
++// "publish-file") the replacement of witnesses.rec is made to fail:
++//
++//   - "create": the soft RLIMIT_NOFILE is 0, the temporary file cannot
++//     be made (EMFILE); witnesses.rec stays what it was;
++//   - "rename": another process puts a directory under witnesses.rec, the
++//     rename fails (EEXIST).
++//
++// WitnessesReplacing has come, WitnessesReplaced and
++// WitnessesLinkReplaced do not, and the error names witnesses.rec, says
++// it is unchanged, nothing is logged, files of the export may be written
++// (admin-1.pub is), and the remedy; errors.Is holds for the cause. No
++// temporary file is left, nothing is logged. When witnesses.rec is
++// missing ("missing", written for the first time) no line comes and the
++// error of store.ReplaceFileIn is returned as it is.
++func TestPublishReplaceFailsAfterLine(t *testing.T) {
++	for _, c := range []struct{ kind, fail string }{
++		{"regular", "create"}, {"symbolic", "create"}, {"hard", "create"}, {"missing", "create"}, {"regular", "rename"},
++	} {
++		t.Run(c.kind+"-"+c.fail, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			out := filepath.Join(f.base, "out")
++			p := st.Path("platform", WitnessesFile)
++			other, err := (&witness.Witnesses{List: f.w[:1], Min: 1}).Encode()
++			if err != nil {
++				t.Fatal(err)
++			}
++			outside := filepath.Join(f.base, "outside-w")
++			switch c.kind {
++			case "regular":
++				err = os.WriteFile(p, other, 0o644)
++			case "missing":
++				err = os.Remove(p)
++			case "symbolic", "hard":
++				if err = os.WriteFile(outside, other, 0o644); err == nil {
++					err = os.Remove(p)
++				}
++				if err == nil && c.kind == "symbolic" {
++					err = os.Symlink(outside, p)
++				} else if err == nil {
++					err = os.Link(outside, p)
++				}
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			a1 := st.Path("platform", "admin-1.pub")
++			if err := os.Remove(a1); err != nil {
++				t.Fatal(err)
++			}
++			wantA1 := mustReadFile(t, filepath.Join(out, "platform", "admin-1.pub"))
++			var old syscall.Rlimit
++			if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { crashHook = nil; setNofile(old.Cur, old.Max) })
++			logged := len(loggedPlatform(t, st, f.res.Pin, "admin-1.pub"))
++			var serr error
++			hit, logReached := false, false
++			crashHook = func(pt string) error {
++				if pt == "publish-log" {
++					logReached = true
++				}
++				if pt != "publish-file" || hit {
++					return nil
++				}
++				hit = true
++				if c.fail == "create" {
++					serr = setNofile(0, old.Max)
++				} else if serr = os.Remove(p); serr == nil {
++					serr = os.Mkdir(p, 0o755)
++				}
++				return nil
++			}
++			var calls []string
++			err = Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, ReplaceWitnesses: true,
++				WitnessesReplacing: func(before *witness.Witnesses, link string, after *witness.Witnesses) {
++					calls = append(calls, replacingLine(before, link, after))
++				},
++				WitnessesReplaced:     func(_, _ *witness.Witnesses) { calls = append(calls, "replaced") },
++				WitnessesLinkReplaced: func(string, *witness.Witnesses) { calls = append(calls, "link replaced") }})
++			crashHook = nil
++			if rerr := setNofile(old.Cur, old.Max); rerr != nil {
++				t.Fatal(rerr)
++			}
++			if serr != nil || !hit {
++				t.Fatalf("hook: %v %v (err %v)", serr, hit, err)
++			}
++			if err == nil {
++				t.Fatal("publish went through")
++			}
++			var cause error = syscall.EMFILE
++			if c.fail == "rename" {
++				cause = syscall.EEXIST
++			}
++			if !errors.Is(err, cause) {
++				t.Fatalf("not %v: %v", cause, err)
++			}
++			// The cause is the error of store.ReplaceFileIn as it is:
++			// whatever stands between the prefix and "; <p> is unchanged".
++			msg := err.Error()
++			t.Log(msg)
++			if c.kind == "missing" {
++				if len(calls) != 0 || strings.Contains(msg, "unchanged") || strings.HasPrefix(msg, "ceremony: replacing ") {
++					t.Fatalf("written for the first time: calls %q, %v", calls, err)
++				}
++			} else {
++				pre := "ceremony: replacing " + p + ": "
++				i := strings.Index(msg, "; "+p+" is unchanged")
++				if !strings.HasPrefix(msg, pre) || i < len(pre) || msg != replaceFailedMsg(p, msg[len(pre):i]) {
++					t.Fatalf("message %q", msg)
++				}
++				if len(calls) != 1 || !strings.HasPrefix(calls[0], "replacing ") {
++					t.Fatalf("callbacks %q", calls)
++				}
++			}
++			// witnesses.rec as before the replacement (the directory of the
++			// other process for "rename").
++			fi, lerr := os.Lstat(p)
++			switch {
++			case c.fail == "rename":
++				if lerr != nil || !fi.IsDir() {
++					t.Fatalf("witnesses.rec: %v %v", fi, lerr)
++				}
++			case c.kind == "missing":
++				if !errors.Is(lerr, os.ErrNotExist) {
++					t.Fatalf("witnesses.rec: %v %v", fi, lerr)
++				}
++			case c.kind == "symbolic":
++				if lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
++					t.Fatalf("witnesses.rec: %v %v", fi, lerr)
++				}
++			default:
++				if lerr != nil || !fi.Mode().IsRegular() || !bytes.Equal(mustReadFile(t, p), other) || c.kind == "hard" && nlink(fi) != 2 {
++					t.Fatalf("witnesses.rec: %v %v", fi, lerr)
++				}
++			}
++			if !bytes.Equal(mustReadFile(t, a1), wantA1) {
++				t.Fatal("admin-1.pub not written before witnesses.rec")
++			}
++			for _, n := range listDir(t, st.Path("platform")) {
++				if strings.HasPrefix(n, ".tmp-") {
++					t.Fatalf("temporary file left: %s", n)
++				}
++			}
++			if logReached || len(loggedPlatform(t, st, f.res.Pin, "admin-1.pub")) != logged {
++				t.Fatal("logged after the failure")
++			}
++		})
++	}
++}
+diff --git a/internal/ceremony/publish28a2_unix_test.go b/internal/ceremony/publish28a2_unix_test.go
+new file mode 100644
+index 0000000..9cb7b38
+--- /dev/null
++++ b/internal/ceremony/publish28a2_unix_test.go
+@@ -0,0 +1,106 @@
++//go:build unix
++
++package ceremony
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"path/filepath"
++	"slices"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/witness"
++)
++
++// replaceFailedMsg is the error of publish when the replacement of
++// witnesses.rec (path p) fails after its line (review of task 28 A, F3),
++// with the error cause of store.ReplaceFileIn.
++func replaceFailedMsg(p, cause string) string {
++	return "ceremony: replacing " + p + ": " + cause + "; " + p +
++		" is unchanged and nothing is logged (files of the export may be written already): run the same publish again"
++}
++
++// TestPublishReplacingAfterExportFiles (review of task 28 A, F4; mutant
++// N15: the line before the export's files): with ReplaceWitnesses and a
++// working copy with other witnesses, admin-1.pub missing, the line of
++// WitnessesReplacing comes after publish wrote the export's files
++// (admin-1.pub is there when it comes) and before witnesses.rec is
++// replaced. When writing the export's files fails (the hook
++// "publish-file" after admin-1.pub stands for that), no line comes,
++// witnesses.rec is unchanged and nothing is logged.
++func TestPublishReplacingAfterExportFiles(t *testing.T) {
++	for _, c := range []string{"order", "loop-fails"} {
++		t.Run(c, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			out := filepath.Join(f.base, "out")
++			p := st.Path("platform", WitnessesFile)
++			pinW := mustReadFile(t, p)
++			other, err := (&witness.Witnesses{List: f.w[:1], Min: 1}).Encode()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := os.WriteFile(p, other, 0o644); err != nil {
++				t.Fatal(err)
++			}
++			a1 := st.Path("platform", "admin-1.pub")
++			if err := os.Remove(a1); err != nil {
++				t.Fatal(err)
++			}
++			wantA1 := mustReadFile(t, filepath.Join(out, "platform", "admin-1.pub"))
++			loopErr := errors.New("writing the export's files fails in the test")
++			hit, logReached := false, false
++			crashHook = func(pt string) error {
++				switch {
++				case pt == "publish-log":
++					logReached = true
++				case pt == "publish-file" && !hit:
++					hit = true
++					if c == "loop-fails" {
++						return loopErr
++					}
++				}
++				return nil
++			}
++			t.Cleanup(func() { crashHook = nil })
++			var calls []string
++			err = Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, ReplaceWitnesses: true,
++				WitnessesReplacing: func(*witness.Witnesses, string, *witness.Witnesses) {
++					a1now, _ := os.ReadFile(a1)
++					wnow, _ := os.ReadFile(p)
++					calls = append(calls, "replacing", "admin-1.pub written "+boolText(bytes.Equal(a1now, wantA1)),
++						"witnesses.rec old "+boolText(bytes.Equal(wnow, other)))
++				},
++				WitnessesReplaced: func(_, _ *witness.Witnesses) { calls = append(calls, "replaced") }})
++			crashHook = nil
++			if !hit {
++				t.Fatal("hook publish-file not reached")
++			}
++			if c == "order" {
++				want := []string{"replacing", "admin-1.pub written yes", "witnesses.rec old yes", "replaced"}
++				if err != nil || !slices.Equal(calls, want) || !logReached {
++					t.Fatalf("callbacks %q, want %q: %v", calls, want, err)
++				}
++				if !bytes.Equal(mustReadFile(t, p), pinW) {
++					t.Fatal("witnesses.rec not replaced")
++				}
++				return
++			}
++			if !errors.Is(err, loopErr) || len(calls) != 0 || logReached {
++				t.Fatalf("writing the export failed: callbacks %q, log reached %v: %v", calls, logReached, err)
++			}
++			if !bytes.Equal(mustReadFile(t, p), other) {
++				t.Fatal("witnesses.rec changed")
++			}
++		})
++	}
++}
++
++// boolText is "yes" or "no".
++func boolText(b bool) string {
++	if b {
++		return "yes"
++	}
++	return "no"
++}
+diff --git a/internal/ceremony/publish28a_linux_test.go b/internal/ceremony/publish28a_linux_test.go
+new file mode 100644
+index 0000000..d9474aa
+--- /dev/null
++++ b/internal/ceremony/publish28a_linux_test.go
+@@ -0,0 +1,284 @@
++//go:build linux
++
++package ceremony
++
++import (
++	"bytes"
++	"encoding/binary"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/store"
++)
++
++// Tests of task 28 package 28A on Linux: a regular file replaced right
++// after os.Lstat (backlog 93), and a device that os.Lstat shows is never
++// opened, checked with inotify and without root (backlog 95).
++
++// swapKinds are the entries a regular file is replaced by, or that lie
++// under a name from the start: mknod of a character or block device
++// needs CAP_MKNOD, except for the device 0:0 (a whiteout, which Linux
++// lets anyone make since 5.8 and which has no driver: an open fails with
++// ENXIO).
++var swapKinds = []struct {
++	name string
++	make func(p string) error
++}{
++	{"fifo", func(p string) error { return syscall.Mkfifo(p, 0o644) }},
++	{"dir", func(p string) error { return os.Mkdir(p, 0o755) }},
++	{"dir-000", func(p string) error { return os.Mkdir(p, 0) }},
++	{"socket", func(p string) error { return syscall.Mknod(p, syscall.S_IFSOCK|0o644, 0) }},
++	{"chr-null", func(p string) error { return syscall.Mknod(p, syscall.S_IFCHR|0o644, int(1<<8|3)) }},
++	{"chr-tty", func(p string) error { return syscall.Mknod(p, syscall.S_IFCHR|0o644, int(5<<8|0)) }},
++	{"blk-loop", func(p string) error { return syscall.Mknod(p, syscall.S_IFBLK|0o600, int(7<<8|0)) }},
++	{"chr-0-0", func(p string) error { return syscall.Mknod(p, syscall.S_IFCHR|0o644, 0) }},
++}
++
++// TestPublishEntrySwappedAfterLstat (backlog 93; mutants Y7/A15 of the
++// reviews of task 27 A): a regular file that os.Lstat saw is replaced
++// right before publish opens it (hook "<at>-open <name>") by a FIFO, a
++// directory (also one without permissions), a socket, devices with and
++// without a driver: in checkDataPlatform (ingest-1.cert), in the
++// comparison with the export (ingest-1.cert) and for witnesses.rec.
++// Each is errChanged, "was replaced before it was opened", never
++// store.ErrNotRegular with "remove it by hand", which is for an entry
++// that os.Lstat showed as no regular file. Nothing is written or
++// logged: with the file put back, platform/ is as before.
++func TestPublishEntrySwappedAfterLstat(t *testing.T) {
++	for _, at := range []string{"check-open ingest-1.cert", "publish-open ingest-1.cert", "publish-open " + WitnessesFile} {
++		for _, k := range swapKinds {
++			t.Run(at+"-"+k.name, func(t *testing.T) {
++				f := newFixture(t)
++				st, _ := f.published(t, "data")
++				out := filepath.Join(f.base, "out")
++				_, name, _ := strings.Cut(at, " ")
++				p, aside := st.Path("platform", name), filepath.Join(f.base, "aside")
++				// Can this kind be made here at all?
++				probe := filepath.Join(f.base, "probe")
++				if err := k.make(probe); err != nil {
++					if errors.Is(err, syscall.EPERM) {
++						t.Skipf("%s: %v", k.name, err)
++					}
++					t.Fatal(err)
++				}
++				before := platformSnapshot(t, st)
++				logged := len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert"))
++				var serr error
++				hit := false
++				crashHook = func(pt string) error {
++					if pt != at || hit {
++						return nil
++					}
++					hit = true
++					// The file stays elsewhere, so the new entry never gets
++					// its inode number.
++					if serr = os.Rename(p, aside); serr == nil {
++						serr = k.make(p)
++					}
++					return nil
++				}
++				t.Cleanup(func() { crashHook = nil; os.Chmod(p, 0o700) })
++				err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
++				crashHook = nil
++				if serr != nil || !hit {
++					t.Fatalf("swap: %v %v", serr, hit)
++				}
++				want := "ceremony: an entry of platform/ changed while publish read it: " + p +
++					" was replaced before it was opened; another process writes platform/ during publish: stop it, look at the entry and run the same publish again"
++				if !errors.Is(err, errChanged) || errors.Is(err, store.ErrNotRegular) || err.Error() != want {
++					t.Fatalf("%s replaced by %s: %v", name, k.name, err)
++				}
++				os.Chmod(p, 0o700)
++				if err := os.RemoveAll(p); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.Rename(aside, p); err != nil {
++					t.Fatal(err)
++				}
++				if platformSnapshot(t, st) != before || len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert")) != logged {
++					t.Fatal("written or logged before the refusal")
++				}
++			})
++		}
++	}
++}
++
++// inotifyOpens returns how often each name was opened in the directory
++// watched by the inotify descriptor fd (IN_OPEN, IN_NONBLOCK) since the
++// last call.
++func inotifyOpens(t *testing.T, fd int) map[string]int {
++	t.Helper()
++	n := map[string]int{}
++	buf := make([]byte, 1<<16)
++	for {
++		k, err := syscall.Read(fd, buf)
++		if errors.Is(err, syscall.EAGAIN) || k == 0 {
++			return n
++		}
++		if err != nil {
++			t.Fatal(err)
++		}
++		for b := buf[:k]; len(b) >= syscall.SizeofInotifyEvent; {
++			mask := binary.NativeEndian.Uint32(b[4:])
++			l := int(binary.NativeEndian.Uint32(b[12:]))
++			name := b[syscall.SizeofInotifyEvent : syscall.SizeofInotifyEvent+l]
++			if i := bytes.IndexByte(name, 0); i >= 0 {
++				name = name[:i]
++			}
++			if mask&syscall.IN_OPEN != 0 {
++				n[string(name)]++
++			}
++			b = b[syscall.SizeofInotifyEvent+l:]
++		}
++	}
++}
++
++// TestPublishDeviceAtLstatNeverOpened (backlog 95; mutant Y1 of the
++// review of task 27 A2, which survived without root): a device that
++// os.Lstat already shows under ingest-1.cert (checkDataPlatform),
++// admin-3.pub (a name of section 4 the export does not hold) or
++// witnesses.rec (readEntry) is refused as store.ErrNotRegular and never
++// opened. inotify (IN_OPEN on platform/) shows that no open reached it,
++// while it shows the opens of the regular files publish reads and the
++// test's own open of the device afterwards. The device 0:0 needs no
++// CAP_MKNOD (Linux 5.8 and later) and no root; an open of it fails with
++// ENXIO, which the refusal must not be. With CAP_MKNOD the device of
++// /dev/null (1:3) and a block device (7:0) are checked as well; without
++// it their cases are skipped, as is everything where the system refuses
++// inotify or even the device 0:0.
++func TestPublishDeviceAtLstatNeverOpened(t *testing.T) {
++	devs := []struct {
++		name string
++		mode uint32
++		dev  int
++	}{
++		{"chr-0-0", syscall.S_IFCHR | 0o644, 0},
++		{"chr-null", syscall.S_IFCHR | 0o644, 1<<8 | 3},
++		{"blk-loop", syscall.S_IFBLK | 0o600, 7<<8 | 0},
++	}
++	for _, name := range []string{"ingest-1.cert", "admin-3.pub", WitnessesFile} {
++		for _, d := range devs {
++			t.Run(name+"-"+d.name, func(t *testing.T) {
++				f := newFixture(t)
++				st, _ := f.published(t, "data")
++				out := filepath.Join(f.base, "out")
++				p := st.Path("platform", name)
++				if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
++					t.Fatal(err)
++				}
++				if err := syscall.Mknod(p, d.mode, d.dev); err != nil {
++					if errors.Is(err, syscall.EPERM) {
++						t.Skipf("mknod %s: %v (CAP_MKNOD, or Linux before 5.8 for 0:0)", d.name, err)
++					}
++					t.Fatal(err)
++				}
++				fd, err := syscall.InotifyInit1(syscall.IN_NONBLOCK | syscall.IN_CLOEXEC)
++				if err != nil {
++					t.Skipf("inotify: %v", err)
++				}
++				defer syscall.Close(fd)
++				if _, err := syscall.InotifyAddWatch(fd, st.Path("platform"), syscall.IN_OPEN); err != nil {
++					t.Skipf("inotify watch: %v", err)
++				}
++				before := platformSnapshot(t, st)
++				err = Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
++				opens := inotifyOpens(t, fd)
++				want := notRegularMsg(p)
++				if name == WitnessesFile {
++					want = notRegularReadMsg(p, "")
++				}
++				if !errors.Is(err, store.ErrNotRegular) || errors.Is(err, syscall.ENXIO) || errors.Is(err, errChanged) || err.Error() != want {
++					t.Fatalf("%s as %s: %v", name, d.name, err)
++				}
++				if opens[name] != 0 {
++					t.Fatalf("publish opened the device under %s %d times", name, opens[name])
++				}
++				// The watch sees the opens of publish: the regular files it
++				// read before the refusal (checkDataPlatform reads
++				// admin-1.cert first; before witnesses.rec it reads
++				// ingest-1.cert as well).
++				if opens["admin-1.cert"] == 0 {
++					t.Fatalf("inotify saw no open of admin-1.cert: %v", opens)
++				}
++				// And it sees an open of the device itself, where the device
++				// has a driver; 0:0 has none, its open fails with ENXIO.
++				dev, oerr := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
++				if oerr == nil {
++					dev.Close()
++					if inotifyOpens(t, fd)[name] == 0 {
++						t.Fatalf("inotify did not see the open of %s", d.name)
++					}
++				} else if d.name == "chr-0-0" && !errors.Is(oerr, syscall.ENXIO) {
++					t.Fatalf("open of the device 0:0: %v", oerr)
++				}
++				if platformSnapshot(t, st) != before {
++					t.Fatal("written before the refusal")
++				}
++			})
++		}
++	}
++}
++
++// TestPublishEntryGoneAfterFailedOpen (backlog 93): ingest-1.cert is
++// replaced by a socket right before publish opens it (the open fails with
++// ENXIO), and right after the failed open (hook "check-failed
++// ingest-1.cert") the socket is removed: the entry is gone, errChanged
++// "is gone", not the error of the open. If the file is put back instead
++// (the same file under the name again), nothing tells that the open hit
++// another entry: publish refuses with the error of the open (ENXIO),
++// neither errChanged nor store.ErrNotRegular, and writes or logs nothing
++// (the window left).
++func TestPublishEntryGoneAfterFailedOpen(t *testing.T) {
++	for _, c := range []string{"gone", "back"} {
++		t.Run(c, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			out := filepath.Join(f.base, "out")
++			p, aside := st.Path("platform", "ingest-1.cert"), filepath.Join(f.base, "aside")
++			before := platformSnapshot(t, st)
++			logged := len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert"))
++			var serr error
++			var hits []string
++			crashHook = func(pt string) error {
++				switch {
++				case pt == "check-open ingest-1.cert" && len(hits) == 0:
++					hits = append(hits, pt)
++					if serr = os.Rename(p, aside); serr == nil {
++						serr = syscall.Mknod(p, syscall.S_IFSOCK|0o644, 0)
++					}
++				case pt == "check-failed ingest-1.cert" && len(hits) == 1:
++					hits = append(hits, pt)
++					if serr = os.Remove(p); serr == nil && c == "back" {
++						serr = os.Rename(aside, p)
++					}
++				}
++				return nil
++			}
++			t.Cleanup(func() { crashHook = nil })
++			err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin})
++			crashHook = nil
++			if serr != nil || len(hits) != 2 {
++				t.Fatalf("swap: %v %v", serr, hits)
++			}
++			if c == "gone" {
++				want := "ceremony: an entry of platform/ changed while publish read it: " + p +
++					" is gone; another process writes platform/ during publish: stop it, look at the entry and run the same publish again"
++				if !errors.Is(err, errChanged) || err.Error() != want {
++					t.Fatalf("socket gone after the failed open: %v", err)
++				}
++				if err := os.Rename(aside, p); err != nil {
++					t.Fatal(err)
++				}
++			} else if !errors.Is(err, syscall.ENXIO) || errors.Is(err, errChanged) || errors.Is(err, store.ErrNotRegular) {
++				t.Fatalf("file back after the failed open: %v", err)
++			}
++			if platformSnapshot(t, st) != before || len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert")) != logged {
++				t.Fatal("written or logged before the refusal")
++			}
++		})
++	}
++}
+diff --git a/internal/ceremony/publish28a_unix_test.go b/internal/ceremony/publish28a_unix_test.go
+new file mode 100644
+index 0000000..b38a8c2
+--- /dev/null
++++ b/internal/ceremony/publish28a_unix_test.go
+@@ -0,0 +1,413 @@
++//go:build unix
++
++package ceremony
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"maps"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"slices"
++	"strings"
++	"syscall"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/keys"
++	"github.com/tim-riep/go-mail/internal/store"
++	"github.com/tim-riep/go-mail/internal/witness"
++)
++
++// Tests of task 28 package 28A: store.ErrNotRegular of readEntry in
++// runPublish with path and remedy (backlog 94), the line before
++// witnesses.rec is replaced (backlog 85), and "written meanwhile" with
++// the export's content (backlog 95, mutant A11/W4).
++
++// notRegularReadMsg is the refusal of platform/<name> (path p) that was
++// no regular file when readEntry looked at it in runPublish (backlog
++// 94); why is written in the branch "written meanwhile", "" otherwise.
++func notRegularReadMsg(p, why string) string {
++	done := "nothing written or logged"
++	if why != "" {
++		done = "nothing logged, other files of the export may be written already"
++	}
++	return "ceremony: " + p + " is not a regular file (a FIFO, a device, a directory or a socket)" + why +
++		": publish never reads or replaces such an entry; " + done + ": look at the entry, remove it by hand and run the same publish again"
++}
++
++// TestPublishNotRegularWrapped (backlog 94): every call of readEntry in
++// runPublish that finds an entry that is no regular file (here a FIFO)
++// refuses with the path of the entry and the remedy, and
++// errors.Is(err, store.ErrNotRegular) holds:
++//
++//   - witnesses.rec, without and with ReplaceWitnesses (checkDataPlatform
++//     does not look at it);
++//   - ingest-1.cert in the comparison with the export, made a FIFO after
++//     checkDataPlatform read it (hook "publish-open witnesses.rec");
++//   - admin-2.cert in freeName, which reads the certificate of a public
++//     key that differs (admin-2.cert missing when compared, a FIFO by the
++//     time freeName reads it: hook "publish-recheck admin-2.pub");
++//   - identity-2.succ that succChain.need would relog, made a FIFO after
++//     checkDataPlatform checked it;
++//   - admin-2.cert written meanwhile, a FIFO that appears after
++//     admin-2.pub was written (hook "publish-file"): the message says
++//     that other files may be written already, and admin-2.pub is.
++//
++// Nothing is logged in any case; before the writes nothing is written
++// either (the FIFO is the only change).
++func TestPublishNotRegularWrapped(t *testing.T) {
++	for _, c := range []string{"witnesses", "witnesses-replace", "compare", "freename", "relog", "meanwhile"} {
++		t.Run(c, func(t *testing.T) {
++			f := newFixture(t)
++			st, _ := f.published(t, "data")
++			from := filepath.Join(f.base, "out")
++			pin := f.res.Pin
++			name, at, why := WitnessesFile, "", ""
++			a2pub, a2 := f.cert(t, 1, keys.RoleAdmin, 2)
++			switch c {
++			case "compare":
++				name, at = "ingest-1.cert", "publish-open "+WitnessesFile
++			case "freename":
++				from = writeExport(t, filepath.Join(f.base, "expA2"), map[string][]byte{"admin-2.pub": a2pub, "admin-2.cert": a2})
++				if err := os.WriteFile(st.Path("platform", "admin-2.pub"), bytes.Repeat([]byte{9}, 32), 0o644); err != nil {
++					t.Fatal(err)
++				}
++				name, at = "admin-2.cert", "publish-recheck admin-2.pub"
++			case "relog":
++				pin = f.pinN(t, 2)
++				s2pub, s2 := f.succ(t, 2)
++				from = writeExport(t, filepath.Join(f.base, "exp"), map[string][]byte{"identity-2.pub": s2pub})
++				if err := os.WriteFile(st.Path("platform", "identity-2.succ"), s2, 0o644); err != nil {
++					t.Fatal(err)
++				}
++				name, at = "identity-2.succ", "publish-open "+WitnessesFile
++			case "meanwhile":
++				from = writeExport(t, filepath.Join(f.base, "expA2"), map[string][]byte{"admin-2.pub": a2pub, "admin-2.cert": a2})
++				name, at, why = "admin-2.cert", "publish-file", written
++			}
++			p := st.Path("platform", name)
++			fifo := func() error {
++				if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
++					return err
++				}
++				return syscall.Mkfifo(p, 0o644)
++			}
++			if at == "" {
++				if err := fifo(); err != nil {
++					t.Fatal(err)
++				}
++			}
++			var serr error
++			hit := false
++			crashHook = func(pt string) error {
++				if pt != at || hit {
++					return nil
++				}
++				hit = true
++				serr = fifo()
++				return nil
++			}
++			t.Cleanup(func() { crashHook = nil })
++			logged := len(loggedPlatform(t, st, pin, "admin-2.cert")) + len(loggedPlatform(t, st, pin, "identity-2.succ"))
++			before := platformSnapshot(t, st)
++			err := Publish(PublishOptions{From: from, Data: st, Pin: pin, ReplaceWitnesses: c == "witnesses-replace"})
++			crashHook = nil
++			if serr != nil || at != "" && !hit {
++				t.Fatalf("swap: %v %v", serr, hit)
++			}
++			if !errors.Is(err, store.ErrNotRegular) || errors.Is(err, errChanged) || err.Error() != notRegularReadMsg(p, why) {
++				t.Fatalf("FIFO as %s: %v", name, err)
++			}
++			if n := len(loggedPlatform(t, st, pin, "admin-2.cert")) + len(loggedPlatform(t, st, pin, "identity-2.succ")); n != logged {
++				t.Fatal("logged after the refusal")
++			}
++			// What changed in platform/: the FIFO, and in the branch
++			// "written meanwhile" admin-2.pub, written before.
++			set := map[string]string{}
++			if at != "" {
++				set[name] = name + " p---------"
++			}
++			if c == "meanwhile" {
++				set["admin-2.pub"] = fmt.Sprintf("admin-2.pub ---------- %x", a2pub)
++			}
++			if now, want := platformSnapshot(t, st), snapshotWith(before, set); now != want {
++				t.Fatalf("platform/ after the refusal:\n%s\nwant\n%s", now, want)
++			}
++			if c == "meanwhile" && !bytes.Equal(mustReadFile(t, st.Path("platform", "admin-2.pub")), a2pub) {
++				t.Fatal("admin-2.pub not written before")
++			}
++		})
++	}
++}
++
++// snapshotWith is the platformSnapshot before with the lines of the
++// names in set replaced or added (set maps a name to its line).
++func snapshotWith(before string, set map[string]string) string {
++	lines := map[string]string{}
++	for _, l := range strings.Split(strings.TrimSuffix(before, "\n"), "\n") {
++		if l != "" {
++			lines[strings.Fields(l)[0]] = l
++		}
++	}
++	for n, l := range set {
++		lines[n] = l
++	}
++	names := slices.Sorted(maps.Keys(lines))
++	var b strings.Builder
++	for _, n := range names {
++		b.WriteString(lines[n] + "\n")
++	}
++	return b.String()
++}
++
++// TestPublishMeanwhileSameContent (backlog 95, mutant A11/W4 of the
++// reviews of task 27 A): admin-1.pub is missing when publish compares,
++// and another process writes it with the export's content before publish
++// creates it (hook "publish-recheck ingest-1.pub", the last name of the
++// export compared). The branch "written meanwhile" finds the export's
++// content and goes on, without counting the name as written by publish:
++// with platform/ moved away right before the log (hook "publish-log")
++// the message says "nothing written or logged", and the moved directory
++// holds exactly what the other process wrote.
++func TestPublishMeanwhileSameContent(t *testing.T) {
++	f := newFixture(t)
++	out := filepath.Join(f.base, "out")
++	st := newData(t, filepath.Join(f.base, "data"))
++	lg := newLog(t)
++	if err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, Log: lg}); err != nil {
++		t.Fatal(err)
++	}
++	p := st.Path("platform", "admin-1.pub")
++	if err := os.Remove(p); err != nil {
++		t.Fatal(err)
++	}
++	want := mustReadFile(t, filepath.Join(out, "platform", "admin-1.pub"))
++	plat, moved := st.Path("platform"), filepath.Join(f.base, "moved")
++	var werr, merr error
++	wroteMeanwhile, movedAway := false, false
++	crashHook = func(pt string) error {
++		switch {
++		case pt == "publish-recheck ingest-1.pub" && !wroteMeanwhile:
++			wroteMeanwhile = true
++			werr = os.WriteFile(p, want, 0o644)
++		case pt == "publish-log" && !movedAway:
++			movedAway = true
++			merr = os.Rename(plat, moved)
++		}
++		return nil
++	}
++	t.Cleanup(func() { crashHook = nil })
++	logged := len(lg.names)
++	err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, Log: lg})
++	crashHook = nil
++	if werr != nil || merr != nil || !wroteMeanwhile || !movedAway {
++		t.Fatalf("hooks: %v %v %v %v", werr, merr, wroteMeanwhile, movedAway)
++	}
++	if !errors.Is(err, errPlatformReplaced) || err.Error() != "ceremony: platform/ of the data directory was replaced during publish: "+plat+
++		" is no longer the directory publish opened; nothing written or logged: another process writes the data directory: stop it, look at platform/ and run the same publish again" {
++		t.Fatalf("written meanwhile with the export's content: %v", err)
++	}
++	if len(lg.names) != logged {
++		t.Fatalf("logged %q", lg.names[logged:])
++	}
++	if !bytes.Equal(mustReadFile(t, filepath.Join(moved, "admin-1.pub")), want) {
++		t.Fatal("admin-1.pub is not what the other process wrote")
++	}
++}
++
++// replacingChild is the environment variable that makes
++// TestPublishWitnessesAnnouncedBeforeKill the child process: its value
++// is "<data directory>|<export>".
++const replacingChild = "GOMAIL_TEST_28A_REPLACING_CHILD"
++
++// replacingLine is the line the callbacks of the child of
++// TestPublishWitnessesAnnouncedBeforeKill print for WitnessesReplacing.
++func replacingLine(before *witness.Witnesses, link string, after *witness.Witnesses) string {
++	b := "-"
++	if before != nil {
++		b = fmt.Sprint(before.Min, len(before.List))
++	}
++	return fmt.Sprintf("replacing %s %q %d %d\n", b, link, after.Min, len(after.List))
++}
++
++// TestPublishWitnessesAnnouncedBeforeKill (backlog 85): with
++// ReplaceWitnesses, WitnessesReplacing is called before the rename of
++// witnesses.rec (the working copy there is still the old one, and the
++// arguments are the old witnesses or the kind of link, and the pin's),
++// and before WitnessesReplaced or WitnessesLinkReplaced, which come
++// after the rename. A child process that prints its line on standard
++// output and kills itself with SIGKILL right after the rename (hook
++// "publish-sync witnesses.rec", before the other callbacks) has printed
++// that line alone, and witnesses.rec is replaced: the replacement is
++// reported without a new option. The working copy is a regular file
++// with other witnesses, a symbolic link or a hard link (review of task
++// 28 A, F2; mutant N7: the hard link left out); the file a link names
++// stays as it was. With the pin's witnesses already there, and when
++// witnesses.rec is written for the first time (missing), no callback
++// comes.
++func TestPublishWitnessesAnnouncedBeforeKill(t *testing.T) {
++	if v := os.Getenv(replacingChild); v != "" {
++		data, from, _ := strings.Cut(v, "|")
++		st, err := store.Open(data)
++		if err != nil {
++			os.Exit(3)
++		}
++		pin, err := ReadPin(filepath.Join(from, "identity-1.pin"))
++		if err != nil {
++			os.Exit(3)
++		}
++		crashHook = func(pt string) error {
++			if pt == "publish-sync "+WitnessesFile {
++				syscall.Kill(os.Getpid(), syscall.SIGKILL)
++			}
++			return nil
++		}
++		err = Publish(PublishOptions{From: from, Data: st, Pin: pin, ReplaceWitnesses: true,
++			WitnessesReplacing: func(before *witness.Witnesses, link string, after *witness.Witnesses) {
++				fmt.Fprint(os.Stdout, replacingLine(before, link, after))
++			},
++			WitnessesReplaced:     func(_, _ *witness.Witnesses) { fmt.Fprintln(os.Stdout, "replaced") },
++			WitnessesLinkReplaced: func(string, *witness.Witnesses) { fmt.Fprintln(os.Stdout, "link replaced") }})
++		fmt.Fprintln(os.Stdout, "returned", err)
++		os.Exit(4)
++	}
++	for _, c := range []struct {
++		kind, line string
++		calls      []string
++	}{
++		{"regular", "replacing 1 1 \"\" 2 3\n", []string{"replacing 1 1 \"\" 2 3\n:old", "replaced:new"}},
++		{"symbolic", "replacing - \"a symbolic link\" 2 3\n", []string{"replacing - \"a symbolic link\" 2 3\n:link", "link replaced:new"}},
++		{"hard", "replacing - \"a hard link\" 2 3\n", []string{"replacing - \"a hard link\" 2 3\n:old", "link replaced:new"}},
++		{"same", "", nil},
++		{"missing", "", nil},
++	} {
++		t.Run(c.kind, func(t *testing.T) {
++			f := newFixture(t)
++			out := filepath.Join(f.base, "out")
++			other, err := (&witness.Witnesses{List: f.w[:1], Min: 1}).Encode()
++			if err != nil {
++				t.Fatal(err)
++			}
++			// prepare publishes the export into a new data directory name
++			// and puts the working copy of the case in place.
++			prepare := func(name string) (*store.Store, string, []byte) {
++				st, _ := f.published(t, name)
++				p := st.Path("platform", WitnessesFile)
++				pinW := mustReadFile(t, p)
++				switch c.kind {
++				case "regular":
++					if err := os.WriteFile(p, other, 0o644); err != nil {
++						t.Fatal(err)
++					}
++				case "missing":
++					if err := os.Remove(p); err != nil {
++						t.Fatal(err)
++					}
++				case "symbolic", "hard":
++					outside := filepath.Join(f.base, "outside-w-"+name)
++					if err := os.WriteFile(outside, other, 0o644); err != nil {
++						t.Fatal(err)
++					}
++					if err := os.Remove(p); err != nil {
++						t.Fatal(err)
++					}
++					link := os.Symlink
++					if c.kind == "hard" {
++						link = os.Link
++					}
++					if err := link(outside, p); err != nil {
++						t.Fatal(err)
++					}
++				}
++				return st, p, pinW
++			}
++			// In this process: the order of the callbacks and what
++			// witnesses.rec is when each comes.
++			st, p, pinW := prepare("data")
++			look := func() string {
++				if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
++					return "link"
++				}
++				if bytes.Equal(mustReadFile(t, p), pinW) {
++					return "new"
++				}
++				return "old"
++			}
++			var calls []string
++			err = Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, ReplaceWitnesses: true,
++				WitnessesReplacing: func(before *witness.Witnesses, link string, after *witness.Witnesses) {
++					calls = append(calls, replacingLine(before, link, after)+":"+look())
++				},
++				WitnessesReplaced:     func(_, _ *witness.Witnesses) { calls = append(calls, "replaced:"+look()) },
++				WitnessesLinkReplaced: func(string, *witness.Witnesses) { calls = append(calls, "link replaced:"+look()) }})
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !slices.Equal(calls, c.calls) {
++				t.Fatalf("callbacks %q, want %q", calls, c.calls)
++			}
++			if c.kind == "same" || c.kind == "missing" {
++				if !bytes.Equal(mustReadFile(t, p), pinW) {
++					t.Fatal("witnesses.rec is not the pin's")
++				}
++				return
++			}
++			// In a child killed right after the rename.
++			st, p, pinW = prepare("data-child")
++			cmd := exec.Command(os.Args[0], "-test.run=^TestPublishWitnessesAnnouncedBeforeKill$", "-test.count=1")
++			cmd.Env = append(os.Environ(), replacingChild+"="+st.Root+"|"+out)
++			var stdout, stderr bytes.Buffer
++			cmd.Stdout, cmd.Stderr = &stdout, &stderr
++			err = cmd.Run()
++			var ee *exec.ExitError
++			if !errors.As(err, &ee) {
++				t.Fatalf("child: %v %q %q", err, stdout.String(), stderr.String())
++			}
++			if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
++				t.Fatalf("child not killed: %v %q %q", err, stdout.String(), stderr.String())
++			}
++			if got := stdout.String(); got != c.line {
++				t.Fatalf("child's output %q, want %q", got, c.line)
++			}
++			if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() || !bytes.Equal(mustReadFile(t, p), pinW) {
++				t.Fatalf("witnesses.rec not replaced by the child: %v %v", fi, err)
++			}
++			if c.kind != "regular" {
++				for _, n := range []string{"data", "data-child"} {
++					if !bytes.Equal(mustReadFile(t, filepath.Join(f.base, "outside-w-"+n)), other) {
++						t.Fatalf("the file the link named changed (%s)", n)
++					}
++				}
++			}
++		})
++	}
++}
++
++// TestListDir (backlog 95): listDir shows a directory that shows nothing
++// below it, empty or without permissions, as "<path>/", so that
++// platformSnapshot sees a directory under a name of platform/; a
++// directory with entries shows through their paths, and symbolic links
++// are not followed.
++func TestListDir(t *testing.T) {
++	d := t.TempDir()
++	for _, m := range []struct {
++		p    string
++		mode os.FileMode
++	}{{"empty", 0o755}, {"none", 0}, {"full", 0o755}, {"full/sub", 0o755}, {"full/sub/deep", 0o755}} {
++		if err := os.Mkdir(filepath.Join(d, m.p), m.mode); err != nil {
++			t.Fatal(err)
++		}
++	}
++	t.Cleanup(func() { os.Chmod(filepath.Join(d, "none"), 0o700) })
++	if err := os.WriteFile(filepath.Join(d, "full", "f"), nil, 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink("empty", filepath.Join(d, "link")); err != nil {
++		t.Fatal(err)
++	}
++	if got := fmt.Sprint(listDir(t, d)); got != "[empty/ full/f full/sub/deep/ link none/]" {
++		t.Fatalf("listDir: %s", got)
++	}
++}
+diff --git a/internal/ceremony/publishlink24b_unix_test.go b/internal/ceremony/publishlink24b_unix_test.go
+index c02dd66..ef7b342 100644
+--- a/internal/ceremony/publishlink24b_unix_test.go
++++ b/internal/ceremony/publishlink24b_unix_test.go
+@@ -275,7 +275,9 @@ func TestPublishSameOverValidEntry(t *testing.T) {
+ }
+ 
+ // platformSnapshot describes the entries of data/platform/ without following
+-// links: name, type and content of regular files.
++// links: name, type and content of regular files; a directory shows by
++// listDir (an empty or unreadable one as "<name>/" with its type, backlog
++// 95).
+ func platformSnapshot(t *testing.T, st *store.Store) string {
+ 	t.Helper()
+ 	var b strings.Builder
+-- 
+2.43.0
+
