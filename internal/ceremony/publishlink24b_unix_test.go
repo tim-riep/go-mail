@@ -275,7 +275,9 @@ func TestPublishSameOverValidEntry(t *testing.T) {
 }
 
 // platformSnapshot describes the entries of data/platform/ without following
-// links: name, type and content of regular files.
+// links: name, type and content of regular files; a directory shows by
+// listDir (an empty or unreadable one as "<name>/" with its type, backlog
+// 95).
 func platformSnapshot(t *testing.T, st *store.Store) string {
 	t.Helper()
 	var b strings.Builder

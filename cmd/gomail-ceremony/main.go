@@ -2547,6 +2547,12 @@ func (e *env) publish(args []string) int {
 		WitnessesLinkReplaced: func(link string, after *witness.Witnesses) {
 			fmt.Fprint(e.stdout, linkReplacedText(link, after))
 		},
+		// Before the temporary file is written and renamed over
+		// witnesses.rec (backlog 85): a publish killed between the
+		// rename and the line above has printed this one.
+		WitnessesReplacing: func(before *witness.Witnesses, link string, after *witness.Witnesses) {
+			fmt.Fprint(e.stdout, replacingText(before, link, after))
+		},
 		// Named at once on standard error, also when publish refuses
 		// afterwards (RUNBOOK 7.3: nothing is removed unseen).
 		TempRemoved: func(name string) {
@@ -2598,6 +2604,28 @@ func replacedText(before, after *witness.Witnesses) string {
 	}
 	return fmt.Sprintf("platform/witnesses.rec ersetzt: bisher Quorum %d von %d (%s), jetzt %s.\n",
 		before.Min, len(before.List), witnessNames(before.List), quorumText(after))
+}
+
+// replacingText is the line of publish --replace-witnesses before the
+// temporary file is written and renamed over platform/witnesses.rec
+// (ceremony
+// PublishOptions.WitnessesReplacing; backlog 85): the working copy
+// before (nil when there is none to name) or the kind of link, and the
+// witnesses after. The line replacedText or linkReplacedText follows it
+// once the rename is done; a publish killed in between (SIGKILL) leaves
+// this line alone, and then platform/witnesses.rec may be replaced or
+// not.
+func replacingText(before *witness.Witnesses, link string, after *witness.Witnesses) string {
+	const look = "; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"
+	if link != "" {
+		return fmt.Sprintf("platform/witnesses.rec ist %s und wird jetzt durch die Zeugen des Pins ersetzt: künftig %s%s",
+			linkText(link), quorumText(after), look)
+	}
+	if before == nil {
+		return fmt.Sprintf("platform/witnesses.rec wird jetzt ersetzt: künftig %s%s", quorumText(after), look)
+	}
+	return fmt.Sprintf("platform/witnesses.rec wird jetzt ersetzt: bisher Quorum %d von %d (%s), künftig %s%s",
+		before.Min, len(before.List), witnessNames(before.List), quorumText(after), look)
 }
 
 // linkReplacedText is the line of publish --replace-witnesses for a

@@ -149,17 +149,29 @@ var errChanged = errors.New("ceremony: an entry of platform/ changed while publi
 // socket or of a device without a driver, no EACCES of a directory
 // without permission, no open of a device), refused before anything is
 // written (none of them is replaced: a directory cannot be renamed
-// over). A regular file is opened with store.OpenRegularIn and read from
-// that descriptor (a FIFO or a directory by then is ErrNotRegular of the
-// open). The descriptor must be the file os.Lstat saw, and after
-// the read the name must still be that file and no link (os.SameFile on
-// both sides, review of task 24 A, F3): an entry replaced in between,
-// also by a symbolic link to the same file, is errChanged, never taken
-// for the export's file. The hard link check uses the last os.Lstat; a
-// failure of that os.Lstat other than a missing name is reported with
-// its own error (review of task 25 A). Everything goes through pd,
-// platform/ as Publish opened it (openPlatformDir, backlog 72): os.Lstat
-// is Root.Lstat, the open store.OpenRegularIn; st names the entry in
+// over); runPublish completes that error with the path and the remedy
+// (notRegularErr, backlog 94). A regular file is opened with
+// store.OpenRegularIn and read from that descriptor. The descriptor
+// must be the file os.Lstat saw, and after the read the name must still
+// be that file and no link (os.SameFile on both sides, review of task
+// 24 A, F3): an entry replaced in between, also by a symbolic link to
+// the same file, is errChanged, never taken for the export's file. So
+// is a regular file replaced after os.Lstat by an entry that is no
+// regular file (backlog 93): a FIFO, a directory or a device with a
+// driver is opened in this window (O_RDONLY|O_NONBLOCK|O_NOCTTY, never
+// read) and found to be no regular file, a socket or a device without
+// a driver fails the open (ENXIO); either is errChanged, never
+// store.ErrNotRegular, which is only for an entry that os.Lstat showed
+// as no regular file. Opening a device put there in this window cannot
+// be ruled out without a descriptor of the file os.Lstat saw (the
+// window left; it needs write access to platform/ during publish, and
+// either CAP_MKNOD or a device node that exists on the same file
+// system, which a rename or a hard link puts there without
+// CAP_MKNOD). The hard link check uses the last os.Lstat; a failure of
+// that os.Lstat other than a missing name is reported with its own
+// error (review of task 25 A). Everything goes through pd, platform/ as
+// Publish opened it (openPlatformDir, backlog 72): os.Lstat is
+// Root.Lstat, the open store.OpenRegularIn; st names the entry in
 // messages.
 func readEntry(st *store.Store, pd *os.Root, name string) ([]byte, string, error) {
 	b, link, err := lreadEntry(st, pd, name, "publish")
@@ -178,7 +190,10 @@ const (
 // lreadEntry is readEntry that also returns the content of a hard link
 // (link linkHard), for checkDataPlatform, which checks every regular
 // file of platform/ whatever its other names. at names the hook points
-// ("<at>-open <name>", "<at>-recheck <name>", for tests).
+// ("<at>-open <name>", "<at>-failed <name>" after an open that failed
+// otherwise than with store.ErrNotRegular, "<at>-recheck <name>", for
+// tests); an error of the hook "<at>-failed <name>" stands for a
+// failing os.Lstat of the second look (that os.Lstat is not made then).
 func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, error) {
 	p := st.Path("platform", name)
 	fi, err := lstatIn(pd, name, p)
@@ -195,7 +210,13 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, 
 	// os.Lstat saw it, before anything opens it (review of task 27 A, N2
 	// and F3): a socket or a device without a driver fails the open with
 	// ENXIO, a directory without permission with EACCES, and a device
-	// would be opened.
+	// with a driver would be opened. Only this refusal is
+	// store.ErrNotRegular (backlog 93). What is put in place of a
+	// regular file between this os.Lstat and the open below is opened
+	// (O_RDONLY|O_NONBLOCK|O_NOCTTY) where it can be, a FIFO, a
+	// directory and a device with a driver as well: that is the window
+	// left. For a socket or a device without a driver the open is only
+	// tried, and fails with ENXIO. Either is refused below (errChanged).
 	if !fi.Mode().IsRegular() {
 		return nil, "", fmt.Errorf("store: %s is %w", name, store.ErrNotRegular)
 	}
@@ -207,22 +228,43 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, 
 		return nil, "", changedErr(p, "is gone")
 	}
 	if err != nil {
-		// os.Root refuses a symbolic link that leaves platform/ (an
-		// absolute one as well) instead of following it: an entry
-		// replaced by one before the open is reported as replaced, as
-		// one replaced by a link inside it (SameFile below). The entry
-		// os.Lstat saw was no link, so a link now is a replacement even
-		// when it got the inode number of the file it replaced, which
-		// the removal freed (review of task 26 package B, N3:
-		// os.SameFile alone missed that). A regular file replaced by
-		// a socket or a device after os.Lstat fails the open here with
-		// ENXIO, neither missing nor ErrNotRegular: only os.SameFile
-		// tells that it was replaced (backlog 86, X6). One replaced by a
-		// FIFO or a directory is ErrNotRegular of the open, as before.
-		if !errors.Is(err, store.ErrNotRegular) {
-			if now, lerr := pd.Lstat(name); lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !os.SameFile(fi, now)) {
-				return nil, "", changedErr(p, "was replaced before it was opened")
-			}
+		// os.Lstat saw a regular file, so an open that finds no regular
+		// file (store.ErrNotRegular: a FIFO, a device with a driver or a
+		// directory, opened and found so by fstat) opened another entry:
+		// the file was replaced after os.Lstat, and publish says so
+		// instead of the refusal of an entry that is no regular file,
+		// which is for an entry os.Lstat showed as one (backlog 93).
+		// After any other error of the open the entry is looked at
+		// again: os.Root refuses a symbolic link that leaves platform/
+		// (an absolute one as well) instead of following it, a socket or
+		// a device without a driver fails the open with ENXIO, and such
+		// an error alone does not tell that the entry was replaced
+		// (backlog 86, X6). The entry os.Lstat saw was no link, so a link
+		// now is a replacement even when it got the inode number of the
+		// file it replaced, which the removal freed (review of task 26
+		// package B, N3: os.SameFile alone missed that); so is any other
+		// entry that is no regular file now, a socket or a device
+		// without a driver that got the inode number of the removed file
+		// as well (review of task 28 A, N1); so is another file, and a
+		// name gone by now. Only the same regular file under the name
+		// returns the error of the open (EACCES of a file without read
+		// permission, EMFILE, for example, or the error of an entry that
+		// was put there and taken away again before this look: the
+		// window left), and so does a failure of this os.Lstat other
+		// than a missing name.
+		if errors.Is(err, store.ErrNotRegular) {
+			return nil, "", changedErr(p, "was replaced before it was opened")
+		}
+		var now fs.FileInfo
+		lerr := hook(at + "-failed " + name)
+		if lerr == nil {
+			now, lerr = pd.Lstat(name)
+		}
+		if errors.Is(lerr, fs.ErrNotExist) {
+			return nil, "", changedErr(p, "is gone")
+		}
+		if lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !now.Mode().IsRegular() || !os.SameFile(fi, now)) {
+			return nil, "", changedErr(p, "was replaced before it was opened")
 		}
 		return nil, "", err
 	}
@@ -323,6 +365,29 @@ const (
 	notRegularKinds = "a FIFO, a device, a directory or a socket"
 	notRegularHint  = "look at the entry, remove it by hand and run the same publish again"
 )
+
+// notRegularErr completes store.ErrNotRegular of readEntry for platform/
+// <name> of the data directory st (backlog 94): witnesses.rec, a name of
+// the export in the comparison and in freeName, a succession that
+// succChain.need would relog, and a name written meanwhile. Such an
+// entry was no regular file when os.Lstat looked at it (one replaced
+// after that is errChanged, backlog 93), and the message names its path
+// and the remedy as checkDataPlatform does. Before the writes nothing is
+// written or logged; in the branch "written meanwhile" (why written)
+// other files of the export may be written already, and the message
+// says so there only. Any other error is returned as it is;
+// errors.Is(err, store.ErrNotRegular) stays true.
+func notRegularErr(st *store.Store, name, why string, err error) error {
+	if !errors.Is(err, store.ErrNotRegular) {
+		return err
+	}
+	done := "nothing written or logged"
+	if why == written {
+		done = "nothing logged, other files of the export may be written already"
+	}
+	return fmt.Errorf("ceremony: %s is %w (%s)%s: publish never reads or replaces such an entry; %s: %s",
+		st.Path("platform", name), store.ErrNotRegular, notRegularKinds, why, done, notRegularHint)
+}
 
 // checkDataPlatform applies the start check of gomail-server
 // (checkPlatformPin, Q10 point 5) to platform/ of the data directory:
@@ -595,7 +660,7 @@ func (c *succChain) need(g uint32, by string) error {
 		// symbolic or hard link is never logged through.
 		data, link, err := readEntry(c.st, c.pd, name)
 		if err != nil {
-			return err
+			return notRegularErr(c.st, name, "", err)
 		}
 		if link != "" {
 			return fmt.Errorf("%w: %s is %s, never logged through it: %s needs %s, which is neither in the export nor a valid entry of the log; nothing written: look at the link and remove it by hand, then publish the export of the succession to generation %d",
@@ -860,7 +925,7 @@ func runPublish(opts PublishOptions) error {
 	// that frees this name), refused otherwise before anything is written.
 	haveW, wlink, err := readEntry(st, pd, WitnessesFile)
 	if err != nil {
-		return err
+		return notRegularErr(st, WitnessesFile, "", err)
 	}
 	if wlink != "" && !opts.ReplaceWitnesses {
 		return witnessLinkErr(st, wlink)
@@ -1058,7 +1123,7 @@ func runPublish(opts PublishOptions) error {
 	for _, n := range names {
 		have, link, err := readEntry(st, pd, n)
 		if err != nil {
-			return err
+			return notRegularErr(st, n, "", err)
 		}
 		if have == nil && link == "" {
 			if err := loggedOther(opts.From, st, log, files[n], "is missing"); err != nil {
@@ -1118,7 +1183,7 @@ func runPublish(opts PublishOptions) error {
 			// meanwhile is never taken for the export's file either.
 			have, link, rerr := readEntry(st, pd, n)
 			if rerr != nil {
-				return rerr
+				return notRegularErr(st, n, written, rerr)
 			}
 			if link != "" {
 				return linkErr(opts.From, st, files[n], link, written)
@@ -1144,7 +1209,20 @@ func runPublish(opts PublishOptions) error {
 				return err
 			}
 		}
+		after := &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}
+		// Announced after the export's files are written, before the
+		// temporary file is written and renamed over witnesses.rec
+		// (backlog 85): a process killed between the rename and the
+		// callbacks below (SIGKILL) has reported the replacement that
+		// may have happened.
+		announced := oldW != nil || wlink != ""
+		if announced && opts.WitnessesReplacing != nil {
+			opts.WitnessesReplacing(oldW, wlink, after)
+		}
 		if err := store.ReplaceFileIn(pd, WitnessesFile, w); err != nil {
+			if announced {
+				return replaceFailedErr(st, err)
+			}
 			return err
 		}
 		wrote = true
@@ -1153,7 +1231,6 @@ func runPublish(opts PublishOptions) error {
 		// returns that error after them (backlog 83: before, the
 		// replacement went unreported for good).
 		serr := syncPlatform(pd)
-		after := &witness.Witnesses{List: pinWitnesses(pin), Min: pin.MinWitnesses}
 		if oldW != nil && opts.WitnessesReplaced != nil {
 			opts.WitnessesReplaced(oldW, after)
 		}
@@ -1206,6 +1283,25 @@ func runPublish(opts PublishOptions) error {
 		}
 	}
 	return nil
+}
+
+// replaceFailedErr completes the error of store.ReplaceFileIn for
+// witnesses.rec after WitnessesReplacing announced the replacement
+// (review of task 28 A, F3): the line of the command line says "fehlt
+// die nächste Zeile, platform/witnesses.rec selbst ansehen", and this
+// error says what there is to see. Every error of store.ReplaceFileIn
+// leaves witnesses.rec as it was: writing, syncing and closing the
+// temporary file come before the rename, and a rename that fails
+// (renameat(2), or the check of os.Root for a directory under the name)
+// does not replace it; the temporary file is removed again. The fsync
+// of platform/ after the rename is not part of it (syncPlatform): the
+// callbacks after the rename report the replacement first. Nothing is
+// logged yet; the export's files are written before witnesses.rec, so
+// they may be in platform/ already. The remedy is the same publish
+// again. errors.Is holds for err.
+func replaceFailedErr(st *store.Store, err error) error {
+	return fmt.Errorf("ceremony: replacing %s: %w; %s is unchanged and nothing is logged (files of the export may be written already): run the same publish again",
+		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile))
 }
 
 // syncPlatform fsyncs platform/ through pd after witnesses.rec was
@@ -1282,7 +1378,7 @@ func freeName(st *store.Store, pd *os.Root, log translog.Log, files map[string]p
 		// (readEntry): the certificate is replaced, and its key with it.
 		have, link, err := readEntry(st, pd, cert)
 		if err != nil {
-			return false, "", err
+			return false, "", notRegularErr(st, cert, "", err)
 		}
 		if link == "" && (have == nil || bytes.Equal(have, files[cert].data)) {
 			return false, fmt.Sprintf(", while platform/%s is missing there or the same and is no valid entry of the log: a public key is replaced only together with its certificate or under its logged certificate", cert), nil

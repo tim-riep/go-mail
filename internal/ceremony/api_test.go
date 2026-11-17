@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -197,16 +199,35 @@ func parseShares(t *testing.T, m map[int][]string, idx ...int) []*shamir.Share {
 	return ss
 }
 
+// listDir lists everything below dir that is no directory, by its path
+// relative to dir, and every directory below dir that shows nothing
+// below it (empty, or not readable) as "<path>/" (backlog 95: a
+// directory under a name of platform/ is seen, so a check "nothing
+// written" sees the entry itself). A directory with entries is seen
+// through their paths, so the lists of exports and key directories stay
+// as they are.
 func listDir(t *testing.T, dir string) []string {
 	t.Helper()
-	var names []string
-	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
-		if err == nil && !fi.IsDir() {
-			rel, _ := filepath.Rel(dir, p)
-			names = append(names, filepath.ToSlash(rel))
+	var names, dirs []string
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if d == nil || p == dir {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		rel = filepath.ToSlash(rel)
+		if !d.IsDir() {
+			names = append(names, rel)
+		} else if err == nil {
+			dirs = append(dirs, rel+"/")
 		}
 		return nil
 	})
+	for _, d := range dirs {
+		if !slices.ContainsFunc(names, func(n string) bool { return strings.HasPrefix(n, d) }) &&
+			!slices.ContainsFunc(dirs, func(o string) bool { return o != d && strings.HasPrefix(o, d) }) {
+			names = append(names, d)
+		}
+	}
 	sort.Strings(names)
 	return names
 }

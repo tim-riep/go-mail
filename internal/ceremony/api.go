@@ -697,6 +697,21 @@ type PublishOptions struct {
 	// for a working copy, so there is no working copy before;
 	// WitnessesReplaced is not called then (review of task 25 A, H4).
 	WitnessesLinkReplaced func(link string, after *witness.Witnesses)
+	// WitnessesReplacing, when not nil, is called after the export's
+	// files are written, before the temporary file is written and
+	// renamed over witnesses.rec with ReplaceWitnesses, when
+	// WitnessesReplaced or WitnessesLinkReplaced would follow the
+	// rename: with the working copy before (nil for a link) or the kind
+	// of link ("" for a regular file), and the witnesses and the quorum
+	// after (backlog 85). A process killed between the rename and those
+	// callbacks (SIGKILL) has reported the replacement that may have
+	// happened; without one of them afterwards it is open whether the
+	// rename happened. When the temporary file or the rename fails
+	// after this callback, Publish returns that error with the path of
+	// witnesses.rec, which is unchanged then, "nothing is logged" and
+	// the remedy (run the same publish again). It is not called when
+	// witnesses.rec is written for the first time.
+	WitnessesReplacing func(before *witness.Witnesses, link string, after *witness.Witnesses)
 	// TempRemoved, when not nil, is called with the name of every
 	// temporary file (".tmp-", left by a crash of an atomic write) that
 	// Publish removes from platform/ of Data under the server lock before
@@ -757,7 +772,10 @@ type PublishOptions struct {
 //     nor a symbolic link (a FIFO, a device, a directory, a socket) is
 //     store.ErrNotRegular by the kind os.Lstat shows, never opened
 //     (backlog 40; review of task 27 A, N2), also under a name the
-//     export does not hold: the operator removes it by hand (N1);
+//     export does not hold: the operator removes it by hand (N1); a
+//     regular file replaced by such an entry after os.Lstat is
+//     errChanged (backlog 93), and what is put there in that window is
+//     opened, a device with a driver as well (the window left);
 //   - witnesses.rec of the export and of the data directory against the
 //     witnesses and the quorum of Pin (fields 5 and 6): a difference is
 //     translog.ErrMismatch, the working copy is never replaced silently;

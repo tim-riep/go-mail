@@ -71,9 +71,11 @@ func TestPublishEntryReplacedBySocket(t *testing.T) {
 // identity-1.succ), under one it holds (ingest-1.cert) and under
 // witnesses.rec. Each is store.ErrNotRegular by the kind os.Lstat shows,
 // never opened (the writer of the FIFO still waits), never ENXIO or
-// EACCES; under a name of section 4 with the path of the entry,
-// "nothing written or logged" and the remedy. Nothing is written or
-// logged. readEntry refuses each the same way, also called directly.
+// EACCES; with the path of the entry, "nothing written or logged" and
+// the remedy (under witnesses.rec since backlog 94, without "under a
+// name of section 4"). Nothing is written or logged. readEntry refuses
+// each with store.ErrNotRegular, also called directly (the short error
+// that runPublish completes).
 // Devices need CAP_MKNOD; without it their cases are skipped.
 func TestPublishNonRegularKinds(t *testing.T) {
 	kinds := []struct {
@@ -138,7 +140,8 @@ func TestPublishNonRegularKinds(t *testing.T) {
 				}
 				want := notRegularMsg(p)
 				if name == WitnessesFile {
-					want = "store: " + WitnessesFile + " is not a regular file"
+					// With path and remedy since backlog 94.
+					want = notRegularReadMsg(p, "")
 				}
 				if !errors.Is(err, store.ErrNotRegular) || errors.Is(err, syscall.ENXIO) || errors.Is(err, syscall.EACCES) || err.Error() != want {
 					t.Fatalf("%s as %s: %v", name, k.name, err)

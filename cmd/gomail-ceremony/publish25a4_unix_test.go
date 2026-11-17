@@ -122,9 +122,12 @@ func TestPublishWitnessesLineBeforeFailure(t *testing.T) {
 	old := mustRead(t, wrec)
 	symlinkOutside(t, wrec, filepath.Join(base, "outside-witnesses.rec"))
 	for _, c := range []struct{ kind, line string }{
-		{"link", "platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
+		{"link", "platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: " +
+			"künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
+			"platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
 			"(der Link wurde nicht gelesen, ein bisheriges Quorum gibt es nicht): jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"},
-		{"regular", "platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"},
+		{"regular", "platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 1 von 1 (w1), künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
+			"platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"},
 	} {
 		if c.kind == "regular" {
 			// The working copy of pin 1 again, as a regular file.
@@ -184,8 +187,11 @@ func TestPublishRevokedReplacedOutput(t *testing.T) {
 	}
 	replaceFile(t, wrec, other)
 	for _, c := range []struct{ kind, line string }{
-		{"regular", "platform/witnesses.rec ersetzt: bisher Quorum 2 von 2 (w1, w9), jetzt Quorum 1 von 1 (w1) wie im Pin.\n"},
-		{"link", "platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
+		{"regular", "platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 2 von 2 (w1, w9), künftig Quorum 1 von 1 (w1) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
+			"platform/witnesses.rec ersetzt: bisher Quorum 2 von 2 (w1, w9), jetzt Quorum 1 von 1 (w1) wie im Pin.\n"},
+		{"link", "platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: " +
+			"künftig Quorum 1 von 1 (w1) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n" +
+			"platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt " +
 			"(der Link wurde nicht gelesen, ein bisheriges Quorum gibt es nicht): jetzt Quorum 1 von 1 (w1) wie im Pin.\n"},
 	} {
 		if c.kind == "link" {

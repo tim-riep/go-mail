@@ -106,8 +106,10 @@ func TestPublishLinksAndTmpOutput(t *testing.T) {
 		t.Fatalf("%d %s", code, tt.msgs.String())
 	}
 	// Exactly, the line once and before the closing lines (review of task
-	// 25 A3, N2).
-	if o, want := tt.out.String(), "platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt "+
+	// 25 A3, N2), announced before the rename (backlog 85).
+	if o, want := tt.out.String(), "platform/witnesses.rec ist ein symbolischer Link und wird jetzt durch die Zeugen des Pins ersetzt: "+
+		"künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"+
+		"platform/witnesses.rec war ein symbolischer Link und ist durch die Zeugen des Pins ersetzt "+
 		"(der Link wurde nicht gelesen, ein bisheriges Quorum gibt es nicht): jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
 		publishedText(succ, dataDir, pin2Path); o != want {
 		t.Fatalf("stdout\n%q, want\n%q", o, want)

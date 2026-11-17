@@ -1150,8 +1150,9 @@ func TestPublishReplaceWitnesses(t *testing.T) {
 		t.Fatal(tt.msgs.String())
 	}
 	// Exactly, the line once and before the closing lines (review of task
-	// 25 A3, N2).
-	if o, want := tt.out.String(), "platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
+	// 25 A3, N2), announced before the rename (backlog 85).
+	if o, want := tt.out.String(), "platform/witnesses.rec wird jetzt ersetzt: bisher Quorum 1 von 1 (w1), künftig Quorum 2 von 3 (w1, w2, w3) wie im Pin; fehlt die nächste Zeile, platform/witnesses.rec selbst ansehen.\n"+
+		"platform/witnesses.rec ersetzt: bisher Quorum 1 von 1 (w1), jetzt Quorum 2 von 3 (w1, w2, w3) wie im Pin.\n"+
 		succ+" in "+dataDir+" veröffentlicht und ins Log eingetragen.\n"+
 		"Den Server jetzt mit diesem Pin starten: gomail-server serve --pin "+pin2Path+" ...\n"; o != want {
 		t.Fatalf("stdout\n%q, want\n%q", o, want)
