@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/mail"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -106,10 +107,16 @@ func metaCut(m *store.MailMeta) bool {
 // takes the terms of the metadata meanwhile. Index and Search only get
 // here for a mail whose file they listed (mailFolders, pendingMeta), so a
 // file that is not there went between the listing and the reading, a
-// race; it is not warned about. Every other such failure is, with the
-// mail ID and a fixed cause: "Datei nicht lesbar" if the file cannot be
-// read (fileUnreadable), else that of warnCause.
-func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail) ([]string, error) {
+// race; it is not warned about. Every other such failure is noted in un,
+// with the mail ID and a fixed cause (unreadableCause), and warned about
+// when the call of Index or Search ends (warnUnreadable): one warning per
+// mail, or one for all of them from unreadableTogether mails on (task 28,
+// Nr. 103). A verdict is warned about at once, per mail, and is not
+// collected: Search gives it again on each call, until a run of Index has
+// indexed the entry with the terms of the metadata and deleted its
+// marker; Index gives it once per entry, so twice in one run for a mail
+// that two markers name.
+func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail, un *unreadable) ([]string, error) {
 	out := metaTerms(m.Meta)
 	if !metaCut(m.Meta) {
 		return out, nil
@@ -134,11 +141,7 @@ func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail) ([]string
 	}
 	if !checked {
 		if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
-			cause := warnCause(err)
-			if fileUnreadable(err) {
-				cause = "Datei nicht lesbar"
-			}
-			c.warn("WARNUNG: Mail %s lässt sich nicht lesen: %s. Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.", m.ID, cause)
+			un.add(m.ID, unreadableCause(err))
 		}
 		return out, err
 	}
@@ -146,16 +149,82 @@ func (c *Client) unprocessedTerms(ch *chain, folder store.ID, m *Mail) ([]string
 	return out, nil
 }
 
-// fileUnreadable reports whether err of openMail is one of reading the
-// mail file that is no verdict on its bytes: a file that is not a regular
-// one (store.ErrNotRegular) or an error of the system on its open, stat
-// or read (*fs.PathError: EACCES, EIO, ELOOP, ...), whose text names the
-// path. warnCause knows neither and gives "Prüfung fehlgeschlagen".
-// openMail returns no *fs.PathError for the epoch or its keys: keysFor
-// wraps the error of reading the wrap with %v (ErrWrap).
-func fileUnreadable(err error) bool {
+// unreadableCause returns the fixed cause of err of openMail that is no
+// verdict on the bytes of the mail file: "Datei nicht lesbar"
+// (causeUnreadable) for an error of the system on its open, stat or read
+// (*fs.PathError: EACCES, EIO, ELOOP, ...), whose text names the path,
+// else that of warnCause, which gives the same cause for a file that is
+// not a regular one (store.ErrNotRegular). warnCause does not know
+// *fs.PathError: elsewhere it is also an error of writing, or of a
+// directory. openMail returns no *fs.PathError for the epoch or its keys:
+// keysFor wraps the error of reading the wrap with %v (ErrWrap).
+func unreadableCause(err error) string {
 	var pe *fs.PathError
-	return errors.Is(err, store.ErrNotRegular) || errors.As(err, &pe)
+	if errors.As(err, &pe) {
+		return causeUnreadable
+	}
+	return warnCause(err)
+}
+
+// unreadableTogether is the number of mails that cannot be read from
+// which one call of Index or Search warns once for all of them, and
+// unreadableNamed the number of their IDs that warning names (task 28,
+// Nr. 103).
+const (
+	unreadableTogether = 10
+	unreadableNamed    = 5
+)
+
+// unreadable collects the mails marked unprocessed that one call of Index
+// or Search cannot read (unprocessedTerms), each once, in the order met.
+// It keeps the IDs and causes of the first unreadableTogether mails,
+// their number and the distinct causes; never content or the text of an
+// error.
+type unreadable struct {
+	seen   map[store.ID]bool
+	ids    []store.ID
+	causes []string // of ids
+	all    []string // the distinct causes, in the order met
+}
+
+// add notes mail id with cause.
+func (u *unreadable) add(id store.ID, cause string) {
+	if u.seen[id] {
+		return
+	}
+	if u.seen == nil {
+		u.seen = map[store.ID]bool{}
+	}
+	u.seen[id] = true
+	if len(u.ids) < unreadableTogether {
+		u.ids = append(u.ids, id)
+		u.causes = append(u.causes, cause)
+	}
+	if !slices.Contains(u.all, cause) {
+		u.all = append(u.all, cause)
+	}
+}
+
+// warnUnreadable warns about the mails u holds: one warning per mail, or
+// from unreadableTogether mails on one warning with their number, the
+// causes and the IDs of the first unreadableNamed.
+func (c *Client) warnUnreadable(u *unreadable) {
+	n := len(u.seen)
+	if n == 0 {
+		return
+	}
+	if n < unreadableTogether {
+		for i, id := range u.ids {
+			c.warn("WARNUNG: Mail %s lässt sich nicht lesen: %s. Ihr Eintrag in pending/ bleibt für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.", id, u.causes[i])
+		}
+		return
+	}
+	named := make([]string, 0, unreadableNamed)
+	for _, id := range u.ids[:unreadableNamed] {
+		named = append(named, id.String())
+	}
+	c.warn("WARNUNG: %d Mails lassen sich nicht lesen (%s); die ersten: %s. Ihre Einträge in pending/ bleiben für einen späteren Index-Lauf liegen; bis dahin gelten die Suchbegriffe ihrer Metadaten.",
+		n, strings.Join(u.all, "; "), strings.Join(named, ", "))
 }
 
 // unprocessedOpenHook is called by tests each time unprocessedTerms opens

@@ -9,6 +9,12 @@ import (
 	"github.com/tim-riep/go-mail/internal/translog"
 )
 
+// causeUnreadable is the fixed cause for a file that cannot be read: not
+// a regular file (store.ErrNotRegular, warnCause), or for a mail file of
+// an entry marked unprocessed an error of the system on its open, stat or
+// read (unreadableCause).
+const causeUnreadable = "Datei nicht lesbar"
+
 // warnCause returns a fixed description of err for a warning. A warning
 // names IDs, numbers and this cause only, never the text of an error: it
 // may name files of the data directory or carry text of other parties
@@ -80,6 +86,17 @@ func warnCause(err error) string {
 		errors.Is(err, envelope.ErrEmptyBlock), errors.Is(err, envelope.ErrElementType), errors.Is(err, envelope.ErrElement),
 		errors.Is(err, envelope.ErrTrailer), errors.Is(err, envelope.ErrTrailerSize):
 		return "Format ungültig"
+	case errors.Is(err, store.ErrNotRegular):
+		// A directory, a FIFO, a device or a socket in place of a file
+		// that is read (store.OpenRegular, store.OpenRegularIn) or of
+		// a lock file (store: lock ... is not a regular file, from
+		// openExistingLock: the lock of a mailbox, for example while a
+		// file is signed again). The cause names no file, so for a
+		// lock file it fits only loosely. Checked after every other
+		// cause, so that it only names what was "Prüfung
+		// fehlgeschlagen" before (task 28, Nr. 104) and a cause of the
+		// step, such as errResign, wins (TestWarnCause).
+		return causeUnreadable
 	default:
 		return "Prüfung fehlgeschlagen"
 	}

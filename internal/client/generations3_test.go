@@ -572,6 +572,13 @@ func TestWarnCause(t *testing.T) {
 		{fmt.Errorf("%w: epoch 2", store.ErrChain), "Epochenkette"},
 		{notFound, "Datei fehlt"},
 		{fmt.Errorf("%w: x", envelope.ErrTruncated), "Format"},
+		{fmt.Errorf("store: abc.gml is %w", store.ErrNotRegular), "Datei nicht lesbar"},
+		// store.ErrNotRegular comes after every other cause (task 28,
+		// Nr. 104): a lock file that is not a regular file while a file
+		// is signed again names the failure to sign again (review 28C,
+		// F6, mutant MD).
+		{fmt.Errorf("%w: %w", client.ErrResign, fmt.Errorf("store: lock abc is %w", store.ErrNotRegular)), "Postfachsperre"},
+		{fmt.Errorf("%w: %w", store.ErrNotFound, store.ErrNotRegular), "Datei fehlt"},
 		{errors.New("abc.accept: something"), "Prüfung fehlgeschlagen"},
 		{nil, "ohne Angabe"},
 	} {

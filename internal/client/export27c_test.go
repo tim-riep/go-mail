@@ -5,6 +5,9 @@ import "github.com/tim-riep/go-mail/internal/store"
 // MetaCut is metaCut, for tests.
 var MetaCut = metaCut
 
+// ErrResign is errResign, for tests (TestWarnCause).
+var ErrResign = errResign
+
 // UnprocessedTerms returns the terms unprocessedTerms derives for mail id
 // of mbx, its metadata checked as in List, for tests.
 func (c *Client) UnprocessedTerms(mbx, id store.ID) ([]string, error) {
@@ -20,7 +23,9 @@ func (c *Client) UnprocessedTerms(mbx, id store.ID) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.unprocessedTerms(ch, folder, m)
+	var un unreadable
+	defer c.warnUnreadable(&un)
+	return c.unprocessedTerms(ch, folder, m, &un)
 }
 
 // SetUnprocessedOpenHook sets the hook that runs each time

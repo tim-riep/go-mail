@@ -327,6 +327,10 @@ func (c *Client) Index(mbx store.ID) (int, error) {
 		return 0, err
 	}
 	var where map[store.ID]store.ID
+	// Mails that cannot be read are warned about once this call ends
+	// (unprocessedTerms, warnUnreadable).
+	var un unreadable
+	defer c.warnUnreadable(&un)
 	total := 0
 	var first error
 	note := func(err error) {
@@ -340,7 +344,7 @@ func (c *Client) Index(mbx store.ID) (int, error) {
 		if ch.discarded[e.Number] || !c.isUserMember(e) || !c.ownWrapExists(mbx, e.Number) {
 			continue
 		}
-		n, err := c.indexEpoch(ch, e, dev, &where)
+		n, err := c.indexEpoch(ch, e, dev, &where, &un)
 		total += n
 		note(err)
 		note(c.mergeSegments(ch, e, dev))
@@ -353,7 +357,7 @@ func (c *Client) Index(mbx store.ID) (int, error) {
 }
 
 // indexEpoch indexes pending/<n>/ of epoch e (see Index).
-func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[store.ID]store.ID) (int, error) {
+func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[store.ID]store.ID, un *unreadable) (int, error) {
 	mbx := ch.mailbox.ID
 	files, err := c.st.ListPending(mbx, e.Number)
 	if err != nil || len(files) == 0 {
@@ -390,7 +394,7 @@ func (c *Client) indexEpoch(ch *chain, e *store.Epoch, dev store.ID, where *map[
 					complete = false
 					break
 				}
-				if terms, err = c.unprocessedTerms(ch, (*where)[en.MailID], m); err != nil {
+				if terms, err = c.unprocessedTerms(ch, (*where)[en.MailID], m, un); err != nil {
 					// The mail cannot be read now (gone since
 					// the listing, not a regular file, an I/O
 					// error): the marker stays for a later run.

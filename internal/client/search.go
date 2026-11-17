@@ -123,6 +123,10 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
 	// per call; nothing is kept beyond it.
 	addressTerm := strings.HasPrefix(term, terms.From) || strings.HasPrefix(term, terms.FromDomain) || strings.HasPrefix(term, terms.To)
 	opened := map[store.ID][]string{}
+	// Mails that cannot be read are warned about once this call ends
+	// (unprocessedTerms, warnUnreadable).
+	var un unreadable
+	defer c.warnUnreadable(&un)
 	var first error
 	for i, e := range ch.epochs {
 		if ch.discarded[e.Number] || !ch.inPeriod(i, since) {
@@ -179,7 +183,7 @@ func (c *Client) Search(mbx store.ID, query string, opts SearchOptions) ([]*Mail
 						// A mail file that cannot be read: the
 						// terms of the metadata (see
 						// unprocessedTerms).
-						terms, _ = c.unprocessedTerms(ch, where[en.MailID], m)
+						terms, _ = c.unprocessedTerms(ch, where[en.MailID], m, &un)
 						opened[m.ID] = terms
 					}
 				}
