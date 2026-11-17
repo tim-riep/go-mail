@@ -17,7 +17,8 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahm
   - die Notizen unter `/tmp/claude-0/-home-user-go-mail/531d5185-783f-5990-a7a5-eb0759016cf4/scratchpad/`, je `notes.md` in `impl29a/`, `impl29a2/`, `impl29b/`, `impl29b2/`, `impl29c/`, `impl29d/`, `impl29d2/` und `rev29*/`.
 - **Darf ändern:**
   - `docs/RUNBOOK.md`, `docs/AUDIT.md`, `docs/HANDOFF.md`, `docs/tasks/backlog-nach-m1.md`;
-  - `docs/DECISIONS.md`, nur Nachträge.
+  - `docs/DECISIONS.md`, nur Nachträge;
+  - `docs/MEASUREMENTS.md`, nur falls dort schon eine Messung zu `indexEpoch` oder Nr. 112 steht: 1000 Mails × 100 Marker, Öffnungen 100 000 → 1000, Zeit nur wenig kürzer (189 → 166 s, gemessen unter Last mit 188d765; die pending-Dateien beherrschen den Aufruf).
 
 ## Umfang, je Paket am Code prüfen
 
