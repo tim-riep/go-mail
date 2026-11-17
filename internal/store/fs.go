@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -342,6 +343,15 @@ func RemoveDurable(path string) error {
 // open returns at once; no reader (server, client, ceremony) hangs at
 // it. A terminal device does not become the controlling terminal
 // (O_NOCTTY of OpenRegular, task 20i point 4).
+//
+// The buffer is allocated once with the size from Stat plus one byte
+// (backlog 105), at most max+1 bytes, so a file that keeps its size is
+// read without growing the buffer: about once its size is allocated,
+// not twice as with io.ReadAll. The extra byte lets the read see the
+// end of the file (or growth) without another allocation. A file that
+// grew after Stat is still read to at most max+1 bytes, the buffer
+// doubling up to max+1 (see readAtMost); one that shrank is returned
+// with the bytes read, copied when much smaller than the buffer.
 func ReadFileLimited(path string, max int64) ([]byte, error) {
 	f, fi, err := OpenRegular(path)
 	if err != nil {
@@ -351,8 +361,11 @@ func ReadFileLimited(path string, max int64) ([]byte, error) {
 	if fi.Size() > max {
 		return nil, fmt.Errorf("%w: %s has %d bytes, at most %d", ErrTooLarge, filepath.Base(path), fi.Size(), max)
 	}
+	if readLimitedHook != nil {
+		readLimitedHook(path)
+	}
 	// Read at most max+1 bytes: the file may grow after Stat.
-	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	data, err := readAtMost(f, fi.Size(), max+1)
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +373,80 @@ func ReadFileLimited(path string, max int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s grew beyond %d bytes", ErrTooLarge, filepath.Base(path), max)
 	}
 	return data, nil
+}
+
+// readLimitedHook, if set, is called by ReadFileLimited with the path
+// after the size check and before the read. Only tests set it
+// (fs28d_test.go: the file grows or shrinks between Stat and the read);
+// it is nil in production. It is a package variable without
+// synchronisation: tests that set it must not run in parallel.
+var readLimitedHook func(path string)
+
+// readAtMost reads r to its end, but at most limit bytes, as
+// io.ReadAll(io.LimitReader(r, limit)) does: the same bytes on success
+// and the same error, but with a buffer of size+1 bytes (at most limit)
+// allocated before the first read. A read error is returned as is,
+// without the bytes read (io.ReadAll returns them; ReadFileLimited
+// dropped them before). A limit of zero or less reads nothing and
+// returns an empty, non-nil slice (io.LimitReader with N <= 0); a size
+// below zero counts as zero.
+//
+// If the buffer is full before the end (the file grew after Stat, or
+// Stat showed 0 bytes as for files of /proc), it doubles, to at least
+// 512 bytes and at most limit; once the doubled size would be above
+// half of limit, it grows to limit at once. So no buffer is larger
+// than limit, the buffers of one read add up to at most about twice
+// limit (backlog 105, review 28D F1), and the byte that shows the end
+// of the file needs no buffer of its own. A result much smaller than
+// its buffer (the file shrank after Stat) is copied, so a caller that
+// keeps it does not keep the buffer (review 28D F2); with that copy a
+// read allocates at most about 2.5 times limit.
+func readAtMost(r io.Reader, size, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return []byte{}, nil
+	}
+	n := max(size, 0)
+	if n < limit {
+		n++ // the byte that shows the end of the file
+	}
+	n = min(n, limit)
+	if n > math.MaxInt {
+		// Only with a limit above the range of int (386 and a limit
+		// of 2 GiB or more, none of the callers): start with 512
+		// bytes and double.
+		n = 512
+	}
+	buf := make([]byte, 0, int(n))
+	for int64(len(buf)) < limit {
+		if len(buf) == cap(buf) {
+			c := max(2*int64(cap(buf)), 512)
+			if c > limit/2 {
+				c = limit
+			}
+			// Above the range of int (386 only) the allocation
+			// fails before the buffer is full.
+			c = min(c, math.MaxInt)
+			nb := make([]byte, len(buf), int(c))
+			copy(nb, buf)
+			buf = nb
+		}
+		room := buf[len(buf):cap(buf)]
+		if rest := limit - int64(len(buf)); int64(len(room)) > rest {
+			room = room[:rest]
+		}
+		m, err := r.Read(room)
+		buf = buf[:len(buf)+m]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cap(buf)-len(buf) > 4096 && len(buf) < cap(buf)/2 {
+		buf = slices.Clone(buf) // not nil for an empty buf
+	}
+	return buf, nil
 }
 
 // RemoveTemp deletes temporary files left by an interrupted write in dir.
