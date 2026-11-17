@@ -22,9 +22,18 @@
 #   3. The file contains no known mark of a test build: no name of a
 #      test switch (the four above, and any name that matches
 #      GOMAIL[A-Z_]*_TEST_, that is only capital letters and underscores
-#      between GOMAIL and _TEST_, no digits) and neither the text nor the
+#      between GOMAIL and _TEST_, no digits), neither the text nor the
 #      name of the root file of the development ceremony
-#      (internal/ceremony: initdev_dev.go, RootFile).
+#      (internal/ceremony: initdev_dev.go, RootFile), and neither the
+#      name testing.tRunner nor testing.MainStart: functions of package
+#      testing, which no program of cmd/... imports. A test program that
+#      "go test -c" builds holds testing.MainStart always (the main
+#      function that go test generates calls it) and testing.tRunner
+#      (it runs each test) unless its TestMain never calls m.Run (the
+#      linker then drops it). The build information of such a test
+#      program of a main package is that of a production build without
+#      VCS stamp (go version -m shows no difference), so only these marks
+#      tell it.
 #
 # Exit status 0 when every program is clean, 1 otherwise: a program that
 # is not clean or not checkable, a file that is missing or not a
@@ -36,10 +45,18 @@
 # does not run the programs it checks. It needs go (any version that
 # reads the build information of the programs), awk, tr, grep and sort;
 # when one of them is missing, or "go version" fails, it checks nothing.
+# It runs go with GOFLAGS=-json=false: that replaces GOFLAGS from the
+# environment and from the go env file (go env -w), so that -json there
+# cannot turn the output of go version -m into JSON; the build flags
+# that GOFLAGS usually holds do not concern go version.
 # A tool that fails (exit status not 0) during a check makes that
-# program not clean, never clean. A tool that exits with 0 but prints
-# wrong output (an awk that prints a number whatever it reads, a grep
-# that passes lines it should not) is not detected.
+# program not clean, never clean. So does a tr that exits with 0 but
+# prints nothing, or drops the line of the build setting GOOS (check 3
+# requires the word GOOS, which the build information in the file
+# holds; see check 1). A tool that exits with 0 but prints other wrong
+# output (an awk that prints a number whatever it reads, a grep that
+# passes lines it should not, a tr that drops other parts of the file)
+# is not detected.
 #
 # The script guards against shipping a test build by mistake, not against
 # a build made to pass it: a build that swaps the files of a tag in
@@ -52,6 +69,9 @@ me=check-release.sh
 
 # switches are the names of the test switches of the tag gomail_test;
 # any other name that matches pattern is a finding as well.
+# TestReleaseSwitches (internal/e2e/release28b_test.go) holds that every
+# environment variable a file of the tag gomail_test or gomail_dev reads
+# is named here or matches pattern, and that each name here is read.
 switches='GOMAIL_TEST_MIN_FREE GOMAIL_TEST_DEV_IDENTITY GOMAIL_TEST_HEAD_GAP GOMAILCTL_TEST_KEYGEN_PIPE'
 pattern='GOMAIL[A-Z_]*_TEST_'
 
@@ -59,6 +79,13 @@ pattern='GOMAIL[A-Z_]*_TEST_'
 # only the development ceremony writes (tag gomail_dev).
 devText='INSECURE - DEVELOPMENT ONLY'
 devFile='platform-root.INSECURE-DEV-ONLY.txt'
+
+# testMark and testMain are names of functions of package testing that a
+# test program of go test -c holds: testMark runs each test, testMain is
+# called by the main function that go test generates, also where TestMain
+# never calls m.Run and the linker drops testMark.
+testMark='testing.tRunner'
+testMain='testing.MainStart'
 
 nl='
 '
@@ -83,9 +110,15 @@ if [ $missing -ne 0 ]; then
 	printf '%s: Hilfsprogramm fehlt; nichts geprüft\n' "$me" >&2
 	exit 1
 fi
-# A go command that cannot run (GOTOOLCHAIN or GOFLAGS not usable, the
-# toolchain not available) would fail on every program; it is named once
-# with its last line of output instead.
+# GOFLAGS=-json in the environment or in the go env file would make go
+# version -m print JSON, which the checks below do not read; -json=false
+# overrides it. An empty GOFLAGS would not: go then reads GOFLAGS from
+# the go env file.
+GOFLAGS=-json=false
+export GOFLAGS
+# A go command that cannot run (GOTOOLCHAIN not usable, the toolchain not
+# available) would fail on every program; it is named once with its last
+# line of output instead.
 gov=$(go version 2>&1)
 rc=$?
 if [ $rc -ne 0 ] || [ -z "$gov" ]; then
@@ -187,15 +220,25 @@ for arg in "$@"; do
 	# underscore leaves the last line of tr open (a darwin/arm64 program
 	# ends with a hash of its code signature); where the output of tr
 	# ends with a newline already, it makes an empty line, which grep
-	# does not pass on.
-	names=$({ LC_ALL=C tr -c 'A-Z0-9_' '\n' <"$f" && printf '\n%s\n' -end-; } | LC_ALL=C grep -E -e "$pattern" -e '^-end-$' | LC_ALL=C sort -u)
+	# does not pass on. The line GOOS comes from tr itself: where check 1
+	# found the setting GOOS, the build information in the file holds
+	# "\tGOOS=". Without the line tr printed nothing, or not the whole
+	# file, though it exited with 0; the search failed as well. (Without
+	# the setting, check 1 has refused the program already.)
+	names=$({ LC_ALL=C tr -c 'A-Z0-9_' '\n' <"$f" && printf '\n%s\n' -end-; } | LC_ALL=C grep -E -e "$pattern" -e '^-end-$' -e '^GOOS$' | LC_ALL=C sort -u)
+	searched=1
 	case $nl$names$nl in
 	*"$nl-end-$nl"*) ;;
-	*)
+	*) searched=0 ;;
+	esac
+	case $nl$names$nl in
+	*"${nl}GOOS$nl"*) ;;
+	*) [ "$settings" -eq 0 ] || searched=0 ;;
+	esac
+	if [ $searched -eq 0 ]; then
 		printf '%s: %s: Suche nach Testschaltern gescheitert (tr, grep, sort); nicht geprüft\n' "$me" "$arg" >&2
 		found=1
-		;;
-	esac
+	fi
 	for s in $switches; do
 		case $names in
 		*"$s"*)
@@ -205,7 +248,7 @@ for arg in "$@"; do
 		esac
 	done
 	for n in $names; do
-		[ "$n" = -end- ] && continue
+		case $n in -end- | GOOS) continue ;; esac
 		known=0
 		for s in $switches; do
 			case $n in *"$s"*) known=1 ;; esac
@@ -217,11 +260,15 @@ for arg in "$@"; do
 	done
 	# grep reads the file itself: exit status 0 found, 1 not found,
 	# anything else an error.
-	for m in "$devText" "$devFile"; do
+	for m in "$devText" "$devFile" "$testMark" "$testMain"; do
 		LC_ALL=C grep -q -F -e "$m" <"$f"
 		case $? in
 		0)
-			printf '%s: %s: enthält "%s" (Entwicklungszeremonie)\n' "$me" "$arg" "$m" >&2
+			if [ "$m" = "$testMark" ] || [ "$m" = "$testMain" ]; then
+				printf '%s: %s: enthält "%s" (Testprogramm von go test -c)\n' "$me" "$arg" "$m" >&2
+			else
+				printf '%s: %s: enthält "%s" (Entwicklungszeremonie)\n' "$me" "$arg" "$m" >&2
+			fi
 			found=1
 			;;
 		1) ;;

@@ -139,10 +139,18 @@ func toolPath(t *testing.T, env []string, dir, name string, omit []string, stubs
 // setting GOOS (also under a file name that holds a line of build
 // information), files without build information, a directory, an
 // unreadable file, a missing file, no argument, a PATH without go or
-// without awk, a go command that fails, and a tool that fails or prints
-// no number. A production program that ends with a capital letter (as a
+// without awk, a go command that fails or prints nothing, a tool that
+// fails or prints no number, and a tr that exits with 0 but prints
+// nothing. A production program that ends with a capital letter (as a
 // darwin/arm64 program may) passes. Programs named -m and a\cb are
-// checked as files and named as given.
+// checked as files and named as given. The test program of
+// gomail-witness that go test -c builds without tags (its build
+// information is that of a production build) is refused for the marks
+// testing.tRunner and testing.MainStart (task 28 package 28B, list after
+// M1 no. 97 H3); a test program whose TestMain exits without m.Run (it
+// holds no testing.tRunner), of a module the test writes, for
+// testing.MainStart. GOFLAGS=-json in the environment or in the go env
+// file does not keep a production program from passing (H4).
 //
 // The test builds the programs itself, with exactly the tags of each
 // case, without VCS stamp and without GOFLAGS, whatever the tags of the
@@ -328,6 +336,11 @@ func TestCheckRelease(t *testing.T) {
 			if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
 				t.Fatalf("%q: exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", name, code, want, stdout, stderr)
 			}
+			// The search of check 3 requires the word GOOS only where
+			// check 1 found the setting.
+			if strings.Contains(stderr, "gescheitert") {
+				t.Fatalf("%q: a search failed:\n%s", name, stderr)
+			}
 		}
 	})
 
@@ -431,12 +444,25 @@ func TestCheckRelease(t *testing.T) {
 		if code != 1 || stdout != "" || stderr != want {
 			t.Fatalf("failing go: exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
 		}
+
+		// A go command that exits with 0 but prints nothing (list after
+		// M1 no. 97 H2): nothing is checked either.
+		silentGo := toolPath(t, env, dir, "silent-go", nil, map[string]string{"go": "exit 0"})
+		code, stdout, stderr = checkRelease(t, shell, script, "", silentGo, paths(prod)...)
+		want = "check-release.sh: go version gescheitert (Status 0: keine Ausgabe); nichts geprüft\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("silent go: exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
+		}
 	})
 
 	t.Run("failing tools", func(t *testing.T) {
 		// A tool that fails, or awk that prints no number, makes the
 		// program not clean.
 		p := filepath.Join(prod, "gomail-witness")
+		tr, err := exec.LookPath("tr")
+		if err != nil {
+			t.Fatal(err)
+		}
 		for i, c := range []struct {
 			tool, stub string
 			want       []string
@@ -444,6 +470,13 @@ func TestCheckRelease(t *testing.T) {
 			{"awk", "exit 2", []string{"Auswertung der Build-Informationen gescheitert (awk)"}},
 			{"awk", "echo x", []string{"Auswertung der Build-Informationen gescheitert (awk)"}},
 			{"tr", "exit 2", []string{"Suche nach Testschaltern gescheitert"}},
+			// A tr that prints its whole output and then fails: the word
+			// GOOS is there, only the missing line -end- tells.
+			{"tr", "'" + tr + "' \"$@\"\nexit 2", []string{"Suche nach Testschaltern gescheitert"}},
+			// A tr that exits with 0 and prints nothing (list after M1
+			// no. 97 H1): the word GOOS of the build information is
+			// missing from its output.
+			{"tr", "exit 0", []string{"Suche nach Testschaltern gescheitert"}},
 			{"grep", "exit 2", []string{"Suche nach Testschaltern gescheitert", `Suche nach "INSECURE - DEVELOPMENT ONLY" gescheitert (grep)`}},
 			{"sort", "exit 2", []string{"Suche nach Testschaltern gescheitert"}},
 		} {
@@ -456,6 +489,107 @@ func TestCheckRelease(t *testing.T) {
 				if !strings.Contains(stderr, p+": "+w) {
 					t.Fatalf("%s %q: %q missing\nstderr:\n%s", c.tool, c.stub, w, stderr)
 				}
+			}
+		}
+	})
+
+	t.Run("test program", func(t *testing.T) {
+		// go test -c without tags (list after M1 no. 97 H3): the build
+		// information of the test program of a main package is that of
+		// a production build without VCS stamp, and gomail-witness holds
+		// no test switch; only the marks testing.tRunner and
+		// testing.MainStart refuse it.
+		bin := filepath.Join(dir, "testprog")
+		if err := os.Mkdir(bin, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(bin)
+		p := filepath.Join(bin, "gomail-witness.test")
+		build := exec.Command(goBin, "test", "-c", "-tags=", "-o", p, "github.com/tim-riep/go-mail/cmd/gomail-witness")
+		build.Env = releaseEnv()
+		if b, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("go test -c: %v\n%s", err, b)
+		}
+		code, stdout, stderr := checkRelease(t, shell, script, "", env, p)
+		for _, m := range []string{"testing.tRunner", "testing.MainStart"} {
+			want := p + `: enthält "` + m + `" (Testprogramm von go test -c)`
+			if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+				t.Fatalf("exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
+			}
+		}
+		if strings.Count(stderr, p+": ") != 2 {
+			t.Fatalf("another finding; the case no longer tests the marks alone:\n%s", stderr)
+		}
+	})
+
+	t.Run("TestMain without m.Run", func(t *testing.T) {
+		// A test program whose TestMain exits without calling m.Run
+		// holds no testing.tRunner (the linker drops it), but
+		// testing.MainStart, which the main function that go test
+		// generates calls. The module is written here: a main package
+		// with such a TestMain and one test.
+		mod := t.TempDir()
+		for name, text := range map[string]string{
+			"go.mod":       "module example.com/nomrun\n\ngo 1.21\n",
+			"main.go":      "package main\n\nfunc main() {}\n",
+			"main_test.go": "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(0) }\n\nfunc TestNothing(t *testing.T) {}\n",
+		} {
+			if err := os.WriteFile(filepath.Join(mod, name), []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p := filepath.Join(mod, "nomrun.test")
+		build := exec.Command(goBin, "test", "-c", "-o", p, ".")
+		build.Env, build.Dir = append(releaseEnv(), "GOWORK=off"), mod
+		if b, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("go test -c: %v\n%s", err, b)
+		}
+		code, stdout, stderr := checkRelease(t, shell, script, "", env, p)
+		want := p + `: enthält "testing.MainStart" (Testprogramm von go test -c)`
+		if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+			t.Fatalf("exit status %d, want 1 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
+		}
+		if strings.Count(stderr, p+": ") != 1 || strings.Contains(stderr, "testing.tRunner") {
+			t.Fatalf("another finding; the case no longer tests testing.MainStart alone:\n%s", stderr)
+		}
+	})
+
+	t.Run("GOFLAGS", func(t *testing.T) {
+		// GOFLAGS=-json makes go version -m print JSON (list after M1
+		// no. 97 H4); the script overrides it, from the environment and
+		// from the go env file (an empty GOFLAGS would not reach the
+		// latter). The go env file of the test is the one go uses, with
+		// GOFLAGS=-json added.
+		var base []string
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "GOFLAGS=") && !strings.HasPrefix(kv, "GOENV=") {
+				base = append(base, kv)
+			}
+		}
+		out, err := exec.Command(goBin, "env", "GOENV").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var file []byte
+		if name := strings.TrimSpace(string(out)); name != "" && name != "off" {
+			if file, err = os.ReadFile(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+		}
+		goenv := filepath.Join(dir, "goenv")
+		if err := os.WriteFile(goenv, append(append([]byte{}, file...), "\nGOFLAGS=-json\n"...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []struct {
+			name string
+			env  []string
+		}{
+			{"environment", append(append([]string{}, base...), "GOFLAGS=-json")},
+			{"go env file", append(append([]string{}, base...), "GOENV="+goenv)},
+		} {
+			code, stdout, stderr := checkRelease(t, shell, script, "", c.env, paths(prod)...)
+			if code != 0 || stderr != "" || strings.Count(stdout, ": Produktionsbuild (") != len(releasePrograms) {
+				t.Fatalf("%s: exit status %d, want 0\nstdout:\n%s\nstderr:\n%s", c.name, code, stdout, stderr)
 			}
 		}
 	})
