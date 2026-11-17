@@ -546,3 +546,7 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - Volläufe vorab auf Ständen gestartet, deren Nachprüfung noch lief; betroffene Schritte danach neu.
 
 **Zwischenfälle:** `/usr/local/go/bin/go` wurde von einem Prüfskript etwa 14:25–14:27 UTC (10.11.) überschrieben und wiederhergestellt (seitdem Regel in allen Aufträgen); Dateimodi im Modulcache kurz geändert und zurückgesetzt; ein Prüftest lief in den Speicher (OOM, nur Testbinary). Die Bitte um Erlaubnis, alte `/tmp/go-build*`-Reste zu löschen, bleibt offen.
+
+## 12. Fortsetzung bis 18.11.2026, 06:00 Uhr MEZ (Anweisung 17.11.: „mach weiter bis morgen 6 UHR. Stoppe nicht vor der Uhrzeit“)
+
+- 21:23 UTC (17.11.): Container frisch gestartet, Repository, Worktrees, Scratchpad und `orch/src-n28` erhalten. Geplante Aufgaben angelegt: Halt am 18.11. 06:00 MEZ (trig_01QNy3M5Tfmn9Pc5Bv4Szeuq), stündlicher Check-in (trig_01JQ1JW6hj8BS4UYB4MbWhEC). `orch/n28` neu aufgebaut mit 28B in der Endfassung 40fa7ab (0854dab = f8fe095 + 28A + 28B + 28D + 28C); gegenüber ffb7eac nur `scripts/check-release.sh` und `internal/e2e` anders; gofmt, vet und die e2e-Schritte laufen neu. Doku-Nachzug 28g neu gestartet.
