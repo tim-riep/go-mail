@@ -561,3 +561,4 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 23:27 UTC: 29A abnahmefähig mit 78fa2ac. 29C abnahmefähig mit e8bf056. Offen: 29B (Prüfer 2 läuft, dann Nacharbeit 29B2), 29D2 in Nachprüfung.
 - 23:35 UTC: 29B Prüfer 2 bestätigt F1 (Speicher) und den Grenzfall; Nacharbeit 29B2 gestartet (Urteile nicht zwischenspeichern, Speichergrenze, Tests).
 - 23:35 UTC: `orch/n29` aufgebaut (5328315 = 0854dab + 29A 78fa2ac + 29C e8bf056 + 29D df5a202 + 29B 188d765) und Volllauf fr-n29 gestartet, vorab: 29D2 ist in Nachprüfung, 29B wird nach 29B2 getauscht; dann laufen die Schritte der Pakete neu, deren Tests `internal/client` einbinden.
+- 23:36 UTC: 29D abnahmefähig mit df5a202 (schon in `orch/n29`). Damit abnahmefähig: 29A 78fa2ac, 29C e8bf056, 29D df5a202; 29B in Nacharbeit 29B2.
