@@ -555,3 +555,4 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 21:51 UTC: 28g (f788295) geprüft, ein Fund mittel (HANDOFF „Bekannte Grenzen“ zu `publish`); Nacharbeit 28g2 gestartet, entfernt auch `docs/tasks/28-patches/`.
 - 21:55 UTC: **Auftrag 28 vollständig zusammengeführt:** Dokumente 28g/28g2 als d20f140 (entfernt `docs/tasks/28-patches/`); Hashes in HANDOFF, AUDIT und Liste eingetragen. 29D (38562b1) fertig, ein Prüfer läuft; 29A, 29B, 29C in Arbeit.
 - 22:22 UTC: 29A beide Prüfer frei, kleine Nacharbeit 29A2 gestartet. 29C Prüfer 1 frei, Prüfer 2 läuft. 29D in Prüfung, 29B in Arbeit.
+- 22:22 UTC: 29C abnahmefähig mit e8bf056 (beide Prüfer frei, nur niedrig/Hinweise; keine zweite Runde, Reste in die Liste über den Doku-Nachzug 29g).
