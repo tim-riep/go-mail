@@ -592,3 +592,38 @@ Plan: Volllauf von 25 fortsetzen und 25 zusammenführen; parallel Auftrag 26 mit
 - 04:17 UTC: **32A zusammengeführt** (c6b2ea2; nur Testcode). Volllauf `fr-n29` auf 2635712 (= 6cc6ba7 + 32A): gofmt, vet, ceremony, cmd/gomail-ceremony und e2e neu, 67/67 grün bis 04:17 UTC. Code gleich `orch/n29`, Vektoren unverändert. Doku-Nachzug zu 32A (Nr. 121) offen für den nächsten Doku-Auftrag.
 - 04:23 UTC: **32g zusammengeführt** (5122d1d; nur Dokumentation). Prüfung abnahmefähig, zwei Hinweise für den nächsten Doku-Nachzug (20-notes „32g“).
 - 04:24 UTC: Vorarbeit für 29B: Quelle `orch/n29b` (`scratchpad/orch/src-n29b`) = c6b2ea2 + 29B3 9c6a373 → 5a5dad0, ohne Konflikt; Volllauf `fr-n29b` gestartet (fortsetzbar). Zusammenführen erst nach der Entscheidung des Auftraggebers zu H1 (20-notes „29B3“ Prüfer 1).
+
+## 13. Stand beim Anhalten (18.11.2026, 06:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`, Branch `orch/n29b`, 5a5dad0 = c6b2ea2 + 29B3) ist angehalten und fortsetzbar (2 von 67 Schritten, gofmt und vet; fortsetzen mit `nohup nice -n 10 scratchpad/orch/fullrun2.sh scratchpad/orch/src-n29b scratchpad/orch/fr-n29b &`). Der stündliche Check-in ist gelöscht. Der Container startete einmal neu (18.11., 01:05 UTC); alle Agenten und der Volllauf wurden mit ihrem Stand fortgesetzt.
+
+**M1 A–F:** unverändert, A, B, C, D und F erfüllt, E bedingt (Zwei-Maschinen-Test über NFSv4 ist hier nicht möglich; HANDOFF „M1-Kriterien“).
+
+**Seit dem letzten Bericht (11.11., 06:00 MEZ) zusammengeführt:**
+- Auftrag 28: 28A b8d3bc3, 28B c935768, 28D f4818b6, 28C ac24813, Dokumente d20f140 (fr-n28 67/67).
+- Auftrag 29 ohne 29B: 29A 4a9fa2e (`ReadFileLimited`), 29C 2acc0a3 (`publish`, „was not replaced“), 29D b581573 (`TestReleaseSwitches`); Dokumente 29g2 8eb999c.
+- Auftrag 30: 30B 2c03071 (Unix-Socket statt FIFO, Prüfung der Wurzel), 30A 34bcdc5 (Zufallsfehler `TestDeviceLostWrongSeed` und vier gleichartige Stellen); Dokumente 30g 0f75c28.
+- Auftrag 31: 31A 6cc6ba7 (Zufallsfehler `TestPtyRestoreStderrClosed`: `stopChild` wartet auf alle Threads); Dokumente 31g 4bce2f3.
+- Auftrag 32: 32A c6b2ea2 (äußeres `t` in Subtests, `makeSocket` räumt auf); Dokumente 32g 5122d1d.
+- Volläufe: fr-n29 auf 77d75db 67/67 (ein Schritt nach einer Wiederholung wegen des vorbestehenden PTY-Zufallsfehlers), danach Teilläufe für 31A (c738147) und 32A (2635712) je 67/67. Code nach jedem Merge gleich der geprüften Quelle, Phase-0-Vektoren unverändert.
+
+**Offen:**
+- **29B (Client, Nr. 111/112/114):** abnahmefähig mit 9c6a373 (dritte Runde 29B3, zwei Prüfer, nur niedrig), nicht zusammengeführt. Wartet auf die Entscheidung des Auftraggebers zu H1 (unten) und auf den Volllauf `fr-n29b`. Danach Doku-Nachzug zu 29B (D91, AUDIT R27/R32, RUNBOOK 4.5/8.6, Nr. 111/112/114/117) mit den niedrigen Resten aus 29B3 (Grenze genau getroffen ungetestet, Store-Funktionen ohne eigenen Test, Grenze zählt nur Begriffe bis Faktor 2,64, Tests ohne Build-Tag auf Windows).
+- Hinweise für den nächsten Doku-Nachzug: 20-notes „32g“ (zwei Formulierungen).
+- Liste nach M1: neue Reste bis Nr. 122 (Nr. 117 frei für 29B).
+
+**Entscheidungen des Auftraggebers (neu):**
+- **29B, H1 (Löschregel des Markers):** Ist die Mail-Datei laut Stempel (Gerät, Inode, Größe, Modus, mtime, ctime) unverändert, übernimmt ein späterer Eintrag derselben Mail im selben Index-Lauf die schon geprüfte Lesung, auch wenn eine erneute Öffnung an der Umgebung scheitern würde (EMFILE, EIO, LSM, veralteter `Lstat` auf NFS) oder die Datei im selben Uhr-Tick in place mit gleicher Größe geändert wurde. Sein Marker wird dann gelöscht, wo 0854dab ihn liegen ließ. Die Begriffe stammen aus einer gegen denselben MailHash geprüften Lesung. Wege: (a) so annehmen und in D91/AUDIT als Grenze festhalten; (b) gespeicherte Lesungen nur für Index-Läufe ohne jeden Umgebungsfehler nutzen (aufwendiger, Prüfung neu); (c) Zwischenspeicher für gelungene Lesungen ganz weglassen, nur Lesefehler speichern (Nr. 112 bliebe dann offen).
+- Unverändert offen aus 27g: Nr. 7 (26A Listener-Grenzen), 40, 88, 92, 98 (`TODO(ask)`), 99 (27C F2), 100.
+
+**Entscheidungen des Orchestrators in dieser Nacht (zur Prüfung):**
+- 29B: zunächst „Urteile nicht zwischenspeichern“; die Entscheidung zu w3 (eine Urteil-Warnung weniger) wurde nach der Prüfung von 29g zurückgenommen und durch 29B3 ersetzt (Verhalten wie 0854dab außer w1).
+- Auftrag 29 ohne 29B zusammengeführt, damit 29A/29C/29D nicht auf 29B warten.
+- Volläufe auf Ständen gestartet, deren Prüfung noch lief; betroffene Schritte danach neu; für 31A und 32A nur die Schritte der berührten Pakete neu (Rest gültig, weil nur Testdateien dieser Pakete geändert sind).
+- Zwei Zufallsfehler als vorbestehend eingeordnet (Vergleich mit 0854dab) und mit eigenen Aufträgen behoben (30A, 31A).
+- `shamir_test` (Phase 0) nicht geändert; Restrisiko 2⁻³² je Fall in Nr. 121.
+- Niedrige Reste und Hinweise in die Liste statt weiterer Runden.
+
+**Zwischenfälle:** Neustart des Containers 01:05 UTC (alles fortgesetzt). Ein Implementierer nutzte in der Diagnose kurz Echtzeitpriorität für eine Last-Schleife; künftig ausdrücklich verboten.
+
+**Wie es weitergeht:** (1) Entscheidung zu 29B H1; danach `fr-n29b` fortsetzen, 29B zusammenführen, Doku-Nachzug 29B. (2) Offene Entscheidungen aus 27g. (3) Weitere Punkte der Liste nach M1 ohne Haltepunkt.
