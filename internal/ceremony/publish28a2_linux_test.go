@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"unsafe"
 
 	"github.com/tim-riep/go-mail/internal/store"
 	"github.com/tim-riep/go-mail/internal/witness"
@@ -176,9 +178,100 @@ func TestPublishEntryInodeReused(t *testing.T) {
 	}
 }
 
-// setNofile sets the soft RLIMIT_NOFILE to cur, the hard one stays max.
+// setNofile sets the soft RLIMIT_NOFILE of this process to cur, the hard
+// one stays max. It calls prlimit64(2) itself, not syscall.Setrlimit:
+// the Go runtime raises the soft limit at start and gives every child it
+// starts the soft limit the process started with (while the soft limit
+// is still the one it raised it to), but once the limit was set through
+// package syscall (Setrlimit) it gives none, and every child started
+// later inherits the limit in place (review of task 28 A2, robustness
+// H1). With prlimit64 the runtime keeps the soft limit to give, and
+// setNofile(old.Cur, old.Max) puts back the raised one: a child started
+// after the test gets the soft limit it got before
+// (TestSetNofileChildLimit). The soft limit 0 holds for the whole
+// process: no other test may run meanwhile, so the tests that use
+// setNofile must never call t.Parallel (crashHook, which they set, is
+// global as well).
 func setNofile(cur, max uint64) error {
-	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: cur, Max: max})
+	lim := syscall.Rlimit{Cur: cur, Max: max}
+	if _, _, e := syscall.RawSyscall6(syscall.SYS_PRLIMIT64, 0, syscall.RLIMIT_NOFILE, uintptr(unsafe.Pointer(&lim)), 0, 0, 0); e != 0 {
+		return e
+	}
+	return nil
+}
+
+// nofileChild names the child of TestSetNofileChildLimit.
+const nofileChild = "GOMAIL_TEST_29C_NOFILE_CHILD"
+
+// childSoftNofile is the soft RLIMIT_NOFILE a child that is no Go program
+// (sh) gets from this process.
+func childSoftNofile() (string, error) {
+	out, err := exec.Command("sh", "-c", "ulimit -Sn").Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// TestSetNofileChildLimit (task 29 C point 2): after setNofile lowered the
+// soft RLIMIT_NOFILE to 0 and put it back, as TestPublishEMFILEAtOpen and
+// TestPublishReplaceFailsAfterLine do, a child started afterwards gets
+// the soft limit the process started with, as before, not the one the
+// Go runtime raised it to. The test runs in a child of the test program
+// that sh starts with the soft limit 512 (lower than the hard one, so
+// that the runtime raises it and keeps 512 for children); that child
+// prints the soft limit of a child of its own before and after
+// setNofile.
+func TestSetNofileChildLimit(t *testing.T) {
+	if os.Getenv(nofileChild) != "" {
+		var old syscall.Rlimit
+		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
+			t.Fatal(err)
+		}
+		before, err := childSoftNofile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		serr := setNofile(0, old.Max)
+		if rerr := setNofile(old.Cur, old.Max); serr == nil {
+			serr = rerr
+		}
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		after, err := childSoftNofile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("nofile %d %s %s\n", old.Cur, before, after)
+		return
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no sh: %v", err)
+	}
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err != nil {
+		t.Fatal(err)
+	}
+	if lim.Max <= 513 {
+		t.Skipf("hard RLIMIT_NOFILE %d: the runtime would not raise a soft limit of 512", lim.Max)
+	}
+	cmd := exec.Command("sh", "-c", `ulimit -Sn 512 && exec "$0" -test.run='^TestSetNofileChildLimit$' -test.count=1`, os.Args[0])
+	cmd.Env = append(os.Environ(), nofileChild+"=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("child: %v %q %q", err, stdout.String(), stderr.String())
+	}
+	var own uint64
+	var before, after string
+	if _, err := fmt.Sscanf(stdout.String(), "nofile %d %s %s\n", &own, &before, &after); err != nil {
+		t.Fatalf("child's output %q: %v", stdout.String(), err)
+	}
+	t.Logf("child: soft limit %d, its child %s before setNofile, %s after", own, before, after)
+	if before != "512" {
+		t.Skipf("the runtime gave the child's child the soft limit %s, not 512: nothing to compare", before)
+	}
+	if after != before {
+		t.Fatalf("a child started after setNofile gets the soft limit %s, not %s", after, before)
+	}
 }
 
 // TestPublishEMFILEAtOpen (review of task 28 A, H1): the open of
@@ -190,7 +283,8 @@ func setNofile(cur, max uint64) error {
 // hook "check-failed" stands for a failing os.Lstat of the second look
 // (EIO): still the error of the open, never "is gone" (mutant M12 of
 // the robustness review: every failure of that os.Lstat taken for a
-// name gone). Nothing written or logged.
+// name gone). Nothing written or logged. Never t.Parallel: the soft
+// limit 0 holds for the whole process (setNofile).
 func TestPublishEMFILEAtOpen(t *testing.T) {
 	for _, c := range []string{"emfile", "emfile-lstat-fails"} {
 		t.Run(c, func(t *testing.T) {
@@ -258,11 +352,14 @@ func TestPublishEMFILEAtOpen(t *testing.T) {
 //
 // WitnessesReplacing has come, WitnessesReplaced and
 // WitnessesLinkReplaced do not, and the error names witnesses.rec, says
-// it is unchanged, nothing is logged, files of the export may be written
+// it is unchanged ("create") or was not replaced ("rename": the
+// directory of the other process stands there now; review of task 28
+// A2, H4), nothing is logged, files of the export may be written
 // (admin-1.pub is), and the remedy; errors.Is holds for the cause. No
 // temporary file is left, nothing is logged. When witnesses.rec is
 // missing ("missing", written for the first time) no line comes and the
-// error of store.ReplaceFileIn is returned as it is.
+// error of store.ReplaceFileIn is returned as it is. Never t.Parallel:
+// the soft limit 0 holds for the whole process (setNofile).
 func TestPublishReplaceFailsAfterLine(t *testing.T) {
 	for _, c := range []struct{ kind, fail string }{
 		{"regular", "create"}, {"symbolic", "create"}, {"hard", "create"}, {"missing", "create"}, {"regular", "rename"},
@@ -348,17 +445,21 @@ func TestPublishReplaceFailsAfterLine(t *testing.T) {
 				t.Fatalf("not %v: %v", cause, err)
 			}
 			// The cause is the error of store.ReplaceFileIn as it is:
-			// whatever stands between the prefix and "; <p> is unchanged".
+			// whatever stands between the prefix and "; <p> <state>".
+			state := stateUnchanged
+			if c.fail == "rename" {
+				state = stateNotReplaced
+			}
 			msg := err.Error()
 			t.Log(msg)
 			if c.kind == "missing" {
-				if len(calls) != 0 || strings.Contains(msg, "unchanged") || strings.HasPrefix(msg, "ceremony: replacing ") {
+				if len(calls) != 0 || strings.Contains(msg, stateUnchanged) || strings.Contains(msg, stateNotReplaced) || strings.HasPrefix(msg, "ceremony: replacing ") {
 					t.Fatalf("written for the first time: calls %q, %v", calls, err)
 				}
 			} else {
 				pre := "ceremony: replacing " + p + ": "
-				i := strings.Index(msg, "; "+p+" is unchanged")
-				if !strings.HasPrefix(msg, pre) || i < len(pre) || msg != replaceFailedMsg(p, msg[len(pre):i]) {
+				i := strings.Index(msg, "; "+p+" "+state)
+				if !strings.HasPrefix(msg, pre) || i < len(pre) || msg != replaceFailedMsg(p, msg[len(pre):i], state) {
 					t.Fatalf("message %q", msg)
 				}
 				if len(calls) != 1 || !strings.HasPrefix(calls[0], "replacing ") {

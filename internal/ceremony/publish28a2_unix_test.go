@@ -15,11 +15,20 @@ import (
 
 // replaceFailedMsg is the error of publish when the replacement of
 // witnesses.rec (path p) fails after its line (review of task 28 A, F3),
-// with the error cause of store.ReplaceFileIn.
-func replaceFailedMsg(p, cause string) string {
-	return "ceremony: replacing " + p + ": " + cause + "; " + p +
-		" is unchanged and nothing is logged (files of the export may be written already): run the same publish again"
+// with the error cause of store.ReplaceFileIn and the state of
+// witnesses.rec: stateUnchanged, or stateNotReplaced when the rename
+// failed because another process put a directory under the name
+// (review of task 28 A2, H4).
+func replaceFailedMsg(p, cause, state string) string {
+	return "ceremony: replacing " + p + ": " + cause + "; " + p + " " + state +
+		" and nothing is logged (files of the export may be written already): run the same publish again"
 }
+
+// The states of witnesses.rec in replaceFailedMsg.
+const (
+	stateUnchanged   = "is unchanged"
+	stateNotReplaced = "was not replaced"
+)
 
 // TestPublishReplacingAfterExportFiles (review of task 28 A, F4; mutant
 // N15: the line before the export's files): with ReplaceWitnesses and a

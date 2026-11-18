@@ -28,9 +28,12 @@ import (
 // new witnesses.rec fails. No callback is called (witnesses.rec was not
 // replaced), the error of the rename is returned with the paths of both
 // names (review N2: as at 3ea40f0), completed by the path of
-// witnesses.rec, "unchanged", "nothing is logged" and the remedy, as
-// after the line of WitnessesReplacing (review of task 28 A, F3), no
-// temporary file is left, and the log is not reached.
+// witnesses.rec, "was not replaced" (a directory of another process
+// stands there now, so not "is unchanged": review of task 28 A2, H4),
+// "nothing is logged" and the remedy, as after the line of
+// WitnessesReplacing (review of task 28 A, F3), whether or not that
+// callback is set; no temporary file is left, and the log is not
+// reached.
 func TestPublishWitnessesRenameFailsNoCallback(t *testing.T) {
 	f := newFixture(t)
 	out := filepath.Join(f.base, "out")
@@ -78,7 +81,7 @@ func TestPublishWitnessesRenameFailsNoCallback(t *testing.T) {
 	}
 	var le *os.LinkError
 	if !errors.As(err, &le) || le.Op != "rename" || filepath.Dir(le.Old) != plat || !strings.HasPrefix(filepath.Base(le.Old), ".tmp-") || le.New != p ||
-		err.Error() != replaceFailedMsg(p, "rename "+le.Old+" "+p+": file exists") {
+		err.Error() != replaceFailedMsg(p, "rename "+le.Old+" "+p+": file exists", stateNotReplaced) {
 		t.Fatalf("message: %v", err)
 	}
 	ents, err := os.ReadDir(plat)

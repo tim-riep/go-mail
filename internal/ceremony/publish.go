@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
@@ -160,19 +161,26 @@ var errChanged = errors.New("ceremony: an entry of platform/ changed while publi
 // regular file (backlog 93): a FIFO, a directory or a device with a
 // driver is opened in this window (O_RDONLY|O_NONBLOCK|O_NOCTTY, never
 // read) and found to be no regular file, a socket or a device without
-// a driver fails the open (ENXIO); either is errChanged, never
+// a driver fails the open (ENXIO); either is errChanged, but for a
+// socket or a device without a driver that is gone again, the file
+// put back, when lreadEntry looks at the name a second time after the
+// failed open: that is the error of the open (ENXIO), a refusal as
+// well (a window left, review of task 28 A2, H5). Neither is
 // store.ErrNotRegular, which is only for an entry that os.Lstat showed
 // as no regular file. Opening a device put there in this window cannot
 // be ruled out without a descriptor of the file os.Lstat saw (the
 // window left; it needs write access to platform/ during publish, and
 // either CAP_MKNOD or a device node that exists on the same file
-// system, which a rename or a hard link puts there without
-// CAP_MKNOD). The hard link check uses the last os.Lstat; a failure of
-// that os.Lstat other than a missing name is reported with its own
-// error (review of task 25 A). Everything goes through pd, platform/ as
-// Publish opened it (openPlatformDir, backlog 72): os.Lstat is
-// Root.Lstat, the open store.OpenRegularIn; st names the entry in
-// messages.
+// system, which a rename or a hard link puts there without CAP_MKNOD:
+// a rename needs write access to the directory the node is in, a hard
+// link, with fs.protected_hardlinks set to 1 as most distributions do,
+// a node the process owns, or CAP_FOWNER, without that protection any
+// node it can reach; review of task 28 A2, H3). The hard link check
+// uses the last os.Lstat; a failure of that os.Lstat other than a
+// missing name is reported with its own error (review of task 25 A).
+// Everything goes through pd, platform/ as Publish opened it
+// (openPlatformDir, backlog 72): os.Lstat is Root.Lstat, the open
+// store.OpenRegularIn; st names the entry in messages.
 func readEntry(st *store.Store, pd *os.Root, name string) ([]byte, string, error) {
 	b, link, err := lreadEntry(st, pd, name, "publish")
 	if link != "" {
@@ -216,7 +224,11 @@ func lreadEntry(st *store.Store, pd *os.Root, name, at string) ([]byte, string, 
 	// (O_RDONLY|O_NONBLOCK|O_NOCTTY) where it can be, a FIFO, a
 	// directory and a device with a driver as well: that is the window
 	// left. For a socket or a device without a driver the open is only
-	// tried, and fails with ENXIO. Either is refused below (errChanged).
+	// tried, and fails with ENXIO. Either is refused below (errChanged),
+	// but for a socket or a device without a driver that is gone again,
+	// the file put back, before the second look after the failed open:
+	// then the error of the open (ENXIO) is returned, a refusal as well
+	// (the window named there; review of task 28 A2, H5).
 	if !fi.Mode().IsRegular() {
 		return nil, "", fmt.Errorf("store: %s is %w", name, store.ErrNotRegular)
 	}
@@ -1286,22 +1298,42 @@ func runPublish(opts PublishOptions) error {
 }
 
 // replaceFailedErr completes the error of store.ReplaceFileIn for
-// witnesses.rec after WitnessesReplacing announced the replacement
-// (review of task 28 A, F3): the line of the command line says "fehlt
-// die nächste Zeile, platform/witnesses.rec selbst ansehen", and this
-// error says what there is to see. Every error of store.ReplaceFileIn
-// leaves witnesses.rec as it was: writing, syncing and closing the
-// temporary file come before the rename, and a rename that fails
-// (renameat(2), or the check of os.Root for a directory under the name)
-// does not replace it; the temporary file is removed again. The fsync
-// of platform/ after the rename is not part of it (syncPlatform): the
-// callbacks after the rename report the replacement first. Nothing is
-// logged yet; the export's files are written before witnesses.rec, so
-// they may be in platform/ already. The remedy is the same publish
-// again. errors.Is holds for err.
+// witnesses.rec after the replacement is announced (WitnessesReplacing,
+// whether or not it is set; review of task 28 A, F3): the line of the
+// command line says "fehlt die nächste Zeile, platform/witnesses.rec
+// selbst ansehen", and this error says what there is to see. No error of store.ReplaceFileIn
+// comes after a replacement: writing, syncing and closing the temporary
+// file come before the rename, and a rename that fails (renameat(2), or
+// the check of os.Root for a directory under the name) does not replace
+// witnesses.rec. The temporary file is removed again where that is
+// possible; one left (in an append-only platform/, for example) is
+// removed and reported by a later publish before its checks
+// (TempRemoved), which refuses while it cannot remove it. So publish did
+// not change witnesses.rec, and the error says "is unchanged" (an open
+// of the temporary file failing with EMFILE, a write with EFBIG or
+// ENOSPC, a rename with EPERM, for example), but for a rename that
+// failed because a directory stands under the name now: EEXIST of the
+// check of os.Root, or EISDIR of renameat(2) for a directory put there
+// after that check. readEntry refuses a directory and publish puts none
+// there, so another process did: witnesses.rec is no longer what
+// publish read, and the error says "was not replaced" (review of task
+// 28 A2, H2 and H4; a repeat refuses the directory with
+// store.ErrNotRegular). Only the rename returns an *os.LinkError; an
+// EEXIST of the open of the temporary file (O_EXCL) is an *fs.PathError
+// and leaves witnesses.rec unchanged. The fsync of platform/ after the
+// rename is not part of it (syncPlatform): the callbacks after the
+// rename report the replacement first. Nothing is logged yet; the
+// export's files are written before witnesses.rec, so they may be in
+// platform/ already. The remedy is the same publish again. errors.Is
+// holds for err.
 func replaceFailedErr(st *store.Store, err error) error {
-	return fmt.Errorf("ceremony: replacing %s: %w; %s is unchanged and nothing is logged (files of the export may be written already): run the same publish again",
-		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile))
+	state := "is unchanged"
+	var le *os.LinkError
+	if errors.As(err, &le) && (errors.Is(err, syscall.EEXIST) || errors.Is(err, syscall.EISDIR)) {
+		state = "was not replaced"
+	}
+	return fmt.Errorf("ceremony: replacing %s: %w; %s %s and nothing is logged (files of the export may be written already): run the same publish again",
+		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile), state)
 }
 
 // syncPlatform fsyncs platform/ through pd after witnesses.rec was
