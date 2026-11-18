@@ -611,7 +611,8 @@ func TestPTYNoReaderBeforeTerm(t *testing.T) {
 	base := t.TempDir()
 	w1 := witnessArg(t, "w1")
 	initArgs := []string{"init", "--shares", "2-of-2", "--out", filepath.Join(base, "out"), "--keys", filepath.Join(base, "keys"), "--origin", "o", "--witness", w1, "--min-witnesses", "1"}
-	pipe := func() *os.File {
+	// pipe and socket run in the subtests and take their t (task 32A).
+	pipe := func(t *testing.T) *os.File {
 		r, w, err := os.Pipe()
 		if err != nil {
 			t.Fatal(err)
@@ -619,7 +620,7 @@ func TestPTYNoReaderBeforeTerm(t *testing.T) {
 		r.Close()
 		return w
 	}
-	socket := func() *os.File {
+	socket := func(t *testing.T) *os.File {
 		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -634,7 +635,7 @@ func TestPTYNoReaderBeforeTerm(t *testing.T) {
 	defer null.Close()
 	for _, tc := range []struct {
 		name   string
-		stderr func() *os.File
+		stderr func(*testing.T) *os.File
 		stdout *os.File // nil: the terminal
 		args   []string
 		want   int
@@ -648,7 +649,7 @@ func TestPTYNoReaderBeforeTerm(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := openPTY(t)
-			f := tc.stderr()
+			f := tc.stderr(t)
 			p.stderr = f
 			p.start(nil, tc.stdout, tc.args...)
 			f.Close()

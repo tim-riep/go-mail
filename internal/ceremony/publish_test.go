@@ -401,13 +401,14 @@ func TestPublishRefuses(t *testing.T) {
 	devPin.Dev = true
 	listPin := *pin
 	listPin.Identities = f.pin2(t).Identities
-	usePin2 := func(o *PublishOptions) { o.Pin = f.pin2(t) }
+	usePin2 := func(t *testing.T, o *PublishOptions) { o.Pin = f.pin2(t) }
 
 	n := 0
 	for name, c := range map[string]struct {
 		files map[string][]byte
-		mod   func(*PublishOptions)
-		errs  []error
+		// mod runs in the subtest and takes its t (task 32A).
+		mod  func(*testing.T, *PublishOptions)
+		errs []error
 	}{
 		"forged certificate":         {map[string][]byte{"admin-1.pub": admin1Pub, "admin-1.cert": forgedCert}, nil, []error{translog.ErrOrder, keys.ErrSignature}},
 		"succession above the pin":   {map[string][]byte{"identity-2.succ": succ2}, nil, []error{translog.ErrMismatch}},
@@ -424,20 +425,20 @@ func TestPublishRefuses(t *testing.T) {
 		"pub without cert":           {map[string][]byte{"ingest-2.pub": ingest2Pub}, nil, []error{ErrOutDir}},
 		"pub of another key":         {map[string][]byte{"ingest-2.pub": admin1Pub, "ingest-2.cert": ingest2}, nil, []error{ErrOutDir}},
 		"cert under wrong name":      {map[string][]byte{"ingest-3.pub": ingest2Pub, "ingest-3.cert": ingest2}, nil, []error{ErrOutDir}},
-		"succession wrong name":      {map[string][]byte{"identity-3.succ": succ2}, f.withPin(t, 3), []error{ErrOutDir}},
+		"succession wrong name":      {map[string][]byte{"identity-3.succ": succ2}, f.withPin(3), []error{ErrOutDir}},
 		"malformed cert":             {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": []byte("x")}, nil, []error{keys.ErrCert}},
 		"malformed succession":       {map[string][]byte{"identity-2.succ": []byte("x")}, usePin2, []error{keys.ErrCert}},
 		"unknown file":               {map[string][]byte{"identity-1.pin": []byte("x")}, nil, []error{ErrOutDir}},
 		"non-canonical name":         {map[string][]byte{"ingest-02.cert": ingest2}, nil, []error{ErrOutDir}},
 		"bad witnesses.rec":          {map[string][]byte{WitnessesFile: badW}, nil, []error{witness.ErrWitnesses}},
 		"other witnesses.rec":        {map[string][]byte{WitnessesFile: otherW}, nil, []error{translog.ErrMismatch}},
-		"no options":                 {map[string][]byte{}, func(o *PublishOptions) { o.From = "" }, []error{ErrOptions}},
-		"no pin":                     {map[string][]byte{}, func(o *PublishOptions) { o.Pin = nil }, []error{ErrOptions}},
-		"development pin":            {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &devPin }, []error{ErrIdentity}},
-		"list against pin":           {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &listPin }, []error{ErrIdentity, translog.ErrPin}},
-		"invalid pin":                {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1} }, []error{ErrIdentity}},
-		"short pin":                  {map[string][]byte{}, func(o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1, Pub: idPub} }, []error{ErrIdentity}},
-		"log refuses":                {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": ingest2}, func(o *PublishOptions) { o.Log.(*recLog).fail = translog.ErrOrder }, []error{translog.ErrOrder}},
+		"no options":                 {map[string][]byte{}, func(_ *testing.T, o *PublishOptions) { o.From = "" }, []error{ErrOptions}},
+		"no pin":                     {map[string][]byte{}, func(_ *testing.T, o *PublishOptions) { o.Pin = nil }, []error{ErrOptions}},
+		"development pin":            {map[string][]byte{}, func(_ *testing.T, o *PublishOptions) { o.Pin = &devPin }, []error{ErrIdentity}},
+		"list against pin":           {map[string][]byte{}, func(_ *testing.T, o *PublishOptions) { o.Pin = &listPin }, []error{ErrIdentity, translog.ErrPin}},
+		"invalid pin":                {map[string][]byte{}, func(_ *testing.T, o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1} }, []error{ErrIdentity}},
+		"short pin":                  {map[string][]byte{}, func(_ *testing.T, o *PublishOptions) { o.Pin = &store.PlatformPin{Gen: 1, Pub: idPub} }, []error{ErrIdentity}},
+		"log refuses":                {map[string][]byte{"ingest-2.pub": ingest2Pub, "ingest-2.cert": ingest2}, func(_ *testing.T, o *PublishOptions) { o.Log.(*recLog).fail = translog.ErrOrder }, []error{translog.ErrOrder}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			n++
@@ -452,7 +453,7 @@ func TestPublishRefuses(t *testing.T) {
 			dir := writeExport(t, filepath.Join(f.base, fmt.Sprint("x", n)), c.files)
 			o := PublishOptions{From: dir, Data: st, Log: log, Pin: pin}
 			if c.mod != nil {
-				c.mod(&o)
+				c.mod(t, &o)
 			}
 			err := Publish(o)
 			for _, e := range c.errs {
@@ -490,8 +491,8 @@ func TestPublishRefuses(t *testing.T) {
 }
 
 // withPin returns a modifier that publishes with the pin of generation n.
-func (f *fixture) withPin(t *testing.T, n uint32) func(*PublishOptions) {
-	return func(o *PublishOptions) { o.Pin = f.pinN(t, n) }
+func (f *fixture) withPin(n uint32) func(*testing.T, *PublishOptions) {
+	return func(t *testing.T, o *PublishOptions) { o.Pin = f.pinN(t, n) }
 }
 
 func TestPublishExisting(t *testing.T) {

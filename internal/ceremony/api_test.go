@@ -405,31 +405,32 @@ func TestInitProbeFails(t *testing.T) {
 		other.Write([]byte(fmt.Sprintf("Anteil %d/5: %s\n", s.Index, strings.Join(s.Words(), " "))))
 	}
 	for name, c := range map[string]struct {
-		answer func(p *prompter, want int) ([]string, error)
+		// answer runs in the subtest and takes its t (task 32A).
+		answer func(t *testing.T, p *prompter, want int) ([]string, error)
 		errs   []error
 	}{
-		"tampered share (other identity)": {func(p *prompter, want int) ([]string, error) {
+		"tampered share (other identity)": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			if len(p.asked) == 1 {
 				return tamper(t, p.scr.shares[want]), nil
 			}
 			return p.scr.shares[want], nil
 		}, []error{ErrProbe}},
-		"wrong index": {func(p *prompter, want int) ([]string, error) {
+		"wrong index": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			return p.scr.shares[want%5+1], nil
 		}, []error{ErrProbe, ErrShares}},
-		"other split": {func(p *prompter, want int) ([]string, error) {
+		"other split": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			if len(p.asked) == 2 {
 				return other.shares[want], nil
 			}
 			return p.scr.shares[want], nil
 		}, []error{ErrProbe, ErrShares, shamir.ErrMismatch}},
-		"checksum": {func(p *prompter, want int) ([]string, error) {
+		"checksum": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			return swapWords(t, p.scr.shares[want], 0), nil
 		}, []error{ErrProbe, shamir.ErrChecksum}},
-		"too few words": {func(p *prompter, want int) ([]string, error) {
+		"too few words": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			return p.scr.shares[want][:29], nil
 		}, []error{ErrProbe, shamir.ErrWordCount}},
-		"abbreviation": {func(p *prompter, want int) ([]string, error) {
+		"abbreviation": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			ws := append([]string(nil), p.scr.shares[want]...)
 			if len(ws[4]) > 4 {
 				ws[4] = ws[4][:4]
@@ -438,13 +439,13 @@ func TestInitProbeFails(t *testing.T) {
 			}
 			return ws, nil
 		}, []error{ErrProbe, shamir.ErrUnknownWord}},
-		"prompter error": {func(p *prompter, want int) ([]string, error) {
+		"prompter error": {func(t *testing.T, p *prompter, want int) ([]string, error) {
 			return nil, io.ErrUnexpectedEOF
 		}, []error{ErrProbe, io.ErrUnexpectedEOF}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := &prompter{scr: &screen{}}
-			p.answer = func(want int) ([]string, error) { return c.answer(p, want) }
+			p.answer = func(want int) ([]string, error) { return c.answer(t, p, want) }
 			out, kd := filepath.Join(f.base, "out"), filepath.Join(f.base, "keys")
 			_, err := Init(f.opts(out, kd, p))
 			for _, e := range c.errs {

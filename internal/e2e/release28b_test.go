@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/build/constraint"
@@ -606,7 +607,8 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 // makeSocket makes the Unix socket path; it is removed with its directory.
 // The name is bound relative to the directory (t.Chdir until the test
 // ends): the absolute path may be longer than a socket address allows
-// (108 bytes on Linux). On success path is a socket for Lstat.
+// (108 bytes on Linux). On success path is a socket for Lstat; on an
+// error no entry is left at path, or the test fails.
 func makeSocket(t *testing.T, path string) error {
 	t.Chdir(filepath.Dir(path))
 	l, err := net.Listen("unix", filepath.Base(path))
@@ -619,11 +621,18 @@ func makeSocket(t *testing.T, path string) error {
 	}
 	t.Cleanup(func() { l.Close() })
 	fi, err := os.Lstat(path)
-	if err != nil {
-		return err
+	if err == nil && fi.Mode().Type() != fs.ModeSocket {
+		err = fmt.Errorf("%s: %s, not a socket", path, fi.Mode().Type())
 	}
-	if fi.Mode().Type() != fs.ModeSocket {
-		return fmt.Errorf("%s: %s, not a socket", path, fi.Mode().Type())
+	if err != nil {
+		// Listen may have left an entry that is no socket for Lstat:
+		// remove it, so that the walk does not report it and the test
+		// ends with Skip outside Linux (task 32A).
+		l.Close()
+		if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			t.Fatalf("%v; not removed: %v", err, rerr)
+		}
+		return err
 	}
 	return nil
 }
