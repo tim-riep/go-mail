@@ -8,15 +8,14 @@ import (
 	"go/token"
 	"go/types"
 	"io/fs"
+	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -131,13 +130,14 @@ var envSelectors = map[string]bool{"Environ": true, "Getenv": true, "LookupEnv":
 // vendor, or it lies under a skipped directory. That is fail closed: the
 // test does not decide whether go build would compile something there.
 // root itself must be a directory, not a symbolic link (WalkDir would
-// read nothing below it); the caller resolves it.
-func releaseEnvReads(t *testing.T, root string) ([]envRead, []string) {
-	t.Helper()
+// read nothing below it); the caller resolves it (releaseRoot). Otherwise,
+// and when the walk fails (a file that does not parse, a directory that
+// cannot be read), the error is returned.
+func releaseEnvReads(root string) ([]envRead, []string, error) {
 	if fi, err := os.Lstat(root); err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	} else if !fi.IsDir() {
-		t.Fatalf("%s: not a directory (%s); the walk would read nothing below it, resolve it first", root, fi.Mode().Type())
+		return nil, nil, fmt.Errorf("%s: not a directory (%s); the walk would read nothing below it, resolve it first", root, fi.Mode().Type())
 	}
 	fset := token.NewFileSet()
 	// pkgs holds the parsed non-test files of each directory, for
@@ -209,7 +209,7 @@ func releaseEnvReads(t *testing.T, root string) ([]envRead, []string) {
 		return nil
 	})
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 
 	var reads []envRead
@@ -279,7 +279,20 @@ func releaseEnvReads(t *testing.T, root string) ([]envRead, []string) {
 			return true
 		})
 	}
-	return reads, problems
+	return reads, problems, nil
+}
+
+// releaseRoot returns the module root that TestReleaseSwitches walks: two
+// directories above the working directory, with symbolic links resolved.
+// A working directory reached through a symbolic link (cd to a link to
+// the checkout) leaves an unresolved root that WalkDir does not descend
+// into.
+func releaseRoot() (string, error) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(root)
 }
 
 // constString returns the value of the string constant expression e of
@@ -390,8 +403,8 @@ func specValue(decl any, name string, f *ast.File, pkg []*ast.File, depth int) (
 // outside cmd/ and internal/. Files and directories that go build
 // ignores (names beginning with "." or "_", testdata, vendor, other
 // modules) are skipped, not parsed. The module root is resolved with
-// filepath.EvalSymlinks first: reached through a symbolic link, the walk
-// would read nothing. Each name in switches
+// filepath.EvalSymlinks first (releaseRoot): reached through a symbolic
+// link, the walk would read nothing. Each name in switches
 // matches pattern (otherwise grep would not pass it to the script) and
 // is read by such a file: the list is the one its comment names, and the
 // collection is not empty.
@@ -401,13 +414,8 @@ func specValue(decl any, name string, f *ast.File, pkg []*ast.File, depth int) (
 // a function or method of another package under another name, or
 // through cgo; files of another module or under testdata.
 func TestReleaseSwitches(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
+	root, err := releaseRoot()
 	if err != nil {
-		t.Fatal(err)
-	}
-	// A working directory reached through a symbolic link (cd to a link
-	// to the checkout) leaves a root that WalkDir does not descend into.
-	if root, err = filepath.EvalSymlinks(root); err != nil {
 		t.Fatal(err)
 	}
 	src, err := os.ReadFile(filepath.Join(root, "scripts", "check-release.sh"))
@@ -429,7 +437,10 @@ func TestReleaseSwitches(t *testing.T) {
 		}
 	}
 
-	reads, problems := releaseEnvReads(t, root)
+	reads, problems, err := releaseEnvReads(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, p := range problems {
 		t.Error(p)
 	}
@@ -463,12 +474,17 @@ func TestReleaseSwitches(t *testing.T) {
 // parsed (one does not parse at all, the others read the environment); a
 // symbolic link named *.go, a dangling one, a link to a directory and a
 // chain of links to a directory through a link named _* are problems,
-// each once, and so is a FIFO named *.go (not on Windows; it is never
-// opened); links named *_test.go, _*.go, .*.go or not *.go, and links
-// to a directory named _*, testdata or vendor, are not. A directory with
-// a regular go.mod or a link go.mod to a regular file is another module
-// and not read; one with a dangling link go.mod or a directory go.mod is
-// read, as go builds it.
+// each once, and so is a Unix socket named *.go (never opened); links
+// named *_test.go, _*.go, .*.go or not *.go, and links to a directory
+// named _*, testdata or vendor, are not. A directory with a regular
+// go.mod or a link go.mod to a regular file is another module and not
+// read; one with a dangling link go.mod or a directory go.mod is read, as
+// go builds it. A root that is a symbolic link is an error, not an empty
+// walk.
+//
+// The socket must be made on Linux (the test fails otherwise); where it
+// cannot be made on another system, the other cases are checked and the
+// test then ends in a skip that names why.
 func TestReleaseEnvReadsWalk(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "mod")
@@ -532,38 +548,33 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 		filepath.Join(root, "internal", "c") + ": symbolic link to a directory;",
 		filepath.Join(root, "internal", "d") + ": symbolic link to a directory;",
 	}
-	// A FIFO named *.go: releaseEnvReads must report it without opening
-	// it. Should it open the FIFO all the same, a writer that opens it
-	// and closes at once gives it end of file instead of a hang; the
-	// writer is released by a reader that does not block.
-	fifo := filepath.Join(root, "internal", "b", "fifo.go")
-	if runtime.GOOS == "windows" {
-		t.Log("no FIFO on windows")
-	} else if mk, err := exec.LookPath("mkfifo"); err != nil {
-		t.Logf("no FIFO: %v", err)
-	} else if out, err := exec.Command(mk, fifo).CombinedOutput(); err != nil {
-		t.Logf("no FIFO: mkfifo: %v: %s", err, out)
+	// A Unix socket named *.go: releaseEnvReads must report it without
+	// opening it. Should it open the socket all the same, however often,
+	// each open fails at once (ENXIO on Linux), so the walk fails instead
+	// of hanging as it could on a FIFO.
+	sock := filepath.Join(root, "internal", "b", "sock.go")
+	skip := ""
+	if err := makeSocket(t, sock); err == nil {
+		want = append(want, sock+": not a regular file;")
+	} else if runtime.GOOS == "linux" {
+		t.Fatalf("no Unix socket: %v", err)
 	} else {
-		want = append(want, fifo+": not a regular file;")
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
-				w.Close()
-			}
-		}()
-		defer func() {
-			r, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-			if err != nil {
-				t.Errorf("releasing the writer of %s: %v", fifo, err)
-				return
-			}
-			<-done
-			r.Close()
-		}()
+		skip = fmt.Sprintf("no Unix socket on %s, the case of a file that is not regular is not checked: %v", runtime.GOOS, err)
 	}
 
-	reads, problems := releaseEnvReads(t, root)
+	// The root through a symbolic link: an error, not an empty walk.
+	link := filepath.Join(dir, "modlink")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	if reads, problems, err := releaseEnvReads(link); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("releaseEnvReads(%s) = %q, %q, %v; want the error not a directory", link, reads, problems, err)
+	}
+
+	reads, problems, err := releaseEnvReads(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var names []string
 	for _, r := range reads {
 		names = append(names, r.name)
@@ -586,5 +597,67 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 		if n != 1 {
 			t.Errorf("%d problems beginning %q, want 1: %q", n, w, problems)
 		}
+	}
+	if skip != "" {
+		t.Skip(skip)
+	}
+}
+
+// makeSocket makes the Unix socket path; it is removed with its directory.
+// The name is bound relative to the directory (t.Chdir until the test
+// ends): the absolute path may be longer than a socket address allows
+// (108 bytes on Linux). On success path is a socket for Lstat.
+func makeSocket(t *testing.T, path string) error {
+	t.Chdir(filepath.Dir(path))
+	l, err := net.Listen("unix", filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	// Close must not remove a relative name from another directory.
+	if u, ok := l.(*net.UnixListener); ok {
+		u.SetUnlinkOnClose(false)
+	}
+	t.Cleanup(func() { l.Close() })
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Type() != fs.ModeSocket {
+		return fmt.Errorf("%s: %s, not a socket", path, fi.Mode().Type())
+	}
+	return nil
+}
+
+// TestReleaseSwitchesRootLink (task 30 package 30B): reached through a
+// symbolic link to the checkout, releaseRoot returns the resolved module
+// root, the one TestReleaseSwitches walks from the checkout itself.
+func TestReleaseSwitchesRootLink(t *testing.T) {
+	root, err := releaseRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "repo")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("no symbolic links here: %v", err)
+	}
+	wd := filepath.Join(link, "internal", "e2e")
+	t.Chdir(wd)
+	// filepath.Abs starts from os.Getwd, which keeps the path through the
+	// link only where the system reports it ($PWD on Linux, set by
+	// t.Chdir); otherwise this test would not reach the link.
+	if got, err := os.Getwd(); err != nil {
+		t.Fatal(err)
+	} else if got != wd {
+		if runtime.GOOS == "linux" {
+			t.Fatalf("working directory %s, want %s through the link", got, wd)
+		}
+		t.Skipf("working directory %s, not %s through the link", got, wd)
+	}
+	got, err := releaseRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != root {
+		t.Errorf("releaseRoot() through %s = %s, want %s", link, got, root)
 	}
 }
