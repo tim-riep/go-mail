@@ -245,7 +245,9 @@ func TestDeviceLostWrongSeed(t *testing.T) {
 	if _, err := client.DeviceLost(cfg, testenv.Passphrase, words); !errors.Is(err, keys.ErrUnknownWord) || strings.Contains(err.Error(), "notaword") || !strings.Contains(err.Error(), "word 5") {
 		t.Fatalf("unknown word: %v", err)
 	}
-	words[4] = alice.Words[5]
+	// A wrong word that breaks the checksum: word 6 in place of word 5
+	// keeps it for about one seed in 256 (task 30A).
+	words = seedTypo(t, alice.Words, 4)
 	if _, err := client.DeviceLost(cfg, testenv.Passphrase, words); !errors.Is(err, keys.ErrChecksum) {
 		t.Fatalf("wrong word: %v", err)
 	}

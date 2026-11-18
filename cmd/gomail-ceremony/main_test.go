@@ -500,11 +500,7 @@ func TestShareInput(t *testing.T) {
 	ws := strings.Fields(shares[1])
 	abbrev := append([]string(nil), ws...)
 	abbrev[6] = "zzzzz"
-	swapped := append([]string(nil), ws...)
-	swapped[0], swapped[1] = swapped[1], swapped[0]
-	if swapped[0] == swapped[1] {
-		swapped[2], swapped[3] = swapped[3], swapped[2]
-	}
+	swapped := swapWords(t, ws, 0)
 	attempts := []string{strings.Join(ws[:29], " ") + " " + strings.Join(ws, " "), strings.Join(abbrev, " "), strings.Join(swapped, " ")}
 	tt = newTTY()
 	n := 0

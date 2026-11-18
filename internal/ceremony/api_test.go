@@ -424,12 +424,7 @@ func TestInitProbeFails(t *testing.T) {
 			return p.scr.shares[want], nil
 		}, []error{ErrProbe, ErrShares, shamir.ErrMismatch}},
 		"checksum": {func(p *prompter, want int) ([]string, error) {
-			ws := append([]string(nil), p.scr.shares[want]...)
-			ws[0], ws[1] = ws[1], ws[0]
-			if ws[0] == ws[1] {
-				ws[2], ws[3] = ws[3], ws[2]
-			}
-			return ws, nil
+			return swapWords(t, p.scr.shares[want], 0), nil
 		}, []error{ErrProbe, shamir.ErrChecksum}},
 		"too few words": {func(p *prompter, want int) ([]string, error) {
 			return p.scr.shares[want][:29], nil

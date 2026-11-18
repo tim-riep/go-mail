@@ -692,8 +692,7 @@ func TestPTY(t *testing.T) {
 	validFrom := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	p = openPTY(t)
 	p.start(nil, nil, "ingest-rotate", "--pin", pinPath, "--gen", "2", "--out", filepath.Join(base, "rot"), "--keys", kd, "--valid-from", validFrom)
-	bad := strings.Fields(shares[4])
-	bad[0], bad[1] = bad[1], bad[0]
+	bad := swapWords(t, strings.Fields(shares[4]), 0)
 	p.converse([]string{shares[4], strings.Join(bad, " "), shares[4], shares[3]})
 	if code := p.wait(); code == 0 {
 		// shares[4] twice: the duplicate is refused by the ceremony.

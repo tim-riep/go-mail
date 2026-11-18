@@ -198,8 +198,9 @@ func TestKeygenSharesAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	foreign := other.Shares()
-	typo := append([]string(nil), shares[1]...)
-	typo[7] = typo[8]
+	// Word 9 copied to word 8 changed nothing when both were equal
+	// (task 30A).
+	typo := shareTypo(t, shares[1], 7)
 	nobody, _ := store.NewID(nil)
 	for name, c := range map[string]struct {
 		opts client.RestoreOptions

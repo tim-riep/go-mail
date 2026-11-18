@@ -612,8 +612,7 @@ func TestKeygenSharesRestore(t *testing.T) {
 
 	// Errors name positions and counts, never words.
 	dev4 := filepath.Join(c.env.Base, "clients", "carol4")
-	swapped := append([]string(nil), shares[1]...)
-	swapped[3], swapped[4] = swapped[4], swapped[3]
+	swapped := swapWords(t, shares[1], 3)
 	bad := []struct{ in, want string }{
 		{strings.Join(shares[0], " ") + "\n" + strings.Join(swapped, " ") + "\n", "share 2"},
 		{strings.Join(shares[0], " ") + "\n", "Anteil 2 von 2: keine Eingabe nach 0 von 30 Wörtern"},
