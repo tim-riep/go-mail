@@ -30,6 +30,110 @@ func hook28d(t *testing.T, fn func(path string)) {
 	t.Cleanup(func() { readLimitedHook = nil })
 }
 
+// The two tests on readAtMost with a reader that refuses an empty
+// buffer stand before the tests of this file that read a real file
+// (review 28D2, finding 2): should the loop of readAtMost pass an empty
+// buffer to Read again, an os.File answers (0, nil) and those tests
+// would hang until the timeout; these two fail at once, so the FAIL is
+// in the output before the hang (and with -failfast there is no hang).
+// That holds for the source order only: with -shuffle a file test may
+// run first and hang without a FAIL before it (review 29A, finding 5).
+
+// errEmptyRead29a is returned by noEmptyRead29a for an empty buffer.
+var errEmptyRead29a = errors.New("read into an empty buffer")
+
+// noEmptyRead29a serves n bytes, in pieces of at most chunk bytes when
+// chunk > 0. A read into an empty buffer fails at once: an os.File
+// answers it with (0, nil), and readAtMost would read again without
+// end. It also fails a buffer that reaches beyond limit (pos + cap(p):
+// the buffer is filled from its start, so this is its size).
+type noEmptyRead29a struct {
+	n, pos, chunk    int
+	limit            int64
+	empty, oversized bool
+}
+
+func (r *noEmptyRead29a) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		r.empty = true
+		return 0, errEmptyRead29a
+	}
+	if int64(r.pos+cap(p)) > r.limit {
+		r.oversized = true
+		return 0, fmt.Errorf("buffer of %d bytes for a limit of %d", r.pos+cap(p), r.limit)
+	}
+	if r.pos == r.n {
+		return 0, io.EOF
+	}
+	k := min(len(p), r.n-r.pos)
+	if r.chunk > 0 {
+		k = min(k, r.chunk)
+	}
+	r.pos += k
+	return k, nil
+}
+
+// TestReadAtMostNoEmptyRead (review 28D2, finding 2): readAtMost never
+// passes an empty buffer to Read and never a buffer larger than limit,
+// at the limit, one byte below and above it and after growing. A
+// change that brings back an endless loop (the loop up to limit
+// inclusive, the jump to limit-1) fails here at once, not by the
+// timeout.
+func TestReadAtMostNoEmptyRead(t *testing.T) {
+	for _, limit := range []int64{1, 2, 511, 512, 513, 1024, 1025, 4097, 65537} {
+		for _, size := range []int64{0, 1, limit / 3, limit - 1} {
+			for _, n := range []int64{0, limit - 1, limit, limit + 1, 3 * limit} {
+				for _, chunk := range []int{0, 7} {
+					r := &noEmptyRead29a{n: int(max(n, 0)), chunk: chunk, limit: limit}
+					got, err := readAtMost(r, size, limit)
+					desc := fmt.Sprintf("limit %d, size %d, %d bytes, pieces of %d", limit, size, n, chunk)
+					if r.empty || r.oversized || err != nil {
+						t.Fatalf("%s: empty read %t, buffer above limit %t, %v", desc, r.empty, r.oversized, err)
+					}
+					if want := min(n, limit); int64(len(got)) != want || int64(cap(got)) > limit {
+						t.Fatalf("%s: %d bytes in a buffer of %d, want %d", desc, len(got), cap(got), want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestReadAtMostCapFull (review 28D2, finding 3): when the buffer is
+// full at the largest size it may have (math.MaxInt, only reachable on
+// 386 with a limit of 2 GiB or more; here a smaller cap) before limit,
+// readAtMost ends with ErrTooLarge and nil instead of passing an empty
+// buffer to Read. Below that cap the data is read as usual, also when
+// the Stat size is above it. The message is fixed, without content,
+// and true also for a file of exactly maxCap bytes, whose end was not
+// seen (review 29A, finding 2): not "more than N bytes". That readAtMost
+// passes math.MaxInt as the cap is not tested: on 64 bit it shows only
+// with a buffer above 2 GiB (review 29A, finding 4).
+func TestReadAtMostCapFull(t *testing.T) {
+	const maxCap = 4096
+	const msg = "store: file too large: the buffer is full at 4096 bytes before the limit"
+	for _, c := range []struct{ size, n int64 }{{0, 10000}, {0, maxCap}, {3, 10000}, {1 << 20, 10000}} {
+		r := &noEmptyRead29a{n: int(c.n), limit: 1 << 30}
+		got, err := readAtMostCap(r, c.size, 10000, maxCap)
+		if !errors.Is(err, ErrTooLarge) || got != nil || r.empty {
+			t.Fatalf("%+v: %d bytes (nil %t), %v, empty read %t; want nil and ErrTooLarge", c, len(got), got == nil, err, r.empty)
+		}
+		if err.Error() != msg {
+			t.Fatalf("%+v: message %q, want %q", c, err, msg)
+		}
+		if r.pos != maxCap {
+			t.Fatalf("%+v: %d bytes read before ErrTooLarge, want %d", c, r.pos, maxCap)
+		}
+	}
+	for _, c := range []struct{ size, n int64 }{{0, 3000}, {1 << 20, 3000}, {0, maxCap - 1}} {
+		r := &noEmptyRead29a{n: int(c.n), limit: maxCap}
+		got, err := readAtMostCap(r, c.size, 10000, maxCap)
+		if err != nil || int64(len(got)) != c.n || r.empty || r.oversized {
+			t.Fatalf("%+v: %d bytes, %v, empty read %t, buffer above the cap %t", c, len(got), err, r.empty, r.oversized)
+		}
+	}
+}
+
 // TestReadFileLimitedBounds (backlog 105): a file of exactly max bytes
 // is read whole; one of max+1 bytes is refused by the size from Stat,
 // with the message "has N bytes, at most M", before anything is read.
@@ -164,6 +268,12 @@ func TestReadFileLimitedEmpty(t *testing.T) {
 // io.ReadAll over io.LimitReader did (a mail file of 50 MiB: about
 // 112 MiB). The file is sparse; the bound leaves room for the open and
 // the error paths, not for a second buffer.
+//
+// The allocation tests of this file and fs29a_test.go measure
+// TotalAlloc of the whole process: they must not run in parallel (no
+// t.Parallel here or in another test of the package), or the
+// allocations of the other test count against the bound (review 28D2,
+// finding 4).
 func TestReadFileLimitedAllocates(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "sparse")
@@ -289,11 +399,15 @@ func TestReadFileLimitedLimitOverflow(t *testing.T) {
 
 // TestReadFileLimitedGrowthAllocates (review 28D, F1): a file that
 // grows between Stat and the read (here also from 0 bytes, as a file of
-// /proc shows) allocates at most 2.5 times max in all, not up to six
-// times as when the buffer grew as append does: the buffer doubles up
-// to max+1 and never holds more than max+1 bytes. The limits include
-// powers of two, where the byte that shows the end of the file would
-// otherwise need one more buffer, and one just above a power of two.
+// /proc shows) allocates at most about twice max in all (the bound adds
+// 24 KiB: up to 16 KiB for two large buffers rounded up to whole pages
+// of 8 KiB, the rest for the open and the error paths; 64 KiB before
+// review 29A, finding 3), not up to six times as when the buffer grew
+// as append does: the buffer doubles up to max+1 and never holds more
+// than max+1 bytes. The limits include powers of two,
+// where the byte that shows the end of the file would otherwise need
+// one more buffer, and one just above a power of two. TotalAlloc of the
+// whole process: not in parallel (see TestReadFileLimitedAllocates).
 func TestReadFileLimitedGrowthAllocates(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "grow")
@@ -329,7 +443,7 @@ func TestReadFileLimitedGrowthAllocates(t *testing.T) {
 			}
 			got := after.TotalAlloc - before.TotalAlloc
 			t.Logf("max %d, %d -> %d bytes: allocated %d bytes (%.2f times max)", max, c.stat, c.read, got, float64(got)/float64(max))
-			if got > uint64(max)*5/2 {
+			if got > uint64(2*max+24<<10) {
 				t.Fatalf("max %d, %d -> %d bytes: allocated %d bytes (%.2f times max)", max, c.stat, c.read, got, float64(got)/float64(max))
 			}
 			if int64(cap(data)) > max+1 {
@@ -343,7 +457,8 @@ func TestReadFileLimitedGrowthAllocates(t *testing.T) {
 // between Stat and the read is returned in a buffer of about its new
 // size, not in the one allocated for the Stat size, so a caller that
 // keeps the result does not keep up to max+1 bytes; an empty result
-// stays non-nil.
+// stays non-nil. HeapAlloc of the whole process: not in parallel (see
+// TestReadFileLimitedAllocates).
 func TestReadFileLimitedShrunkCopied(t *testing.T) {
 	dir := t.TempDir()
 	const max = 2 << 20

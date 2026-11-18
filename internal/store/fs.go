@@ -350,8 +350,10 @@ func RemoveDurable(path string) error {
 // not twice as with io.ReadAll. The extra byte lets the read see the
 // end of the file (or growth) without another allocation. A file that
 // grew after Stat is still read to at most max+1 bytes, the buffer
-// doubling up to max+1 (see readAtMost); one that shrank is returned
-// with the bytes read, copied when much smaller than the buffer.
+// doubling up to max+1 (see readAtMost), about twice max+1 allocated
+// in all; one that shrank is returned with the bytes read. A result
+// much smaller than its buffer is copied where the copy keeps the sum
+// within twice max+1 (always when the file shrank).
 func ReadFileLimited(path string, max int64) ([]byte, error) {
 	f, fi, err := OpenRegular(path)
 	if err != nil {
@@ -391,17 +393,59 @@ var readLimitedHook func(path string)
 // returns an empty, non-nil slice (io.LimitReader with N <= 0); a size
 // below zero counts as zero.
 //
+// A size of zero (as Stat shows for files of /proc) starts with
+// min(512, limit) bytes, as io.ReadAll does, not with one byte: the
+// first read is as large as before backlog 105 (review 28D2, finding
+// 1). Only the first read is the same; the later ones are not. For the
+// limits of the callers, a file replaced by a link to a special file
+// that refuses short reads (/proc/self/pagemap wants a multiple of 8)
+// gives the same result as before backlog 105
+// (TestReadFileLimitedSpecialLikeOld); for some other limits it does
+// not (review 29A, finding 1).
+//
 // If the buffer is full before the end (the file grew after Stat, or
-// Stat showed 0 bytes as for files of /proc), it doubles, to at least
-// 512 bytes and at most limit; once the doubled size would be above
-// half of limit, it grows to limit at once. So no buffer is larger
-// than limit, the buffers of one read add up to at most about twice
-// limit (backlog 105, review 28D F1), and the byte that shows the end
-// of the file needs no buffer of its own. A result much smaller than
-// its buffer (the file shrank after Stat) is copied, so a caller that
-// keeps it does not keep the buffer (review 28D F2); with that copy a
-// read allocates at most about 2.5 times limit.
+// Stat showed 0 bytes), it doubles, to at least 512 bytes and at most
+// limit; once the doubled size would be above half of limit, it grows
+// to limit at once. So no buffer is larger than limit, the buffers of
+// one read add up to at most about twice limit (backlog 105, review
+// 28D F1), and the byte that shows the end of the file needs no buffer
+// of its own.
+//
+// A result much smaller than its buffer (more than 4 KiB and more than
+// half of it unused) is copied, so a caller that keeps it does not keep
+// the buffer (review 28D F2), but only while the buffers and the copy
+// add up to at most twice limit (review 28D2 R1, review 29A R1):
+//   - If the buffer did not grow (the file shrank after Stat), or grew
+//     to limit in one step, the copy always fits: such a result holds
+//     at most about twice its bytes.
+//   - After a doubling the copy is left out where it would raise the
+//     sum above twice limit, as in the worst case of review 28D2 R1
+//     (the doubling full just below half of limit, then limit, then the
+//     end; a copy there made about 2.5 times limit).
+//   - A result that is not copied holds less than three times its
+//     bytes, and at most limit: its buffer is limit, the buffers before
+//     were full and add up to less than twice its bytes, and these with
+//     limit and the copy would be above twice limit.
+//
+// With this growth both bounds (twice limit in all, twice its bytes
+// held) cannot be had at once; the one of the allocation wins. Never to
+// copy after growth would hold up to four times the bytes (review 29A
+// R1), always to copy (28D2) would allocate 2.5 times limit.
 func readAtMost(r io.Reader, size, limit int64) ([]byte, error) {
+	return readAtMostCap(r, size, limit, math.MaxInt)
+}
+
+// readAtMostCap is readAtMost with buffers of at most maxCap bytes
+// (math.MaxInt, the range of int; tests pass less). If the buffer is
+// full at maxCap bytes before limit, the result is ErrTooLarge with
+// the fixed message "the buffer is full at N bytes before the limit"
+// (not "more than max": the file may end there): Read never gets an
+// empty buffer, which an os.File answers with (0, nil),
+// so the loop would not end. Only 386 with a limit of 2 GiB or more
+// gets there (none of the callers), and only if a buffer of MaxInt
+// bytes could be allocated and filled; mostly an allocation fails
+// before, as with io.ReadAll.
+func readAtMostCap(r io.Reader, size, limit, maxCap int64) ([]byte, error) {
 	if limit <= 0 {
 		return []byte{}, nil
 	}
@@ -409,26 +453,32 @@ func readAtMost(r io.Reader, size, limit int64) ([]byte, error) {
 	if n < limit {
 		n++ // the byte that shows the end of the file
 	}
+	if size <= 0 {
+		n = 512 // as io.ReadAll; see readAtMost
+	}
 	n = min(n, limit)
-	if n > math.MaxInt {
+	if n > maxCap {
 		// Only with a limit above the range of int (386 and a limit
 		// of 2 GiB or more, none of the callers): start with 512
 		// bytes and double.
-		n = 512
+		n = min(512, maxCap)
 	}
 	buf := make([]byte, 0, int(n))
+	total := n // all buffers of this read, for the bound of the copy
 	for int64(len(buf)) < limit {
 		if len(buf) == cap(buf) {
 			c := max(2*int64(cap(buf)), 512)
 			if c > limit/2 {
 				c = limit
 			}
-			// Above the range of int (386 only) the allocation
-			// fails before the buffer is full.
-			c = min(c, math.MaxInt)
+			c = min(c, maxCap)
+			if c <= int64(cap(buf)) {
+				return nil, fmt.Errorf("%w: the buffer is full at %d bytes before the limit", ErrTooLarge, cap(buf))
+			}
 			nb := make([]byte, len(buf), int(c))
 			copy(nb, buf)
 			buf = nb
+			total += c
 		}
 		room := buf[len(buf):cap(buf)]
 		if rest := limit - int64(len(buf)); int64(len(room)) > rest {
@@ -443,7 +493,8 @@ func readAtMost(r io.Reader, size, limit int64) ([]byte, error) {
 			return nil, err
 		}
 	}
-	if cap(buf)-len(buf) > 4096 && len(buf) < cap(buf)/2 {
+	// total+len <= 2*limit, written so that it cannot overflow.
+	if cap(buf)-len(buf) > 4096 && len(buf) < cap(buf)/2 && total-limit <= limit-int64(len(buf)) {
 		buf = slices.Clone(buf) // not nil for an empty buf
 	}
 	return buf, nil
