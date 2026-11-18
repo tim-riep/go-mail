@@ -50,3 +50,18 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahm
 - Ein Commit mit `Task: docs/tasks/29g-docs.md`, ohne Co-Authored-By und ohne Modellnamen. Nicht pushen.
 - Jeder Meldungstext steht wörtlich so, wie ihn der Code ausgibt.
 - Bericht: geänderte Stellen, offene Punkte, Abweichungen zwischen Code und Notizen.
+
+## Nacharbeit 29g2 (18.11.2026)
+
+Ausgangspunkt ist 066c0f5 (29g). Ergebnis ist genau ein Commit auf dem Arbeitsbranch, der 29g insgesamt enthält. Quelle: die Prüfung 29g (`scratchpad/rev29g/notes.md`, 20-notes „29g“).
+
+- **Ohne 29B:** Zusammengeführt werden heute nur 29A, 29C und 29D; 29B bleibt in der Nacharbeit 29B3 (20-notes, ORCHESTRATION Abschnitt 12). Nimm deshalb alles zu 29B heraus:
+  - D91 Nachtrag 29 B;
+  - AUDIT R27 (b) und R32 „Nach Auftrag 29“ und die Zeile 6.2 zu 29B;
+  - RUNBOOK 4.5 und 8.6 zu 29B (pending-Warnung, Urteil, Grenze);
+  - HANDOFF zu 29B;
+  - in der Liste den Status von Nr. 111, 112 und 114 und die neue Nr. 117. Nr. 111, 112 und 114 bleiben dann wie nach 28g; Nr. 117 entfällt, die folgenden Nummern rücken nicht nach, sondern bleiben (Nr. 117 wird „frei, für 29B vorgesehen“) oder werden neu durchgezählt, solange keine Nummer doppelt ist und die Zählzeile stimmt.
+  - Kopf von AUDIT, HANDOFF und Liste: „Auftrag 29 ohne Paket 29B (in Nacharbeit 29B3)“, kein vorweggenommenes Prüfergebnis zu 29B.
+- **Funde der Prüfung, soweit sie 29A, 29C oder 29D betreffen:** H1 (Nr. 119 und AUDIT R35: Ordner mit `_`/`.` vorn oder namens `testdata`), H2 (Satzbau in AUDIT R35 und RUNBOOK 0.2; fehlende Ausnahme für Links unter übersprungenen Ordnern), H3 (HANDOFF „store“).
+- **Liste:** Neu aufnehmen: der Zufallsfehler `TestDeviceLostWrongSeed` (20-notes „Volllauf fr-n29“), mit dem Vermerk „in Auftrag 30, Paket 30A“.
+- Sonst wie oben. Commit-Zeile `Task: docs/tasks/29g-docs.md`.
