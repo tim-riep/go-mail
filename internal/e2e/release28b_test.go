@@ -9,11 +9,14 @@ import (
 	"go/types"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -113,32 +116,81 @@ var envSelectors = map[string]bool{"Environ": true, "Getenv": true, "LookupEnv":
 // the non-test Go files of the module under root read when only a build
 // with gomail_test or gomail_dev compiles them, and the problems: a read
 // whose name is not a constant, any other selector named in envSelectors
-// (whatever its receiver), and any dot import.
+// (whatever its receiver), any dot import, and any Go file or directory
+// that go build would read and this function does not (a symbolic link
+// to a directory, a non-test file *.go that is not a regular file).
+// Like go/build it skips files and directories whose names begin with
+// "." or "_", and directories named testdata or vendor or holding a
+// go.mod (another module; as for go, only a go.mod that os.Stat finds
+// and that is not a directory counts).
+//
+// Every symbolic link to a directory is a problem, wherever it is and
+// whatever the directory holds (even nothing, or no Go file, or a
+// directory that the walk reads anyway), unless the link itself is
+// skipped: its name begins with "." or "_", it is named testdata or
+// vendor, or it lies under a skipped directory. That is fail closed: the
+// test does not decide whether go build would compile something there.
+// root itself must be a directory, not a symbolic link (WalkDir would
+// read nothing below it); the caller resolves it.
 func releaseEnvReads(t *testing.T, root string) ([]envRead, []string) {
 	t.Helper()
+	if fi, err := os.Lstat(root); err != nil {
+		t.Fatal(err)
+	} else if !fi.IsDir() {
+		t.Fatalf("%s: not a directory (%s); the walk would read nothing below it, resolve it first", root, fi.Mode().Type())
+	}
 	fset := token.NewFileSet()
 	// pkgs holds the parsed non-test files of each directory, for
 	// constants declared in another file of the package.
 	pkgs := map[string][]*ast.File{}
 	var tagged []*ast.File
+	var problems []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		if path == root {
+			return nil
+		}
 		name := d.Name()
-		if d.IsDir() {
-			if path != root {
-				if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "vendor" {
-					return filepath.SkipDir
-				}
-				// Another module: not built with this one.
-				if _, err := os.Lstat(filepath.Join(path, "go.mod")); err == nil {
-					return filepath.SkipDir
-				}
+		// go build ignores files and directories whose names begin with
+		// "." or "_" (go/build), whatever they hold; it never parses them.
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			if d.IsDir() {
+				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || !d.Type().IsRegular() {
+		if d.IsDir() {
+			if name == "testdata" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			// Another module: not built with this one. go decides as here
+			// (os.Stat, not a directory): a dangling link go.mod or a
+			// directory go.mod does not make one.
+			if fi, err := os.Stat(filepath.Join(path, "go.mod")); err == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// WalkDir does not follow a symbolic link, but go build does: a
+		// link to a directory can be a package, a link named *.go is
+		// compiled. The test reads neither, so either is a problem.
+		if d.Type()&fs.ModeSymlink != 0 && name != "testdata" && name != "vendor" {
+			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+				problems = append(problems, fmt.Sprintf("%s: symbolic link to a directory; go build may compile the files under it, this test does not read them", path))
+				return nil
+			}
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			kind := "not a regular file"
+			if d.Type()&fs.ModeSymlink != 0 {
+				kind = "symbolic link"
+			}
+			problems = append(problems, fmt.Sprintf("%s: %s; go build may compile it, this test does not read it", path, kind))
 			return nil
 		}
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
@@ -161,7 +213,6 @@ func releaseEnvReads(t *testing.T, root string) ([]envRead, []string) {
 	}
 
 	var reads []envRead
-	var problems []string
 	for _, f := range tagged {
 		file := fset.Position(f.Package).Filename
 		pkg := pkgs[filepath.Dir(file)]
@@ -331,10 +382,19 @@ func specValue(decl any, name string, f *ast.File, pkg []*ast.File, depth int) (
 // whether called or not (os.Environ, os.ExpandEnv, syscall.Getenv,
 // (*exec.Cmd).Environ, Getenv of another package, os.Getenv or
 // os.LookupEnv not called directly), and any dot import (of any
-// package). Each name in switches matches pattern
-// (otherwise grep would not pass it to the script) and is read by such a
-// file: the list is the one its comment names, and the collection is
-// not empty.
+// package). A symbolic link named *.go (not *_test.go) or to a
+// directory, and any other non-test file *.go that is not a regular file,
+// fails the test as well: go build follows the link, the walk does not.
+// So does every other symbolic link to a directory that is not skipped
+// (fail closed, see releaseEnvReads), even one to an empty directory or
+// outside cmd/ and internal/. Files and directories that go build
+// ignores (names beginning with "." or "_", testdata, vendor, other
+// modules) are skipped, not parsed. The module root is resolved with
+// filepath.EvalSymlinks first: reached through a symbolic link, the walk
+// would read nothing. Each name in switches
+// matches pattern (otherwise grep would not pass it to the script) and
+// is read by such a file: the list is the one its comment names, and the
+// collection is not empty.
 //
 // Not covered: a read through a function of a file that production
 // builds compile as well (the name then passes as an argument), through
@@ -343,6 +403,11 @@ func specValue(decl any, name string, f *ast.File, pkg []*ast.File, depth int) (
 func TestReleaseSwitches(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A working directory reached through a symbolic link (cd to a link
+	// to the checkout) leaves a root that WalkDir does not descend into.
+	if root, err = filepath.EvalSymlinks(root); err != nil {
 		t.Fatal(err)
 	}
 	src, err := os.ReadFile(filepath.Join(root, "scripts", "check-release.sh"))
@@ -390,4 +455,136 @@ func TestReleaseSwitches(t *testing.T) {
 	}
 	sort.Strings(names)
 	t.Logf("names read under %s: %s", strings.Join(releaseTags, ", "), strings.Join(names, " "))
+}
+
+// TestReleaseEnvReadsWalk (task 29 package 29D): releaseEnvReads skips
+// what go build ignores and fails on what go build reads and it does
+// not. In a tree under t.TempDir(): files named _*.go and .*.go are not
+// parsed (one does not parse at all, the others read the environment); a
+// symbolic link named *.go, a dangling one, a link to a directory and a
+// chain of links to a directory through a link named _* are problems,
+// each once, and so is a FIFO named *.go (not on Windows; it is never
+// opened); links named *_test.go, _*.go, .*.go or not *.go, and links
+// to a directory named _*, testdata or vendor, are not. A directory with
+// a regular go.mod or a link go.mod to a regular file is another module
+// and not read; one with a dangling link go.mod or a directory go.mod is
+// read, as go builds it.
+func TestReleaseEnvReadsWalk(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "mod")
+	outside := filepath.Join(dir, "outside")
+	tagged := func(name string) string {
+		return "//go:build gomail_test\n\npackage main\n\nimport \"os\"\n\nvar v = os.Getenv(\"" + name + "\")\n"
+	}
+	files := map[string]string{
+		"mod/cmd/a/main.go":             "package main\n\nfunc main() {}\n",
+		"mod/cmd/a/env_tagged.go":       tagged("GOMAIL_TEST_A"),
+		"mod/cmd/a/_bad.go":             "package main\n\nfunc (\n",
+		"mod/cmd/a/.env_tagged.go":      tagged("GOMAIL_TEST_HIDDEN"),
+		"mod/cmd/a/_env_tagged.go":      "//go:build gomail_test\n\npackage main\n\nimport \"os\"\n\nvar e = os.Environ()\n",
+		"mod/internal/b/b.go":           "package b\n",
+		"mod/internal/m1/go.mod":        "module m1\n",
+		"mod/internal/m1/env_tagged.go": tagged("GOMAIL_TEST_MODULE"),
+		"mod/internal/m2/env_tagged.go": tagged("GOMAIL_TEST_MODULE_LINK"),
+		"mod/internal/m3/env_tagged.go": tagged("GOMAIL_TEST_GOMOD_DANGLING"),
+		"mod/internal/m4/go.mod/x.txt":  "not a module\n",
+		"mod/internal/m4/env_tagged.go": tagged("GOMAIL_TEST_GOMOD_DIR"),
+		"outside/env.go":                tagged("GOMAIL_TEST_LINKED"),
+		"outside/go.mod":                "module outside\n",
+		"outside/pkg/env_tagged.go":     tagged("GOMAIL_TEST_LINKED_DIR"),
+	}
+	for name, text := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// In this order: a link is made after the one it points to (Windows
+	// marks a link to a directory when it is made).
+	links := []struct{ name, target string }{
+		{"internal/b/link.go", filepath.Join(outside, "env.go")},
+		{"internal/b/link_test.go", filepath.Join(outside, "env.go")},
+		{"internal/b/_link.go", filepath.Join(outside, "env.go")},
+		{"internal/b/.link.go", filepath.Join(outside, "env.go")},
+		{"internal/b/link.txt", filepath.Join(outside, "env.go")},
+		{"internal/b/dead.go", filepath.Join(outside, "missing.go")},
+		{"internal/c", filepath.Join(outside, "pkg")},
+		{"internal/_c", filepath.Join(outside, "pkg")},
+		{"internal/b/testdata", filepath.Join(outside, "pkg")},
+		{"internal/vendor", filepath.Join(outside, "pkg")},
+		// A chain: d -> _hop -> outside/pkg; the walk skips _hop.
+		{"internal/_hop", filepath.Join(outside, "pkg")},
+		{"internal/d", "_hop"},
+		{"internal/m2/go.mod", filepath.Join(outside, "go.mod")},
+		{"internal/m3/go.mod", filepath.Join(outside, "missing.mod")},
+	}
+	for _, l := range links {
+		if err := os.Symlink(l.target, filepath.Join(root, filepath.FromSlash(l.name))); err != nil {
+			t.Skipf("no symbolic links here: %v", err)
+		}
+	}
+	want := []string{
+		filepath.Join(root, "internal", "b", "dead.go") + ": symbolic link;",
+		filepath.Join(root, "internal", "b", "link.go") + ": symbolic link;",
+		filepath.Join(root, "internal", "c") + ": symbolic link to a directory;",
+		filepath.Join(root, "internal", "d") + ": symbolic link to a directory;",
+	}
+	// A FIFO named *.go: releaseEnvReads must report it without opening
+	// it. Should it open the FIFO all the same, a writer that opens it
+	// and closes at once gives it end of file instead of a hang; the
+	// writer is released by a reader that does not block.
+	fifo := filepath.Join(root, "internal", "b", "fifo.go")
+	if runtime.GOOS == "windows" {
+		t.Log("no FIFO on windows")
+	} else if mk, err := exec.LookPath("mkfifo"); err != nil {
+		t.Logf("no FIFO: %v", err)
+	} else if out, err := exec.Command(mk, fifo).CombinedOutput(); err != nil {
+		t.Logf("no FIFO: mkfifo: %v: %s", err, out)
+	} else {
+		want = append(want, fifo+": not a regular file;")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+				w.Close()
+			}
+		}()
+		defer func() {
+			r, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				t.Errorf("releasing the writer of %s: %v", fifo, err)
+				return
+			}
+			<-done
+			r.Close()
+		}()
+	}
+
+	reads, problems := releaseEnvReads(t, root)
+	var names []string
+	for _, r := range reads {
+		names = append(names, r.name)
+	}
+	sort.Strings(names)
+	wantNames := []string{"GOMAIL_TEST_A", "GOMAIL_TEST_GOMOD_DANGLING", "GOMAIL_TEST_GOMOD_DIR"}
+	if strings.Join(names, " ") != strings.Join(wantNames, " ") {
+		t.Errorf("names read: %q, want %q", names, wantNames)
+	}
+	if len(problems) != len(want) {
+		t.Errorf("%d problems, want %d: %q", len(problems), len(want), problems)
+	}
+	for _, w := range want {
+		n := 0
+		for _, p := range problems {
+			if strings.HasPrefix(p, w) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%d problems beginning %q, want 1: %q", n, w, problems)
+		}
+	}
 }
