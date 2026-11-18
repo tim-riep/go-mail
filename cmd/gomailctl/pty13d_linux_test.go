@@ -5,8 +5,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -60,8 +62,14 @@ func waitQueued(t *testing.T, f *os.File, msg string, ok func(n int) bool) {
 	}
 }
 
-// stopChild stops the child with SIGSTOP and waits until it is stopped
-// (state T in /proc/<pid>/stat); the caller continues it with SIGCONT.
+// stopChild stops the child with SIGSTOP and waits until all its threads
+// are stopped (state T in /proc/<pid>/task/<tid>/stat); the caller
+// continues it with SIGCONT. The state in /proc/<pid>/stat is that of
+// the main thread only (task 31a point 2): the thread that reads the
+// terminal is often another one. The stop wakes it from its read, but
+// until it runs it is not stopped, and the read checks for input before
+// it checks for a signal: a line typed in that time is read at once and
+// never seen in the input queue.
 func stopChild(t *testing.T, ch *child) {
 	t.Helper()
 	pid := ch.cmd.Process.Pid
@@ -69,18 +77,66 @@ func stopChild(t *testing.T, ch *child) {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		running, err := runningThreads(pid)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// pid (comm) state ...: the state follows the last parenthesis.
-		if i := bytes.LastIndexByte(b, ')'); i >= 0 && i+2 < len(b) && b[i+2] == 'T' {
+		if running == "" {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("child %d does not stop: %q", pid, b)
+			t.Fatalf("child %d does not stop: %s", pid, running)
 		}
 	}
+}
+
+// runningThreads returns "" if all threads of process pid are stopped
+// (state T), else a thread that is not, with its stat line or why it
+// cannot be read (it may have ended). The list of threads is read again
+// after the states, so that a thread created after the first list by a
+// thread that stopped only then is not missed. The error is that of the
+// list: the process is gone.
+func runningThreads(pid int) (string, error) {
+	dir := filepath.Join("/proc", strconv.Itoa(pid), "task")
+	tids, err := threadIDs(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, tid := range tids {
+		b, err := os.ReadFile(filepath.Join(dir, tid, "stat"))
+		if err != nil {
+			return err.Error(), nil
+		}
+		// tid (comm) state ...: the state follows the last parenthesis.
+		if i := bytes.LastIndexByte(b, ')'); i < 0 || i+2 >= len(b) || b[i+2] != 'T' {
+			return strconv.Quote(string(b)), nil
+		}
+	}
+	again, err := threadIDs(dir)
+	if err != nil {
+		return "", err
+	}
+	if !slices.Equal(tids, again) {
+		return fmt.Sprintf("threads %v, then %v", tids, again), nil
+	}
+	return "", nil
+}
+
+// threadIDs returns the names in the task directory dir of a process,
+// sorted.
+func threadIDs(dir string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(ents))
+	for i, e := range ents {
+		ids[i] = e.Name()
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no threads in %s", dir)
+	}
+	return ids, nil
 }
 
 // inputQueued returns the number of bytes in the input queue of the
