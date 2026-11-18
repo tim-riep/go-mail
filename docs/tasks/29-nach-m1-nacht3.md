@@ -75,3 +75,20 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich, dazu di
 ## Fertig
 
 Wie Auftrag 24: Läufe, Gegenbelege per Mutation, genau ein Commit auf 0854dab je Paket, Notizen. Der Bericht nennt außerdem Vorschläge für den Doku-Nachzug.
+
+## Nacharbeit 29B3 (dritte Runde; 18.11.2026)
+
+Ausgangspunkt ist 53be9fd (29B2). Ergebnis ist genau ein Commit auf 0854dab, der 29B insgesamt enthält. Quellen: 20-notes, Abschnitt „Auftrag 29“ (29B2, 29g); Notizen unter `scratchpad/rev29b2-spec/`, `scratchpad/rev29b2-robust/` und `scratchpad/rev29g/`.
+
+1. **Gleiches Verhalten wie 0854dab bei einer Änderung der Mail im selben Aufruf** (Fund 1 von Prüfer 1, H2 von Prüfer 2, M3 aus 29g). Eine gespeicherte gelungene Lesung gilt für einen späteren Eintrag nur, wenn die Mail-Datei unverändert ist. Vergleiche dazu die Angaben der beim ersten Mal geöffneten Datei (`Stat` am offenen Deskriptor) mit einem `Lstat` vor der Übernahme: Gerät, Inode, Größe, mtime, ctime und Modus. Scheitert `Lstat` oder weicht etwas ab, öffnet der Eintrag die Mail neu, genau wie in 0854dab. Damit entfallen die Abweichungen bei w3 und bei „erst gelesen, dann entfernt, Ordner, FIFO oder unlesbar“. Die erlaubte Ausnahme w1 bleibt: Ein gespeicherter Lesefehler lässt alle Marker liegen.
+2. **Speicher je Begriff** (B1 von Prüfer 2, M1 aus 29g). `terms.Normalize` gibt eine eigene Kopie zurück (`strings.Clone`). Das heilt auch `opened` in `Search`. Die Ausgabe bleibt byte-gleich; `internal/terms` und `internal/ingest` bleiben grün.
+3. **Gesamtgrenze** (Fund 2 von Prüfer 1, H1 von Prüfer 2). Der Zwischenspeicher in `Index` hat eine feste Grenze für die Summe der Bytes seiner Begriffe, zum Beispiel 32 MiB. Danach speichert er nichts mehr, und jeder weitere Eintrag öffnet wie in 0854dab. Das Ergebnis bleibt exakt. Keine neue Option.
+4. **Tests:**
+   - Die Fälle aus 1 (swap, remove, dir, fifo, eacces jeweils nach einer gelungenen ersten Lesung) ergeben dasselbe wie 0854dab: Marker, Warnungen, Treffer.
+   - Ein Speichertest mit langen gefalteten Adressen (Vorlage `scratchpad/rev29b2-robust/tests/rv7_backing_unix_test.go`) für Index und Search, mit einer Schranke für den Live-Heap.
+   - Ein Test für die Gesamtgrenze.
+   - `TestIndexFileChangesWithinCall`, ihr Kommentar und die Commit-Nachricht nennen nur noch die Ausnahme w1.
+5. **Läufe:** wie in Paket 29B, dazu `internal/terms` und `internal/ingest` unter `-race` mit Tags. Gegenbelege per Mutation, mindestens: ohne Vergleich der Datei, ohne `strings.Clone`, ohne Gesamtgrenze.
+6. **Haltepunkte:** wie oben. Berührt eine Lösung, wann ein Marker gelöscht wird, anders als in 0854dab (außer w1), halte an.
+
+Commit-Zeile wie bei 29B: `Task: docs/tasks/29-nach-m1-nacht3.md (Paket 29B)`. Notizen: `scratchpad/impl29b3/notes.md`.
