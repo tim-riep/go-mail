@@ -5,7 +5,7 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahm
 - **Basis:** Arbeitsbranch `claude/quirky-keller-hjsl5i`, eigener Worktree, nur Dokumentation, keine `go`-Befehle.
 - **Code der Pakete:** Lies ihn mit `git show <commit>:<pfad>`. Die Endstände, je ein Commit auf 0854dab (dem Code nach Auftrag 28):
   - 29A: 78fa2ac (Runden babcb9f, 78fa2ac)
-  - 29B: @29B@ (Runden 188d765, @29B@)
+  - 29B: 53be9fd (Runden 188d765, 53be9fd)
   - 29C: e8bf056
   - 29D: df5a202 (Runden 38562b1, df5a202)
 
@@ -29,7 +29,7 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahm
   - **Liste:** Nr. 115 erledigt bis auf `max = math.MaxInt64` (bleibt offen, Verhaltensänderung). Neue Hinweise aus 29A/29A2 nur, wenn sie nicht schon erledigt sind.
 - **29B (Client):**
   - **RUNBOOK 4.5 und 8.6:** die neue Warnung zur unlesbaren Datei in `pending/` wörtlich (beide Ursachen, wie im Code). Der Eintrag bleibt liegen; Ablauf unverändert.
-  - **D91:** Nachtrag 29 B. `Index` öffnet eine Mail je Aufruf nur einmal; zwischengespeichert werden nur gelungene Lesungen, gekürzt wie im Code, und Lesefehler, die den Marker liegen lassen. Urteile werden nicht zwischengespeichert, jeder Eintrag bekommt sein eigenes Urteil wie vorher (Entscheidung des Orchestrators, ORCHESTRATION Abschnitt 12, mit Grund: Speichergrenze bei Absendern von außen, kein Verlust von Begriffen bei einer Änderung der Mail zwischen zwei Markern).
+  - **D91:** Nachtrag 29 B. `Index` öffnet eine Mail je Aufruf und je Version der Metadaten nur einmal (Schlüssel: Mail-ID und SHA-256 der geprüften Metadatendatei); zwischengespeichert werden nur die fertigen Begriffe gelungener Lesungen (höchstens 256 × 1024 Byte je Mail) und Lesefehler, die den Marker liegen lassen. Urteile werden nicht zwischengespeichert, jeder Eintrag bekommt sein eigenes Urteil wie vorher (Entscheidung des Orchestrators, ORCHESTRATION Abschnitt 12, mit Grund: Speichergrenze bei Absendern von außen, kein Verlust von Begriffen bei einer Änderung der Mail zwischen zwei Markern). Grenze, ebenfalls Entscheidung des Orchestrators (20-notes, 29B2): Wird die Mail nach einer gelungenen Lesung im selben Index-Aufruf getauscht, bekommt ein späterer Eintrag derselben Mail die schon geprüften Begriffe, und die Urteil-Warnung entfällt in diesem Aufruf; ist die erste Öffnung ein Lesefehler, bleiben alle Marker der Mail liegen.
   - **AUDIT R27 (b) und R32:** R32 am Code prüfen und berichtigen (was `unprocessedTerms` bzw. der Zwischenspeicher hält und wie lange). R27 (b): die Härtungen am fanotify-Test und der Test zu P8.
   - **Liste:** Nr. 112 erledigt. Nr. 114 erledigt bis auf das, was der Code nicht umsetzt (am Code prüfen, etwa SKIP ohne `CAP_SYS_ADMIN`). Bei Nr. 111 den Teil `openPending` als erledigt vermerken; `checkMeta` bleibt offen. Neu: keine Sammelwarnung für unlesbare pending-Dateien (Hinweis), dazu die niedrigen Reste aus den Prüfungen von 29B2 (20-notes).
 - **29C (`publish`):**
