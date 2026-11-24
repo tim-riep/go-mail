@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
@@ -901,7 +900,15 @@ func runPublish(opts PublishOptions) error {
 		return err
 	}
 	defer pd.Close()
-	if err := store.RemoveTempReportIn(pd, opts.TempRemoved); err != nil {
+	// tempRemoved tells the message before the log that temporary files
+	// were removed (backlog 95): "nothing written" does not hide them.
+	tempRemoved := false
+	if err := store.RemoveTempReportIn(pd, func(name string) {
+		tempRemoved = true
+		if opts.TempRemoved != nil {
+			opts.TempRemoved(name)
+		}
+	}); err != nil {
 		return fmt.Errorf("ceremony: removing temporary files of platform/: %w", err)
 	}
 
@@ -1265,11 +1272,17 @@ func runPublish(opts PublishOptions) error {
 	// refused by checkPlatformDir) and logs what this one did not. The
 	// message says "wrote to" only when Publish wrote a file there
 	// (backlog 86); a missing platform/ is no longer the opened directory
-	// either.
+	// either. Without a file written it says "removed leftover temporary
+	// files (.tmp-*) from" when Publish removed any there before its
+	// checks (backlog 95; TempRemoved has named them): those removals
+	// are the only change then. The names stay out of the message.
 	if p := st.Path("platform"); !platformStillOpened(p, pdInfo) {
 		did := "opened and wrote to; nothing logged"
 		if !wrote {
 			did = "opened; nothing written or logged"
+			if tempRemoved {
+				did = "opened and removed leftover temporary files (.tmp-*) from; nothing written or logged"
+			}
 		}
 		return fmt.Errorf("%w: %s is no longer the directory publish %s: another process writes the data directory: stop it, look at platform/ and run the same publish again",
 			errPlatformReplaced, p, did)
@@ -1301,35 +1314,49 @@ func runPublish(opts PublishOptions) error {
 // witnesses.rec after the replacement is announced (WitnessesReplacing,
 // whether or not it is set; review of task 28 A, F3): the line of the
 // command line says "fehlt die nächste Zeile, platform/witnesses.rec
-// selbst ansehen", and this error says what there is to see. No error of store.ReplaceFileIn
-// comes after a replacement: writing, syncing and closing the temporary
-// file come before the rename, and a rename that fails (renameat(2), or
-// the check of os.Root for a directory under the name) does not replace
-// witnesses.rec. The temporary file is removed again where that is
-// possible; one left (in an append-only platform/, for example) is
-// removed and reported by a later publish before its checks
-// (TempRemoved), which refuses while it cannot remove it. So publish did
-// not change witnesses.rec, and the error says "is unchanged" (an open
-// of the temporary file failing with EMFILE, a write with EFBIG or
-// ENOSPC, a rename with EPERM, for example), but for a rename that
-// failed because a directory stands under the name now: EEXIST of the
-// check of os.Root, or EISDIR of renameat(2) for a directory put there
-// after that check. readEntry refuses a directory and publish puts none
-// there, so another process did: witnesses.rec is no longer what
-// publish read, and the error says "was not replaced" (review of task
-// 28 A2, H2 and H4; a repeat refuses the directory with
-// store.ErrNotRegular). Only the rename returns an *os.LinkError; an
-// EEXIST of the open of the temporary file (O_EXCL) is an *fs.PathError
-// and leaves witnesses.rec unchanged. The fsync of platform/ after the
-// rename is not part of it (syncPlatform): the callbacks after the
-// rename report the replacement first. Nothing is logged yet; the
-// export's files are written before witnesses.rec, so they may be in
-// platform/ already. The remedy is the same publish again. errors.Is
-// holds for err.
+// selbst ansehen", and this error says what there is to see. No error
+// of store.ReplaceFileIn comes after a replacement: writing, syncing
+// and closing the temporary file come before the rename, and a rename
+// that fails (renameat(2), or the check of os.Root for a directory
+// under the name) does not replace witnesses.rec. The temporary file
+// is removed again where that is possible; one left (in an append-only
+// platform/, for example) is removed and reported by a later publish
+// before its checks (TempRemoved), which refuses while it cannot
+// remove it. Nothing is logged yet; the export's files are written
+// before witnesses.rec, so they may be in platform/ already. The
+// remedy is the same publish again. errors.Is holds for err.
+//
+// The state of witnesses.rec that the error names depends on how far
+// store.ReplaceFileIn came (backlog 118):
+//
+//   - "is unchanged" when the temporary file failed (EMFILE of its
+//     open, EFBIG or ENOSPC of a write, for example; an EEXIST of the
+//     open with O_EXCL as well): an *fs.PathError, or an error without
+//     a path. publish has not touched the name witnesses.rec then.
+//   - "was not replaced" for every failed rename, the only step that
+//     returns an *os.LinkError. A rename that fails changes nothing,
+//     but its cause may be another process that changed one of the two
+//     names meanwhile, so the error says only what publish did not do,
+//     not what stands there now: a directory put under the name
+//     (EEXIST of the check of os.Root, EISDIR of renameat(2) for one
+//     put there after that check; readEntry refuses a directory and
+//     publish puts none there), the temporary file removed (ENOENT) or
+//     replaced by a directory (ENOTDIR, ENOTEMPTY, EEXIST), EPERM
+//     (chattr +a on platform/ or +i on witnesses.rec gives it, and so
+//     does an immutable directory put under the name; with chattr +i
+//     on platform/ the temporary file fails already), EBUSY of a mount
+//     point, and so on
+//     (review of task 29 C, H1). A repeat refuses a directory under the
+//     name with store.ErrNotRegular. On NFS or FUSE a rename reported
+//     as failed may have happened all the same; no error tells that.
+//
+// The fsync of platform/ after the rename is not part of it
+// (syncPlatform): the callbacks after the rename report the
+// replacement first.
 func replaceFailedErr(st *store.Store, err error) error {
 	state := "is unchanged"
 	var le *os.LinkError
-	if errors.As(err, &le) && (errors.Is(err, syscall.EEXIST) || errors.Is(err, syscall.EISDIR)) {
+	if errors.As(err, &le) {
 		state = "was not replaced"
 	}
 	return fmt.Errorf("ceremony: replacing %s: %w; %s %s and nothing is logged (files of the export may be written already): run the same publish again",
@@ -1352,11 +1379,12 @@ func syncPlatform(pd *os.Root) error {
 // (readEntry), may be replaced by it (attack review 21c F1; translog
 // doc.go "Reading for the operator": a certificate that field 7 makes
 // invalid holds no key, and <role>-<g>.cert is reissued under the new
-// identity with the same name). A certificate or succession is replaced when the log holds no
-// valid entry of its name under the pin (Log.Lookup returns valid
-// entries only): the entry there is invalid (such as the thief's
-// certificate issued with a revoked identity generation at or above its
-// revoked_at_size, class "revoked") or there is none (a file left by a
+// identity with the same name). A certificate or succession is
+// replaced when the log holds no valid entry of its name under the pin
+// (Log.Lookup returns valid entries only): the entry there is invalid
+// (such as the thief's certificate issued with a revoked identity
+// generation at or above its revoked_at_size, class "revoked") or
+// there is none (a file left by a
 // crash before its log entry, which gives nobody anything: translog
 // doc.go "Platform generations"). It is also replaced when the valid
 // entry of its name is exactly the export's file: the entry of the data

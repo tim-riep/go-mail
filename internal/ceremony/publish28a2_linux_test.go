@@ -191,13 +191,40 @@ func TestPublishEntryInodeReused(t *testing.T) {
 // (TestSetNofileChildLimit). The soft limit 0 holds for the whole
 // process: no other test may run meanwhile, so the tests that use
 // setNofile must never call t.Parallel (crashHook, which they set, is
-// global as well).
+// global as well). A test that calls setNofile calls keepNofile first
+// and puts the limit back itself; no file of the package sets a limit
+// in another way (TestNofileOnlyThroughSetNofile, task 33 A point 1).
 func setNofile(cur, max uint64) error {
 	lim := syscall.Rlimit{Cur: cur, Max: max}
 	if _, _, e := syscall.RawSyscall6(syscall.SYS_PRLIMIT64, 0, syscall.RLIMIT_NOFILE, uintptr(unsafe.Pointer(&lim)), 0, 0, 0); e != 0 {
 		return e
 	}
 	return nil
+}
+
+// keepNofile returns the soft and hard RLIMIT_NOFILE of this process
+// for a test that changes it with setNofile (backlog 118: that the
+// tests put the old limit back was not checked). Its cleanup, the last
+// one of the test, checks that the limit is the old one again, so the
+// test must have put it back itself (setNofile(old.Cur, old.Max));
+// otherwise the test fails, and the cleanup puts the old limit back
+// with setNofile, also after a test that failed or stopped early.
+func keepNofile(t *testing.T) syscall.Rlimit {
+	t.Helper()
+	var old syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var now syscall.Rlimit
+		err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &now)
+		if err == nil && now == old {
+			return
+		}
+		rerr := setNofile(old.Cur, old.Max)
+		t.Errorf("RLIMIT_NOFILE after the test: %+v (%v), not %+v as before: the test did not put it back (put back now: %v)", now, err, old, rerr)
+	})
+	return old
 }
 
 // nofileChild names the child of TestSetNofileChildLimit.
@@ -221,10 +248,7 @@ func childSoftNofile() (string, error) {
 // setNofile.
 func TestSetNofileChildLimit(t *testing.T) {
 	if os.Getenv(nofileChild) != "" {
-		var old syscall.Rlimit
-		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
-			t.Fatal(err)
-		}
+		old := keepNofile(t)
 		before, err := childSoftNofile()
 		if err != nil {
 			t.Fatal(err)
@@ -294,11 +318,8 @@ func TestPublishEMFILEAtOpen(t *testing.T) {
 			p := st.Path("platform", "ingest-1.cert")
 			before := platformSnapshot(t, st)
 			logged := len(loggedPlatform(t, st, f.res.Pin, "ingest-1.cert"))
-			var old syscall.Rlimit
-			if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { crashHook = nil; setNofile(old.Cur, old.Max) })
+			old := keepNofile(t)
+			t.Cleanup(func() { crashHook = nil })
 			lstatErr := fmt.Errorf("lstat in the test: %w", syscall.EIO)
 			var serr error
 			var hits []string
@@ -397,11 +418,8 @@ func TestPublishReplaceFailsAfterLine(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantA1 := mustReadFile(t, filepath.Join(out, "platform", "admin-1.pub"))
-			var old syscall.Rlimit
-			if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { crashHook = nil; setNofile(old.Cur, old.Max) })
+			old := keepNofile(t)
+			t.Cleanup(func() { crashHook = nil })
 			logged := len(loggedPlatform(t, st, f.res.Pin, "admin-1.pub"))
 			var serr error
 			hit, logReached := false, false

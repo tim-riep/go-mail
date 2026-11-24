@@ -253,25 +253,37 @@ func TestPublishNonRegularBeforeName(t *testing.T) {
 // before anything is logged (errPlatformReplaced). The message says
 // "wrote to" only when publish wrote a file: into a new data directory
 // it wrote the export's files; into the data directory the export was
-// published to before it wrote nothing. With platform/ back in its
-// place, the same publish logs every file.
+// published to before it wrote nothing. With a temporary file ".tmp-"
+// in platform/ ("-temp"), publish removes it before its checks and
+// reports it (TempRemoved); without a file written the message says so
+// then, with a fixed text, not the name (task 33 A point 2; backlog 95:
+// before, "nothing written or logged" alone hid the removal), and with
+// files written it is the message of "written". With platform/ back in
+// its place, the same publish logs every file.
 func TestPublishPlatformGoneBeforeLog(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		want func(plat string) string
-	}{
-		{"written", replacedBeforeLog},
-		{"nothing-written", func(plat string) string {
+	nothingWritten := func(did string) func(plat string) string {
+		return func(plat string) string {
 			return "ceremony: platform/ of the data directory was replaced during publish: " + plat +
-				" is no longer the directory publish opened; nothing written or logged: another process writes the data directory: stop it, look at platform/ and run the same publish again"
-		}},
+				" is no longer the directory publish " + did + "; nothing written or logged: another process writes the data directory: stop it, look at platform/ and run the same publish again"
+		}
+	}
+	const tmp = ".tmp-0011223344556677"
+	for _, c := range []struct {
+		name        string
+		prior, temp bool
+		want        func(plat string) string
+	}{
+		{"written", false, false, replacedBeforeLog},
+		{"nothing-written", true, false, nothingWritten("opened")},
+		{"written-temp", false, true, replacedBeforeLog},
+		{"nothing-written-temp", true, true, nothingWritten("opened and removed leftover temporary files (.tmp-*) from")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t)
 			out := filepath.Join(f.base, "out")
 			st := newData(t, filepath.Join(f.base, "data"))
 			lg := newLog(t)
-			if c.name == "nothing-written" {
+			if c.prior {
 				if err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, Log: lg}); err != nil {
 					t.Fatal(err)
 				}
@@ -280,6 +292,11 @@ func TestPublishPlatformGoneBeforeLog(t *testing.T) {
 			plat := st.Path("platform")
 			moved := filepath.Join(f.base, "moved")
 			before := dirSnapshot(t, plat)
+			if c.temp {
+				if err := os.WriteFile(filepath.Join(plat, tmp), []byte("left by a crash"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var serr error
 			hit := false
 			crashHook = func(p string) error {
@@ -291,7 +308,9 @@ func TestPublishPlatformGoneBeforeLog(t *testing.T) {
 				return nil
 			}
 			t.Cleanup(func() { crashHook = nil })
-			err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, Log: lg})
+			var removed []string
+			err := Publish(PublishOptions{From: out, Data: st, Pin: f.res.Pin, Log: lg,
+				TempRemoved: func(n string) { removed = append(removed, n) }})
 			crashHook = nil
 			if serr != nil || !hit {
 				t.Fatalf("move: %v %v", serr, hit)
@@ -299,14 +318,17 @@ func TestPublishPlatformGoneBeforeLog(t *testing.T) {
 			if !errors.Is(err, errPlatformReplaced) || err.Error() != c.want(plat) || len(lg.names) != 0 {
 				t.Fatalf("logged %q: %v", lg.names, err)
 			}
+			if c.temp && (len(removed) != 1 || removed[0] != tmp) || !c.temp && removed != nil {
+				t.Fatalf("TempRemoved: %q", removed)
+			}
 			if _, err := os.Lstat(plat); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("platform/ made again: %v", err)
 			}
 			after := dirSnapshot(t, moved)
-			if c.name == "nothing-written" && after != before {
+			if c.prior && after != before {
 				t.Fatalf("written: %s", after)
 			}
-			if c.name == "written" {
+			if !c.prior {
 				if _, err := os.Lstat(filepath.Join(moved, "ingest-1.cert")); err != nil {
 					t.Fatalf("ingest-1.cert not written into the opened directory: %v", err)
 				}

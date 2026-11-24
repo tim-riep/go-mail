@@ -16,9 +16,9 @@ import (
 // replaceFailedMsg is the error of publish when the replacement of
 // witnesses.rec (path p) fails after its line (review of task 28 A, F3),
 // with the error cause of store.ReplaceFileIn and the state of
-// witnesses.rec: stateUnchanged, or stateNotReplaced when the rename
-// failed because another process put a directory under the name
-// (review of task 28 A2, H4).
+// witnesses.rec: stateUnchanged when the temporary file failed, or
+// stateNotReplaced when the rename failed (review of task 28 A2, H4;
+// backlog 118: for every failed rename).
 func replaceFailedMsg(p, cause, state string) string {
 	return "ceremony: replacing " + p + ": " + cause + "; " + p + " " + state +
 		" and nothing is logged (files of the export may be written already): run the same publish again"

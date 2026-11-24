@@ -11,18 +11,20 @@ import (
 	"testing"
 )
 
-// TestReplaceFailedErrState (task 29 C point 1; review of task 28 A2, H4
-// and H2): the error of a failed replacement of witnesses.rec after its
-// line says "was not replaced" exactly when the rename failed because a
-// directory stands under the name now (EEXIST of the check of os.Root,
-// EISDIR of renameat(2) for a directory put there after that check;
-// another process put it there), and "is unchanged" for every other
-// error of store.ReplaceFileIn: of the temporary file (an EEXIST of its
-// open with O_EXCL as well, a *fs.PathError) and of a rename that left
-// the name as it was. errors.Is and errors.As hold for the cause. The
-// EISDIR case cannot be brought about through os.Root in a test (the
-// window between its check and renameat(2)), so the errors are made
-// here.
+// TestReplaceFailedErrState (task 29 C point 1, task 33 A point 1;
+// backlog 118; review of task 28 A2, H4 and H2, review of task 29 C,
+// H1): the error of a failed replacement of witnesses.rec after its
+// line says "was not replaced" for every failed rename (an
+// *os.LinkError, whatever its cause: a directory of another process
+// under the name, EEXIST of the check of os.Root or EISDIR of
+// renameat(2); the temporary file removed, ENOENT, or replaced by a
+// directory, ENOTDIR or ENOTEMPTY; EPERM, EBUSY, EXDEV), and "is
+// unchanged" for every error of the temporary file (an EEXIST of its
+// open with O_EXCL as well, a *fs.PathError) and an error without a
+// path (crypto/rand). errors.Is and errors.As hold for the cause. Most
+// of these causes cannot be brought about through os.Root in a test
+// (the window between its check and renameat(2), another process
+// between the write and the rename), so the errors are made here.
 func TestReplaceFailedErrState(t *testing.T) {
 	st := newData(t, filepath.Join(t.TempDir(), "data"))
 	p := st.Path("platform", WitnessesFile)
@@ -37,8 +39,13 @@ func TestReplaceFailedErrState(t *testing.T) {
 		{"write-efbig", &fs.PathError{Op: "write", Path: tmp, Err: syscall.EFBIG}, stateUnchanged},
 		{"rename-eexist", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EEXIST}, stateNotReplaced},
 		{"rename-eisdir", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EISDIR}, stateNotReplaced},
-		{"rename-eperm", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EPERM}, stateUnchanged},
-		{"rename-enoent", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.ENOENT}, stateUnchanged},
+		{"rand", errors.New("rand in the test"), stateUnchanged},
+		{"rename-eperm", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EPERM}, stateNotReplaced},
+		{"rename-enoent", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.ENOENT}, stateNotReplaced},
+		{"rename-enotdir", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.ENOTDIR}, stateNotReplaced},
+		{"rename-enotempty", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.ENOTEMPTY}, stateNotReplaced},
+		{"rename-ebusy", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EBUSY}, stateNotReplaced},
+		{"rename-exdev", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EXDEV}, stateNotReplaced},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := replaceFailedErr(st, c.err)

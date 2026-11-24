@@ -131,8 +131,10 @@ func ReadDirIn(root *os.Root) ([]fs.DirEntry, error) {
 
 // writeTempIn writes data to a new temporary file with mode perm in the
 // directory that root holds, syncs and closes it, and returns its name;
-// on an error it removes the name again. The errors name the temporary
-// file as writeTemp does ("open <dir>/.tmp-...: ...", pathErrIn).
+// on an error it removes the name again where that is possible (not in
+// a directory with chattr +a, for example). The errors name the
+// temporary file as writeTemp does ("open <dir>/.tmp-...: ...",
+// pathErrIn).
 func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
 	var rnd [8]byte
 	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
@@ -168,9 +170,15 @@ func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
 // succeeds, uses it (gomail-ceremony publish reports a replaced
 // witnesses.rec: backlog 83). The rename replaces a symbolic link
 // itself, never its target; a directory under name is an error. When
-// the rename fails, the temporary file is removed again, and name is
-// unchanged. A failing rename is "rename <dir>/.tmp-... <dir>/<name>:
-// ...", as for WriteFileAtomic.
+// the temporary file or the rename fails, the temporary file is removed
+// again where that is possible (not in a directory with chattr +a, for
+// example: it stays there), and this function has not replaced name;
+// it does not say that name is as it was before, since its error may
+// come from another process that changed name or the temporary file
+// meanwhile (a directory put under name, for example; backlog 118). A
+// failing rename is "rename <dir>/.tmp-... <dir>/<name>: ...", an
+// *os.LinkError, as for WriteFileAtomic; the errors of the temporary
+// file name it as writeTempIn does.
 func ReplaceFileIn(root *os.Root, name string, data []byte) error {
 	tmp, err := writeTempIn(root, data, FilePerm)
 	if err != nil {

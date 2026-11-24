@@ -28,8 +28,9 @@ import (
 // new witnesses.rec fails. No callback is called (witnesses.rec was not
 // replaced), the error of the rename is returned with the paths of both
 // names (review N2: as at 3ea40f0), completed by the path of
-// witnesses.rec, "was not replaced" (a directory of another process
-// stands there now, so not "is unchanged": review of task 28 A2, H4),
+// witnesses.rec, "was not replaced" (a failed rename; a directory of
+// another process stands there now, so not "is unchanged": review of
+// task 28 A2, H4),
 // "nothing is logged" and the remedy, as after the line of
 // WitnessesReplacing (review of task 28 A, F3), whether or not that
 // callback is set; no temporary file is left, and the log is not

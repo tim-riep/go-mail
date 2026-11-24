@@ -709,11 +709,13 @@ type PublishOptions struct {
 	// rename happened. When the temporary file or the rename fails
 	// after the replacement is announced, whether or not this callback
 	// is set, Publish returns that error with the path of witnesses.rec,
-	// "is unchanged" (publish did not change it) or, when the rename
-	// failed because another process put a directory under the name,
-	// "was not replaced", then "nothing is logged" and the remedy (run
-	// the same publish again). It is not called, and nothing is
-	// announced, when witnesses.rec is written for the first time.
+	// "is unchanged" when the temporary file failed (publish did not
+	// touch witnesses.rec) or "was not replaced" when the rename failed
+	// (its cause may be another process that changed the name, a
+	// directory put there for example), then "nothing is logged" and
+	// the remedy (run the same publish again). It is not called, and
+	// nothing is announced, when witnesses.rec is written for the first
+	// time.
 	WitnessesReplacing func(before *witness.Witnesses, link string, after *witness.Witnesses)
 	// TempRemoved, when not nil, is called with the name of every
 	// temporary file (".tmp-", left by a crash of an atomic write) that
