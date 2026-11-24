@@ -642,3 +642,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 20:33 UTC: 33A abnahmefähig mit 8d557b0 (beide Prüfer, nur niedrig). H1 von Prüfer 2 (vorbestehend: `publish` meldet Erfolg, obwohl `witnesses.rec` nach einem Wettlauf ein Verzeichnis ist) wird Auftrag 34 (strengere Prüfung nach dem Umbenennen, nur zusätzliche Ablehnung).
 - 20:34 UTC: Auftrag 34 (Paket 34A, in `docs/tasks/33-nach-m1-nacht4.md`): Prüfung nach dem Umbenennen in `ReplaceFileIn`, `WriteFileAtomicIn`, `CreateFileAtomicIn`, Basis 8d557b0. Gestartet.
 - 20:41 UTC: 33D-Bericht da (20-notes „33D“). V2 (Argon2 im Testbuild merken) berührt `internal/keys` (Phase 0) → Entscheidung des Auftraggebers. `TestRelayBrokenPipe` scheitert immer unter `-json` → Auftrag 35 (nur Testcode).
+- 20:42 UTC: Auftrag 35 (Paket 35A, in `docs/tasks/33-nach-m1-nacht4.md`): `TestRelayBrokenPipe` unter `-json`. Gestartet.

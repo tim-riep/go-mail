@@ -69,3 +69,14 @@ Es gelten Kopf und Regeln von Auftrag 33 oben. Commit-Zeile `Task: docs/tasks/33
 2. **Restfenster** zwischen Umbenennen und `Lstat` im Kommentar nennen.
 3. **Tests:** der Wettlauf aus `rev33ar_real_linux_test.go` (Temp durch Verzeichnis ersetzt, Name fehlt bzw. leeres Verzeichnis) über den Haken des Pakets reproduzierbar; erwartet Ablehnung, nichts geloggt, kein Rückruf „replaced“. Dazu je ein Test für `WriteFileAtomicIn` und `CreateFileAtomicIn`.
 4. **Läufe:** `internal/store` und `internal/ceremony` unter race mit und ohne Tags und unter 386 mit Tags; `cmd/gomail-ceremony` unter race mit Tags; alle übrigen Aufrufer der drei Funktionen mit ihren Paketen unter race mit Tags; die Matrix aus `scratchpad/impl33a/` (Skript `matrix.sh`) ohne neue Verletzung und ohne Übergang von Ablehnung zu Annahme; Gegenbelege per Mutation.
+
+# Auftrag 35: `TestRelayBrokenPipe` unter `go test -json` (24./25.11.2026)
+
+Es gelten Kopf und Regeln von Auftrag 33 oben. Commit-Zeile `Task: docs/tasks/33-nach-m1-nacht4.md (Paket 35A)`; Notizen `scratchpad/impl35a/notes.md`. Nur Testcode.
+
+## Paket 35A
+
+- **Basis:** c6b2ea2. Ergebnis: genau ein Commit darauf.
+- **Fehler (Messung 33D):** `TestRelayBrokenPipe` (`cmd/gomailctl/pty13d_linux_test.go`) scheitert immer unter `go test -json`: Mit `-test.v=test2json` setzt `testing` `os.Stderr = os.Stdout`; der Test legt die Pipe ohne Leser auf Deskriptor 2, schreibt aber über `os.Stderr` (jetzt Deskriptor 1), und das Schreiben gelingt. Mit `-v` und ohne `-v` ist er grün.
+1. **Abhilfe:** Der Test schreibt über eine eigene Datei für Deskriptor 2 (etwa `os.NewFile(2, …)`) oder prüft genau das, was das Programm tut (`relayBrokenPipe` und die Schreibstelle im Programm am Code ansehen); er bleibt so streng wie vorher (`EPIPE` statt Abbruch durch SIGPIPE). Prüfe alle Tests des Moduls auf dasselbe Muster (`os.Stderr`/`os.Stdout` nach einem `Dup2`/`Dup3` auf 1 oder 2) und behebe sie gleich.
+2. **Läufe:** gofmt, vet mit und ohne Tags; die geänderten Tests ohne `-v`, mit `-v` und mit `-json`, je unter `-race` mit Tags und 386 mit Tags; Gegenbeleg per Mutation (etwa `relayBrokenPipe` entfernt).
