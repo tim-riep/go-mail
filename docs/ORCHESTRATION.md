@@ -655,3 +655,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
   - **Neue Regel:** Jeder abnahmefähige oder in Prüfung befindliche Commit, der nicht sofort zusammengeführt wird, wird als Patch unter `docs/tasks/patches/` auf dem Arbeitsbranch gesichert und gepusht (wie 28 unter `docs/tasks/28-patches/`).
   - **29B** muss nach der Entscheidung des Auftraggebers neu umgesetzt werden (Beschreibung in `docs/tasks/29-nach-m1-nacht3.md`, Abschnitt „Nacharbeit 29B3“, und 20-notes „29B3“).
   - **34A** neu (Abschnitt „Neuauflage 34A“ in `docs/tasks/33-nach-m1-nacht4.md`), **33g** neu gestartet (Quellen nur noch 20-notes, ORCHESTRATION und Code).
+- 22:30 UTC: 33g fertig (e0f4c2b auf 789245b; Liste bis Nr. 126). Patch gesichert unter `docs/tasks/patches/33g-e0f4c2b.patch`. Ein Prüfer gestartet. Abweichung des Dokumentars: Den Hinweis „Panik beendet den Testlauf“ aus 32g nicht übernommen (am Quelltext: ohne `t.Parallel` endet nur der Elterntest).
