@@ -10,7 +10,8 @@ import (
 // swapWords returns a copy of the words of a share with word i swapped
 // with the first later word for which shamir.ShareFromWords reports
 // shamir.ErrChecksum. Two equal words, swapped, give the same share
-// (task 30A; tested in internal/ceremony, TestSwapWords).
+// (task 30A; tested in internal/ceremony, TestSwapWords, where
+// TestSwapWordsCopies keeps this copy equal to the tested one).
 func swapWords(t testing.TB, words []string, i int) []string {
 	t.Helper()
 	for j := i + 1; j < len(words); j++ {

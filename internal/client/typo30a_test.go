@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"slices"
+	"sort"
 	"testing"
 
 	"github.com/tim-riep/go-mail/internal/keys"
@@ -71,7 +73,9 @@ func onlyAt(t *testing.T, got, want []string, i int) {
 // seeds for which word 6 in place of word 5 (the old choice of
 // TestDeviceLostWrongSeed) keeps it, and seeds for which the first word
 // of the list ("abandon", index 0) in place of word 5 keeps it, which a
-// helper taking the first other word unchecked would choose.
+// helper taking the first other word unchecked would choose; and, for
+// every word of the list, seeds for which that word keeps it
+// (seedTypoEveryWord).
 func TestSeedTypo(t *testing.T) {
 	// Fixed seeds; the words are only built for the first ones and for
 	// those where one of the two choices keeps the checksum, found on the
@@ -123,6 +127,124 @@ func TestSeedTypo(t *testing.T) {
 		t.Fatalf("of %d seeds, word 6 keeps the checksum of %d, the first word of the list of %d", seeds, keptSeeds, keptFirst)
 	}
 	t.Logf("%d of %d seeds checked; the checksum is kept by word 6 in %d, by the first word of the list in %d", checked, seeds, keptSeeds, keptFirst)
+
+	seedTypoEveryWord(t)
+}
+
+// seedTypoEveryWord: for every word of the list, seedTypo breaks the
+// checksum of a seed for which that word in place of word 5 keeps it, so
+// a helper taking any fixed word unchecked ("zoo" as well as "abandon")
+// fails here (task 33C). The seeds are bases with word 5 set to a value
+// v. For one base, the values whose seeds have the same first byte of
+// SHA-256 (a class) keep the checksum of each other: a seed with word 5
+// from a class shows every other word of the class. Classes of 32 bases
+// are chosen greedily, larger gains first, and word 5 is taken from a
+// word already shown where the class has one; about 270 seeds show all
+// 2048 words. The bases are fixed, so the choice does not vary between
+// runs.
+func seedTypoEveryWord(t *testing.T) {
+	type class struct {
+		base   keys.Seed
+		values []int
+	}
+	list := keys.Wordlist()
+	var classes []class
+	for n := uint32(0); n < 32; n++ {
+		var base keys.Seed
+		h := sha256.Sum256(binary.BigEndian.AppendUint32([]byte("task 33C seed "), n))
+		copy(base[:], h[:])
+		var byFirst [256][]int
+		for v := range list {
+			s := base
+			setSeedWord(&s, 4, v)
+			first := sha256.Sum256(s[:])[0]
+			byFirst[first] = append(byFirst[first], v)
+		}
+		for _, vs := range byFirst {
+			if len(vs) >= 2 {
+				classes = append(classes, class{base, vs})
+			}
+		}
+	}
+	sort.SliceStable(classes, func(a, b int) bool { return len(classes[a].values) > len(classes[b].values) })
+	shown := make([]bool, len(list))
+	left, checked := len(list), 0
+	for least := len(classes[0].values) - 1; least >= 1 && left > 0; least-- {
+		for _, c := range classes {
+			at := c.values[0]
+			for _, v := range c.values {
+				if shown[v] {
+					at = v
+					break
+				}
+			}
+			var gain []int
+			for _, v := range c.values {
+				if v != at && !shown[v] {
+					gain = append(gain, v)
+				}
+			}
+			if len(gain) < least {
+				continue
+			}
+			s := c.base
+			setSeedWord(&s, 4, at)
+			words := seedWords(list, s)
+			if checked == 0 {
+				if ws, err := s.Words(); err != nil || !slices.Equal(ws, words) {
+					t.Fatalf("words of the seed: %v, differ from Seed.Words", err)
+				}
+			}
+			// What the bytes say, with keys.SeedFromWords: a word of the
+			// class in place of word 5 keeps the checksum.
+			kept := append([]string(nil), words...)
+			kept[4] = list[gain[0]]
+			if _, err := keys.SeedFromWords(kept); err != nil {
+				t.Fatalf("base %x, word %q in place of %q: %v", c.base[:4], kept[4], words[4], err)
+			}
+			typo := seedTypo(t, words, 4)
+			onlyAt(t, typo, words, 4)
+			if _, err := keys.SeedFromWords(typo); !errors.Is(err, keys.ErrChecksum) {
+				t.Fatalf("base %x, %q in place of %q: %v", c.base[:4], typo[4], words[4], err)
+			}
+			for _, v := range gain {
+				shown[v] = true
+			}
+			left -= len(gain)
+			checked++
+		}
+	}
+	if left != 0 {
+		t.Fatalf("%d words of the list keep the checksum of no seed checked", left)
+	}
+	t.Logf("%d seeds checked; each word of the list in place of word 5 keeps the checksum of one of them", checked)
+}
+
+// setSeedWord sets the 11 bits of word k+1 of s to v (k below 23; word 24
+// holds the checksum).
+func setSeedWord(s *keys.Seed, k, v int) {
+	for b := 0; b < 11; b++ {
+		bit := k*11 + b
+		s[bit/8] &^= 1 << (7 - bit%8)
+		s[bit/8] |= byte(v>>(10-b)&1) << (7 - bit%8)
+	}
+}
+
+// seedWords is Seed.Words without the lookup in constant time: the words
+// of s and of the first byte of SHA-256 of s, 11 bits each.
+func seedWords(list []string, s keys.Seed) []string {
+	sum := sha256.Sum256(s[:])
+	bits := append(s[:], sum[0])
+	words := make([]string, keys.SeedWords)
+	for i := range words {
+		v := 0
+		for b := 0; b < 11; b++ {
+			bit := i*11 + b
+			v = v<<1 | int(bits[bit/8]>>(7-bit%8)&1)
+		}
+		words[i] = list[v]
+	}
+	return words
 }
 
 // TestShareTypo: shareTypo breaks the checksum of a share whose words 8
