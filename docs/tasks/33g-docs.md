@@ -3,8 +3,8 @@
 Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahme wie bei 29g: Nachträge an bestehende D-Einträge in DECISIONS und der Nachtrag in HANDOFF sind erlaubt.
 
 - **Basis:** Arbeitsbranch `claude/quirky-keller-hjsl5i`, aktueller Stand, eigener Worktree. Ein Commit mit `Task: docs/tasks/33g-docs.md`, ohne Co-Authored-By, ohne Claude-Session-Zeile, ohne Modellnamen; nicht pushen. Nur Dokumentation, keine `go`-Befehle.
-- **Code der Pakete** (je ein Commit auf c6b2ea2; mit `git show` lesen): 33A 8d557b0, 33B b167652 (Runden 48e8378, b167652), 33C 369860f, 35A 3a688c4. Schreibe „Auftrag 33, Paket 33X“ bzw. „Auftrag 35, Paket 35A“. Die Hashes nach dem Merge und den Volllauf trägt der Orchestrator ein (Platzhalter wie bei 29g).
-- **Quellen:** `docs/tasks/33-nach-m1-nacht4.md`; `docs/tasks/20-notes.md`, Abschnitt „Auftrag 33 (Nacht 24./25.11.): Prüfungen“; ORCHESTRATION Abschnitt 14; Notizen `scratchpad/impl33a/`, `rev33a-spec/`, `rev33a-robust/`, `impl33b/`, `rev33b/`, `impl33b2/`, `rev33b2/`, `impl33c/`, `rev33c/`, `impl33d/`, `impl35a/`, `rev35a/` (je `notes.md`).
+- **Code der Pakete** (zusammengeführt; mit `git show` lesen): 33A 35f05bc, 33B 5d1cf0c, 33C e2c971f, 35A 526cb21 (gelesen am Endstand: 33A 8d557b0, 33B b167652 nach den Runden 48e8378 und b167652, 33C 369860f, 35A 3a688c4; diese Commits sind lokal verloren, ihre Inhalte gleichen den zusammengeführten). Schreibe „Auftrag 33, Paket 33X“ bzw. „Auftrag 35, Paket 35A“. Die Hashes nach dem Merge und den Volllauf trägt der Orchestrator ein (Platzhalter wie bei 29g).
+- **Quellen:** `docs/tasks/33-nach-m1-nacht4.md`; `docs/tasks/20-notes.md`, Abschnitt „Auftrag 33 (Nacht 24./25.11.): Prüfungen“ (mit 33D und 35A); ORCHESTRATION Abschnitt 14. Die Notizen unter `scratchpad/` sind mit dem Container verloren; Meldungen und Verhalten am Code der zusammengeführten Commits prüfen (33A 35f05bc, 33B 5d1cf0c, 33C e2c971f, 35A 526cb21).
 - **Darf ändern:** `docs/RUNBOOK.md`, `docs/AUDIT.md`, `docs/HANDOFF.md`, `docs/tasks/backlog-nach-m1.md`, `docs/DECISIONS.md` (nur Nachträge).
 
 ## Umfang, je Paket am Code prüfen
