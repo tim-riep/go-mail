@@ -49,14 +49,22 @@
 # environment and from the go env file (go env -w), so that -json there
 # cannot turn the output of go version -m into JSON; the build flags
 # that GOFLAGS usually holds do not concern go version.
-# A tool that fails (exit status not 0) during a check makes that
-# program not clean, never clean. So does a tr that exits with 0 but
-# prints nothing, or drops the line of the build setting GOOS (check 3
-# requires the word GOOS, which the build information in the file
-# holds; see check 1). A tool that exits with 0 but prints other wrong
-# output (an awk that prints a number whatever it reads, a grep that
-# passes lines it should not, a tr that drops other parts of the file)
-# is not detected.
+# A tool that fails during a check makes that program not clean, never
+# clean. The exit status of every tool call is checked: go version -m,
+# awk, tr, and grep and sort in the search of check 3 must exit with 0
+# (grep there always selects the line -end- of the search, so 1 means it
+# failed as well), grep -q in the search for the other marks of check 3
+# with 0 (found) or 1 (not found). The search of check 3 fails as well
+# when the line -end-, which follows the output of tr only when tr exits
+# with 0, does not pass grep and sort (a tool that stops before the end
+# of its input), when tr exits with 0 but prints nothing, or drops the
+# line of the build setting GOOS (check 3 requires the word GOOS, which
+# the build information in the file holds; see check 1).
+# Check 1 also fails when go version -m prints nothing or awk prints no
+# number. A tool that exits with 0 but prints other wrong output (an awk
+# that prints a number whatever it reads, a grep that passes lines it
+# should not, a tr that drops other parts of the file, a grep or sort
+# that drops a name) is not detected.
 #
 # The script guards against shipping a test build by mistake, not against
 # a build made to pass it: a build that swaps the files of a tag in
@@ -224,11 +232,27 @@ for arg in "$@"; do
 	# found the setting GOOS, the build information in the file holds
 	# "\tGOOS=". Without the line tr printed nothing, or not the whole
 	# file, though it exited with 0; the search failed as well. (Without
-	# the setting, check 1 has refused the program already.)
-	names=$({ LC_ALL=C tr -c 'A-Z0-9_' '\n' <"$f" && printf '\n%s\n' -end-; } | LC_ALL=C grep -E -e "$pattern" -e '^-end-$' -e '^GOOS$' | LC_ALL=C sort -u)
+	# the setting, check 1 has refused the program already.) A pipeline
+	# gives the exit status of its last command alone (not every sh has
+	# pipefail), so the status of grep follows its output as the line
+	# -grep-<status>, which sort sorts with the rest, and the status of
+	# sort follows its output as the last line -sort-<status>; neither
+	# can come from tr (each holds -). Unless both are 0, the search
+	# failed as well; grep exits with 0 whenever -end- reaches it.
+	names=$({ LC_ALL=C tr -c 'A-Z0-9_' '\n' <"$f" && printf '\n%s\n' -end-; } |
+		{ LC_ALL=C grep -E -e "$pattern" -e '^-end-$' -e '^GOOS$'; printf '%s\n' "-grep-$?"; } |
+		{ LC_ALL=C sort -u; printf '%s\n' "-sort-$?"; })
 	searched=1
 	case $nl$names$nl in
 	*"$nl-end-$nl"*) ;;
+	*) searched=0 ;;
+	esac
+	case $nl$names$nl in
+	*"$nl-grep-0$nl"*) ;;
+	*) searched=0 ;;
+	esac
+	case $nl$names in
+	*"$nl-sort-0") ;;
 	*) searched=0 ;;
 	esac
 	case $nl$names$nl in
@@ -248,7 +272,8 @@ for arg in "$@"; do
 		esac
 	done
 	for n in $names; do
-		case $n in -end- | GOOS) continue ;; esac
+		# -end-, -grep-<status> and -sort-<status> come from the script.
+		case $n in -* | GOOS) continue ;; esac
 		known=0
 		for s in $switches; do
 			case $n in *"$s"*) known=1 ;; esac

@@ -17,7 +17,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // releaseTags are the tags of a test build that scripts/check-release.sh
@@ -42,15 +44,7 @@ func releaseScriptVar(t *testing.T, src, name string) string {
 // some other mix of tags, the file counts as well (more names to check,
 // never fewer).
 func testBuildOnly(expr constraint.Expr) bool {
-	// Eval calls its function for every tag of the expression.
-	named := false
-	expr.Eval(func(tag string) bool {
-		for _, r := range releaseTags {
-			named = named || tag == r
-		}
-		return true
-	})
-	if !named {
+	if len(namedReleaseTags(expr)) == 0 {
 		return false
 	}
 	for _, others := range []bool{true, false} {
@@ -66,6 +60,24 @@ func testBuildOnly(expr constraint.Expr) bool {
 		}
 	}
 	return true
+}
+
+// namedReleaseTags returns the tags of releaseTags that the build
+// constraint expr names, in the order of releaseTags.
+func namedReleaseTags(expr constraint.Expr) []string {
+	named := map[string]bool{}
+	// Eval calls its function for every tag of the expression.
+	expr.Eval(func(tag string) bool {
+		named[tag] = true
+		return true
+	})
+	var tags []string
+	for _, r := range releaseTags {
+		if named[r] {
+			tags = append(tags, r)
+		}
+	}
+	return tags
 }
 
 // fileConstraint returns the build constraint of the Go file f (nil:
@@ -124,16 +136,38 @@ var envSelectors = map[string]bool{"Environ": true, "Getenv": true, "LookupEnv":
 // go.mod (another module; as for go, only a go.mod that os.Stat finds
 // and that is not a directory counts).
 //
+// go build ./... skips a directory whose name begins with "." or "_" or
+// that is named testdata, but a program can import it (import
+// "<module>/internal/_x" builds). Such a directory, and a symbolic link
+// of such a name to a directory, is not read for names; skippedTagged
+// searches the tree under it instead, and each file there that a program
+// importing it would compile and whose build constraint names
+// gomail_test or gomail_dev is a problem (see skippedTagged). vendor is
+// skipped as before.
+//
 // Every symbolic link to a directory is a problem, wherever it is and
 // whatever the directory holds (even nothing, or no Go file, or a
-// directory that the walk reads anyway), unless the link itself is
-// skipped: its name begins with "." or "_", it is named testdata or
-// vendor, or it lies under a skipped directory. That is fail closed: the
-// test does not decide whether go build would compile something there.
+// directory that the walk reads anyway), unless its name begins with "."
+// or "_" or is testdata (skippedTagged searches the directory it points
+// to, as above), it is named vendor, or it lies under a skipped
+// directory (under one named _*, .* or testdata, skippedTagged decides).
+// That is fail closed: the test does not decide whether go build would
+// compile something there.
 // root itself must be a directory, not a symbolic link (WalkDir would
 // read nothing below it); the caller resolves it (releaseRoot). Otherwise,
 // and when the walk fails (a file that does not parse, a directory that
 // cannot be read), the error is returned.
+//
+// An entry below root that is removed while the walk runs is skipped,
+// as if the walk had come later (task 33, rework 33B2): a directory whose
+// reading fails with fs.ErrNotExist, a regular file *.go that is gone
+// when it is parsed, and a directory named _*, .* or testdata that is
+// gone (or now a dangling link) when skippedTagged fails with
+// fs.ErrNotExist. In the checkout of a developer, .git/worktrees and
+// .claude/worktrees change while agents start and end. root itself
+// remains an error. A problem that such a change shows for a moment (a
+// checkout without its go.mod yet) is not skipped here; see
+// settledEnvReads.
 func releaseEnvReads(root string) ([]envRead, []string, error) {
 	if fi, err := os.Lstat(root); err != nil {
 		return nil, nil, err
@@ -148,22 +182,50 @@ func releaseEnvReads(root string) ([]envRead, []string, error) {
 	var problems []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// WalkDir reports an error after it called this function
+			// for the entry: reading a directory (it does not follow a
+			// link there), or the root itself.
+			if path != root && errors.Is(err, fs.ErrNotExist) {
+				return filepath.SkipDir
+			}
 			return err
+		}
+		if releaseWalkHook != nil {
+			releaseWalkHook(path)
 		}
 		if path == root {
 			return nil
 		}
 		name := d.Name()
-		// go build ignores files and directories whose names begin with
-		// "." or "_" (go/build), whatever they hold; it never parses them.
-		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
-			if d.IsDir() {
-				return filepath.SkipDir
+		// go build ./... ignores files and directories whose names begin
+		// with "." or "_" (go/build), whatever they hold, and directories
+		// named testdata; it never parses them. A program can import
+		// such a directory all the same: skippedTagged searches it.
+		hidden := strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+		if hidden || name == "testdata" {
+			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+				p, err := skippedTagged(path)
+				if err != nil {
+					// skippedTagged fails with fs.ErrNotExist only when
+					// top itself is gone since os.Stat above (or, a link,
+					// now dangles): as if os.Stat had failed.
+					if errors.Is(err, fs.ErrNotExist) {
+						return nil
+					}
+					return err
+				}
+				problems = append(problems, p...)
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			return nil
+			if hidden {
+				return nil
+			}
 		}
 		if d.IsDir() {
-			if name == "testdata" || name == "vendor" {
+			if name == "vendor" {
 				return filepath.SkipDir
 			}
 			// Another module: not built with this one. go decides as here
@@ -176,8 +238,10 @@ func releaseEnvReads(root string) ([]envRead, []string, error) {
 		}
 		// WalkDir does not follow a symbolic link, but go build does: a
 		// link to a directory can be a package, a link named *.go is
-		// compiled. The test reads neither, so either is a problem.
-		if d.Type()&fs.ModeSymlink != 0 && name != "testdata" && name != "vendor" {
+		// compiled. The test reads neither, so either is a problem. (A
+		// link named _*, .* or testdata to a directory was searched
+		// above.)
+		if d.Type()&fs.ModeSymlink != 0 && name != "vendor" {
 			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
 				problems = append(problems, fmt.Sprintf("%s: symbolic link to a directory; go build may compile the files under it, this test does not read them", path))
 				return nil
@@ -196,6 +260,10 @@ func releaseEnvReads(root string) ([]envRead, []string, error) {
 		}
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if err != nil {
+			// A regular file (not a link) that was removed.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		dir := filepath.Dir(path)
@@ -281,6 +349,148 @@ func releaseEnvReads(root string) ([]envRead, []string, error) {
 		})
 	}
 	return reads, problems, nil
+}
+
+// skippedTagged returns the problems in the tree under top, a directory
+// (or a symbolic link to one) that go build ./... skips, its name
+// beginning with "." or "_" or named testdata, but that a program can
+// import (task 33 package 33B, list after M1 no. 119). A program that
+// imports top or a directory under it compiles its files whose names
+// end in .go, but not in _test.go, and do not begin with "." or "_",
+// where their build constraint holds. Such a file is a problem when its
+// constraint names gomail_test or gomail_dev (whatever else it says;
+// only the package clause and the comments before it are parsed), when
+// that much does not parse, and when it is not a regular file or a
+// symbolic link to one (go build would read it or fail). A symbolic link
+// to a directory under top is a problem as well, whatever it holds (fail
+// closed, as in releaseEnvReads). A directory with a go.mod (another
+// module, decided as in releaseEnvReads), top included, is not searched.
+// Untagged files are not read for names: go build ./... does not
+// compile them, and the generators under testdata (package main without
+// a tag) are none of a program. top may be a symbolic link: the tree of
+// its target is searched and named under top. A tree that cannot be read
+// is an error, but a directory below top that is removed while the walk
+// runs (reading it fails with fs.ErrNotExist) is skipped, as in
+// releaseEnvReads; top itself gone is an error. A file removed while the
+// walk runs can show as a problem (not a regular file, does not parse),
+// and so can a checkout whose go.mod is not there yet or no more; see
+// settledEnvReads.
+func skippedTagged(top string) ([]string, error) {
+	dir, err := filepath.EvalSymlinks(top)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	var problems []string
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path != dir && errors.Is(err, fs.ErrNotExist) {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		if releaseWalkHook != nil {
+			releaseWalkHook(path)
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		at := filepath.Join(top, rel)
+		problem := func(what string) {
+			problems = append(problems, fmt.Sprintf("%s: %s; go build ./... skips %s, but a program may import it, this test does not read it", at, what, top))
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if fi, err := os.Stat(filepath.Join(path, "go.mod")); err == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+				problem("symbolic link to a directory")
+				return nil
+			}
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			return nil
+		}
+		if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+			problem("not a regular file")
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.PackageClauseOnly|parser.ParseComments)
+		if err != nil {
+			problem(fmt.Sprintf("does not parse (%v)", err))
+			return nil
+		}
+		expr, err := fileConstraint(f)
+		if err != nil {
+			problem(fmt.Sprintf("build constraint does not parse (%v)", err))
+			return nil
+		}
+		if expr != nil {
+			if tags := namedReleaseTags(expr); len(tags) > 0 {
+				problem("build constraint names " + strings.Join(tags, " and "))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return problems, nil
+}
+
+// releaseWalkHook, when not nil, is called with the path of each entry
+// that releaseEnvReads and skippedTagged visit (their roots included),
+// before they look at it, but not for an error that WalkDir reports. It
+// lets TestReleaseEnvReadsVanish remove entries during the walk; no test
+// that sets it runs in parallel.
+var releaseWalkHook func(path string)
+
+// releaseSettle is how long TestReleaseSwitches waits before it walks the
+// tree again to confirm problems (settledEnvReads).
+const releaseSettle = 3 * time.Second
+
+// settledEnvReads calls walk and, when that finds problems, wait, and
+// then walk once more (task 33, rework 33B2). The problems it returns are
+// those that both walks find (each as often as in both), the reads those
+// of the first walk; an error of either walk is returned. In the
+// checkout of a developer a directory can change during a walk: a
+// checkout under .claude/worktrees that git is making has cmd/ before
+// its go.mod (git writes them in this order), one being removed can lose
+// its go.mod first, and a file removed during the walk shows as not a
+// regular file. skippedTagged then reports the files of such a moment
+// as problems of a directory that a program may import; a moment later
+// the directory is a module again or gone. A problem in the tree itself
+// is found by both walks: nothing that go build would compile is left
+// out. A change that lasts longer than the wait is still reported (the
+// test fails, fail closed), and so is one at the same path in both walks
+// (a checkout made again under the same name).
+func settledEnvReads(walk func() ([]envRead, []string, error), wait func()) ([]envRead, []string, error) {
+	reads, problems, err := walk()
+	if err != nil || len(problems) == 0 {
+		return reads, problems, err
+	}
+	wait()
+	_, again, err := walk()
+	if err != nil {
+		return nil, nil, err
+	}
+	n := map[string]int{}
+	for _, p := range again {
+		n[p]++
+	}
+	var both []string
+	for _, p := range problems {
+		if n[p] > 0 {
+			n[p]--
+			both = append(both, p)
+		}
+	}
+	return reads, both, nil
 }
 
 // releaseRoot returns the module root that TestReleaseSwitches walks: two
@@ -401,19 +611,31 @@ func specValue(decl any, name string, f *ast.File, pkg []*ast.File, depth int) (
 // fails the test as well: go build follows the link, the walk does not.
 // So does every other symbolic link to a directory that is not skipped
 // (fail closed, see releaseEnvReads), even one to an empty directory or
-// outside cmd/ and internal/. Files and directories that go build
+// outside cmd/ and internal/. Files and directories that go build ./...
 // ignores (names beginning with "." or "_", testdata, vendor, other
-// modules) are skipped, not parsed. The module root is resolved with
-// filepath.EvalSymlinks first (releaseRoot): reached through a symbolic
-// link, the walk would read nothing. Each name in switches
-// matches pattern (otherwise grep would not pass it to the script) and
-// is read by such a file: the list is the one its comment names, and the
-// collection is not empty.
+// modules) are not read for names. A directory named _*, .* or testdata
+// (or a symbolic link of such a name to one) can be imported all the
+// same; a file under it that such an import compiles fails the test when
+// its build constraint names gomail_test or gomail_dev (skippedTagged;
+// task 33 package 33B, list after M1 no. 119). The module root is
+// resolved with filepath.EvalSymlinks first (releaseRoot): reached
+// through a symbolic link, the walk would read nothing. Each name in
+// switches matches pattern (otherwise grep would not pass it to the
+// script) and is read by such a file: the list is the one its comment
+// names, and the collection is not empty.
+//
+// In the checkout of a developer, .git and .claude/worktrees (both
+// searched: a program can import a directory under them, go build does)
+// change while agents start and end (task 33, rework 33B2). An entry
+// removed during the walk is skipped, and a problem counts only when a
+// second walk releaseSettle later finds it as well (settledEnvReads): a
+// checkout being made or removed lacks its go.mod for a moment.
 //
 // Not covered: a read through a function of a file that production
 // builds compile as well (the name then passes as an argument), through
 // a function or method of another package under another name, or
-// through cgo; files of another module or under testdata.
+// through cgo; files of another module or under vendor; a file without
+// such a tag under a skipped directory that a tagged program imports.
 func TestReleaseSwitches(t *testing.T) {
 	root, err := releaseRoot()
 	if err != nil {
@@ -438,7 +660,9 @@ func TestReleaseSwitches(t *testing.T) {
 		}
 	}
 
-	reads, problems, err := releaseEnvReads(root)
+	reads, problems, err := settledEnvReads(func() ([]envRead, []string, error) {
+		return releaseEnvReads(root)
+	}, func() { time.Sleep(releaseSettle) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,12 +700,27 @@ func TestReleaseSwitches(t *testing.T) {
 // symbolic link named *.go, a dangling one, a link to a directory and a
 // chain of links to a directory through a link named _* are problems,
 // each once, and so is a Unix socket named *.go (never opened); links
-// named *_test.go, _*.go, .*.go or not *.go, and links to a directory
-// named _*, testdata or vendor, are not. A directory with a regular
-// go.mod or a link go.mod to a regular file is another module and not
-// read; one with a dangling link go.mod or a directory go.mod is read, as
-// go builds it. A root that is a symbolic link is an error, not an empty
-// walk.
+// named *_test.go, _*.go, .*.go or not *.go, and a link to a directory
+// named vendor, are not. A directory with a regular go.mod or a link
+// go.mod to a regular file is another module and not read; one with a
+// dangling link go.mod or a directory go.mod is read, as go builds it. A
+// root that is a symbolic link is an error, not an empty walk.
+//
+// Since task 33 (package 33B, list after M1 no. 119): real directories
+// _x, .x, testdata and vendor with Go files that read the environment
+// are not read for names, as go build ./... does not compile them. Under
+// those named _*, .* and testdata (and the links of such names to a
+// directory, _c, _hop and testdata, which were no problem before), which
+// a program can import, each file that such an import compiles and whose
+// constraint names gomail_test or gomail_dev is a problem, once, also
+// through a link *.go and below a subdirectory, and so are a link to a
+// directory, a dangling link *.go and a file whose package clause or
+// build constraint does not parse. Not problems there: files without
+// such a tag (also one that reads the environment, like the generators
+// under testdata), files named _*.go, .*.go, *_test.go or not *.go, a
+// dangling link _*.go, a file with the constraint ignore whose body
+// does not parse, another module (_m with go.mod), and anything under
+// vendor.
 //
 // The socket must be made on Linux (the test fails otherwise); where it
 // cannot be made on another system, the other cases are checked and the
@@ -493,6 +732,8 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 	tagged := func(name string) string {
 		return "//go:build gomail_test\n\npackage main\n\nimport \"os\"\n\nvar v = os.Getenv(\"" + name + "\")\n"
 	}
+	// untagged reads the environment like the generators under testdata.
+	const untagged = "package main\n\nimport \"os\"\n\nfunc main() { _ = os.Getenv(\"GOMAIL_TEST_UNTAGGED\") + os.Environ()[0] }\n"
 	files := map[string]string{
 		"mod/cmd/a/main.go":             "package main\n\nfunc main() {}\n",
 		"mod/cmd/a/env_tagged.go":       tagged("GOMAIL_TEST_A"),
@@ -509,6 +750,29 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 		"outside/env.go":                tagged("GOMAIL_TEST_LINKED"),
 		"outside/go.mod":                "module outside\n",
 		"outside/pkg/env_tagged.go":     tagged("GOMAIL_TEST_LINKED_DIR"),
+		// Real directories that go build ./... skips (task 33 package
+		// 33B, list after M1 no. 119 fund D): none is read for names.
+		// Those named _*, .* and testdata can be imported, so a file
+		// there that an import compiles is a problem when its constraint
+		// names gomail_test or gomail_dev; nothing else there is.
+		"mod/internal/_x/env_tagged.go":           tagged("GOMAIL_TEST_UNDERSCORE_DIR"),
+		"mod/internal/_x/plain.go":                untagged,
+		"mod/internal/_x/_env_tagged.go":          tagged("GOMAIL_TEST_UNDERSCORE_FILE"),
+		"mod/internal/_x/.env_tagged.go":          tagged("GOMAIL_TEST_DOT_FILE"),
+		"mod/internal/_x/env_tagged_test.go":      tagged("GOMAIL_TEST_TEST_FILE"),
+		"mod/internal/_x/notes.txt":               tagged("GOMAIL_TEST_TXT"),
+		"mod/internal/.x/env_tagged.go":           tagged("GOMAIL_TEST_DOT_DIR"),
+		"mod/internal/.x/sub/plain.go":            untagged,
+		"mod/internal/e/e.go":                     "package e\n",
+		"mod/internal/e/testdata/gen/main.go":     untagged,
+		"mod/internal/e/testdata/x/sub/env.go":    "//go:build !gomail_dev\n\npackage sub\n",
+		"mod/internal/e/testdata/x/env_tagged.go": tagged("GOMAIL_TEST_TESTDATA"),
+		"mod/internal/e/testdata/x/bad.go":        "package (\n",
+		"mod/internal/e/testdata/x/badtag.go":     "//go:build gomail_test &&\n\npackage x\n",
+		"mod/internal/e/testdata/x/ignore.go":     "//go:build ignore\n\npackage main\n\nfunc (\n",
+		"mod/internal/_m/go.mod":                  "module m\n",
+		"mod/internal/_m/env_tagged.go":           tagged("GOMAIL_TEST_UNDERSCORE_MODULE"),
+		"mod/vendor/example.com/v/env_tagged.go":  tagged("GOMAIL_TEST_VENDOR"),
 	}
 	for name, text := range files {
 		p := filepath.Join(dir, filepath.FromSlash(name))
@@ -537,6 +801,15 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 		{"internal/d", "_hop"},
 		{"internal/m2/go.mod", filepath.Join(outside, "go.mod")},
 		{"internal/m3/go.mod", filepath.Join(outside, "missing.mod")},
+		// Under a skipped directory: a link to a directory and a
+		// dangling link *.go are problems, a link to a tagged file is
+		// read through, one to an untagged file and a dangling link
+		// _*.go are not problems.
+		{"internal/_x/sub", filepath.Join(outside, "pkg")},
+		{"internal/_x/dead.go", filepath.Join(outside, "missing.go")},
+		{"internal/.x/link.go", filepath.Join(outside, "env.go")},
+		{"internal/.x/plain_link.go", filepath.Join(root, "internal", "_x", "plain.go")},
+		{"internal/.x/_dead.go", filepath.Join(outside, "missing.go")},
 	}
 	for _, l := range links {
 		if err := os.Symlink(l.target, filepath.Join(root, filepath.FromSlash(l.name))); err != nil {
@@ -549,6 +822,31 @@ func TestReleaseEnvReadsWalk(t *testing.T) {
 		filepath.Join(root, "internal", "c") + ": symbolic link to a directory;",
 		filepath.Join(root, "internal", "d") + ": symbolic link to a directory;",
 	}
+	// skipped is a problem of skippedTagged: under the directory top
+	// (below root), the entry at, what was found.
+	skipped := func(top, at, what string) string {
+		top = filepath.Join(root, filepath.FromSlash(top))
+		return filepath.Join(top, filepath.FromSlash(at)) + ": " + what + "; go build ./... skips " + top + ", but a program may import it"
+	}
+	const namesTest = "build constraint names gomail_test"
+	want = append(want,
+		skipped("internal/_x", "env_tagged.go", namesTest),
+		skipped("internal/_x", "sub", "symbolic link to a directory"),
+		skipped("internal/_x", "dead.go", "not a regular file"),
+		skipped("internal/.x", "env_tagged.go", namesTest),
+		skipped("internal/.x", "link.go", namesTest),
+		skipped("internal/e/testdata", "x/sub/env.go", "build constraint names gomail_dev"),
+		skipped("internal/e/testdata", "x/env_tagged.go", namesTest),
+		// The links named _* and testdata to a directory with a
+		// tagged file: an import compiles it as well.
+		skipped("internal/_c", "env_tagged.go", namesTest),
+		skipped("internal/_hop", "env_tagged.go", namesTest),
+		skipped("internal/b/testdata", "env_tagged.go", namesTest),
+	)
+	// A file whose package clause or build constraint does not parse:
+	// the message holds the error.
+	x := filepath.Join(root, "internal", "e", "testdata", "x")
+	want = append(want, filepath.Join(x, "bad.go")+": does not parse (", filepath.Join(x, "badtag.go")+": build constraint does not parse (")
 	// A Unix socket named *.go: releaseEnvReads must report it without
 	// opening it. Should it open the socket all the same, however often,
 	// each open fails at once (ENXIO on Linux), so the walk fails instead
@@ -668,5 +966,279 @@ func TestReleaseSwitchesRootLink(t *testing.T) {
 	}
 	if got != root {
 		t.Errorf("releaseRoot() through %s = %s, want %s", link, got, root)
+	}
+}
+
+// taggedEnvFile is a file of package main whose build constraint names
+// gomail_test and that reads the environment variable name.
+func taggedEnvFile(name string) string {
+	return "//go:build gomail_test\n\npackage main\n\nimport \"os\"\n\nvar v = os.Getenv(\"" + name + "\")\n"
+}
+
+// writeTree writes files (slash-separated names below dir) and their
+// directories.
+func writeTree(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, text := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestReleaseEnvReadsVanish (task 33, rework 33B2): an entry removed
+// while releaseEnvReads walks is skipped, as if the walk had come later,
+// and the walk goes on: a directory of the module, a directory under one
+// named .* that skippedTagged searches (like .git/worktrees/<name> or
+// .claude/worktrees/<name>), a regular file *.go before it is parsed,
+// and a directory named _* after releaseEnvReads found it but before
+// skippedTagged reads it. releaseWalkHook removes each when the walk
+// visits the entry named in the case; WalkDir reads the entries of a
+// directory before it visits them, so a file is removed from the visit
+// of a sibling before it. The root removed during the walk is an error,
+// of releaseEnvReads and of skippedTagged.
+func TestReleaseEnvReadsVanish(t *testing.T) {
+	t.Cleanup(func() { releaseWalkHook = nil })
+	root := filepath.Join(t.TempDir(), "mod")
+	writeTree(t, root, map[string]string{
+		"cmd/a/env_tagged.go":                 taggedEnvFile("GOMAIL_TEST_A"),
+		"internal/gone/env_tagged.go":         taggedEnvFile("GOMAIL_TEST_GONE_DIR"),
+		"internal/v/a/a.go":                   "package a\n",
+		"internal/v/b.go":                     taggedEnvFile("GOMAIL_TEST_GONE_FILE"),
+		"internal/v/c.go":                     taggedEnvFile("GOMAIL_TEST_C"),
+		".gitlike/worktrees/w1/a/b/f":         "",
+		".gitlike/worktrees/w1/env_tagged.go": taggedEnvFile("GOMAIL_TEST_GONE_HIDDEN"),
+		".gitlike/worktrees/w2/env_tagged.go": taggedEnvFile("GOMAIL_TEST_HIDDEN"),
+		"_gone/env_tagged.go":                 taggedEnvFile("GOMAIL_TEST_GONE_SKIPPED"),
+	})
+	// At the visit nth of at (releaseEnvReads and skippedTagged both
+	// visit _gone), gone is removed.
+	cases := []struct {
+		at   string
+		nth  int
+		gone string
+	}{
+		{"internal/gone", 1, "internal/gone"},
+		{"internal/v/a", 1, "internal/v/b.go"},
+		{".gitlike/worktrees/w1", 1, ".gitlike/worktrees/w1"},
+		{"_gone", 2, "_gone"},
+	}
+	visits := map[string]int{}
+	removed := map[string]bool{}
+	releaseWalkHook = func(path string) {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		rel = filepath.ToSlash(rel)
+		visits[rel]++
+		for _, c := range cases {
+			if c.at == rel && c.nth == visits[rel] {
+				if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(c.gone))); err != nil {
+					t.Error(err)
+				}
+				removed[c.gone] = true
+			}
+		}
+	}
+	reads, problems, err := releaseEnvReads(root)
+	releaseWalkHook = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if !removed[c.gone] {
+			t.Errorf("%s was not removed: the walk did not visit %s %d times", c.gone, c.at, c.nth)
+		}
+	}
+	var names []string
+	for _, r := range reads {
+		names = append(names, r.name)
+	}
+	sort.Strings(names)
+	if got, want := strings.Join(names, " "), "GOMAIL_TEST_A GOMAIL_TEST_C"; got != want {
+		t.Errorf("names read: %s, want %s", got, want)
+	}
+	top := filepath.Join(root, ".gitlike")
+	want := filepath.Join(top, "worktrees", "w2", "env_tagged.go") + ": build constraint names gomail_test; go build ./... skips " + top + ","
+	if len(problems) != 1 || !strings.HasPrefix(problems[0], want) {
+		t.Errorf("problems %q, want one beginning %q", problems, want)
+	}
+
+	// The root itself, of releaseEnvReads and of skippedTagged.
+	for _, walk := range []struct {
+		name string
+		f    func(string) error
+	}{
+		{"releaseEnvReads", func(dir string) error { _, _, err := releaseEnvReads(dir); return err }},
+		{"skippedTagged", func(dir string) error { _, err := skippedTagged(dir); return err }},
+	} {
+		dir := filepath.Join(t.TempDir(), "_root")
+		writeTree(t, dir, map[string]string{"sub/env_tagged.go": taggedEnvFile("GOMAIL_TEST_ROOT")})
+		releaseWalkHook = func(path string) {
+			if path == dir {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		err := walk.f(dir)
+		releaseWalkHook = nil
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s(%s), the root removed during the walk: %v, want an error fs.ErrNotExist", walk.name, dir, err)
+		}
+	}
+}
+
+// TestReleaseSettle (task 33, rework 33B2): settledEnvReads returns the
+// problems that both walks find, each as often as in both, and the reads
+// of the first; it waits and walks again only after problems, and an
+// error of either walk is its error. Then in a tree: a checkout under
+// .claude/worktrees without its go.mod (as git makes one: cmd/ first),
+// another one that is being removed, and a skipped directory _p with a
+// tagged file. The first walk reports all three; after the wait (which
+// writes the go.mod and removes the other checkout) only _p is left.
+func TestReleaseSettle(t *testing.T) {
+	type result struct {
+		reads    []envRead
+		problems []string
+		err      error
+	}
+	errWalk := errors.New("walk failed")
+	r1 := []envRead{{"a.go:1:1", "GOMAIL_TEST_A"}}
+	r2 := []envRead{{"b.go:1:1", "GOMAIL_TEST_B"}}
+	for _, c := range []struct {
+		name     string
+		walks    []result
+		waits    int
+		problems []string
+		err      error
+	}{
+		{"no problems", []result{{r1, nil, nil}}, 0, nil, nil},
+		{"first fails", []result{{nil, nil, errWalk}}, 0, nil, errWalk},
+		{"both", []result{{r1, []string{"a", "b", "b", "c"}, nil}, {r2, []string{"c", "b", "d"}, nil}}, 1, []string{"b", "c"}, nil},
+		{"gone", []result{{r1, []string{"a"}, nil}, {r2, nil, nil}}, 1, nil, nil},
+		{"second fails", []result{{r1, []string{"a"}, nil}, {r2, []string{"a"}, errWalk}}, 1, nil, errWalk},
+	} {
+		n, waits := 0, 0
+		reads, problems, err := settledEnvReads(func() ([]envRead, []string, error) {
+			n++
+			if n > len(c.walks) {
+				t.Fatalf("%s: walk %d, want at most %d", c.name, n, len(c.walks))
+			}
+			w := c.walks[n-1]
+			return w.reads, w.problems, w.err
+		}, func() { waits++ })
+		if n != len(c.walks) || waits != c.waits {
+			t.Errorf("%s: %d walks, %d waits, want %d, %d", c.name, n, waits, len(c.walks), c.waits)
+		}
+		if !errors.Is(err, c.err) {
+			t.Errorf("%s: error %v, want %v", c.name, err, c.err)
+		}
+		if strings.Join(problems, " ") != strings.Join(c.problems, " ") {
+			t.Errorf("%s: problems %q, want %q", c.name, problems, c.problems)
+		}
+		if first := len(reads) == 1 && reads[0] == r1[0]; first != (c.err == nil) {
+			t.Errorf("%s: reads %q; want those of the first walk unless an error", c.name, reads)
+		}
+	}
+
+	root := filepath.Join(t.TempDir(), "mod")
+	writeTree(t, root, map[string]string{
+		"go.mod":              "module example.com/mod\n",
+		"cmd/a/env_tagged.go": taggedEnvFile("GOMAIL_TEST_A"),
+		".claude/worktrees/new/cmd/a/env_tagged.go":  taggedEnvFile("GOMAIL_TEST_A"),
+		".claude/worktrees/gone/cmd/a/env_tagged.go": taggedEnvFile("GOMAIL_TEST_A"),
+		"_p/env_tagged.go":                           taggedEnvFile("GOMAIL_TEST_P"),
+	})
+	walk := func() ([]envRead, []string, error) { return releaseEnvReads(root) }
+	if _, problems, err := walk(); err != nil || len(problems) != 3 {
+		t.Fatalf("first walk: %q, %v; want 3 problems", problems, err)
+	}
+	reads, problems, err := settledEnvReads(walk, func() {
+		if err := os.WriteFile(filepath.Join(root, ".claude", "worktrees", "new", "go.mod"), []byte("module example.com/mod\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(root, ".claude", "worktrees", "gone")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reads) != 1 || reads[0].name != "GOMAIL_TEST_A" {
+		t.Errorf("reads %q, want GOMAIL_TEST_A", reads)
+	}
+	want := filepath.Join(root, "_p", "env_tagged.go") + ": build constraint names gomail_test;"
+	if len(problems) != 1 || !strings.HasPrefix(problems[0], want) {
+		t.Errorf("problems %q, want one beginning %q", problems, want)
+	}
+}
+
+// TestReleaseEnvReadsErrors (task 33, rework 33B2): an error during the
+// walk that does not say that an entry is gone fails releaseEnvReads; it
+// is not skipped like a removed entry: a file of the module that does
+// not parse, and a directory that cannot be read, of the module
+// (internal/deep) and under _deep (an error of skippedTagged; _deep
+// also as a symbolic link to a directory outside the module, which only
+// skippedTagged reads). A test run as root reads every directory, so the
+// error there is a path too long for the system: a chain of directories
+// whose path exceeds PATH_MAX (4096 bytes on Linux), each made relative
+// to its parent with os.Root. The paths only on Linux, where the limit
+// is known.
+func TestReleaseEnvReadsErrors(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mod")
+	writeTree(t, root, map[string]string{"cmd/a/main.go": "package main\n\nfunc main() {}\n", "cmd/a/bad.go": "package (\n"})
+	if reads, problems, err := releaseEnvReads(root); err == nil || !strings.Contains(err.Error(), "bad.go") {
+		t.Errorf("releaseEnvReads, a file that does not parse: %q, %q, %v; want its error", reads, problems, err)
+	}
+	if runtime.GOOS != "linux" {
+		t.Skipf("PATH_MAX of %s not known to this test", runtime.GOOS)
+	}
+	for _, under := range []string{"internal/deep", "_deep", "_deep link"} {
+		dir := t.TempDir()
+		root := filepath.Join(dir, "mod")
+		deep := filepath.Join(root, filepath.FromSlash(under))
+		if under == "_deep link" {
+			deep = filepath.Join(dir, "outside")
+		}
+		writeTree(t, deep, map[string]string{"x.go": "package x\n"})
+		writeTree(t, root, map[string]string{"cmd/a/main.go": "package main\n\nfunc main() {}\n"})
+		if under == "_deep link" {
+			if err := os.Symlink(deep, filepath.Join(root, "_deep")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r, err := os.OpenRoot(deep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := strings.Repeat("d", 200)
+		for i := 0; i < 25; i++ {
+			if err := r.Mkdir(name, 0o755); err != nil {
+				r.Close()
+				t.Fatal(err)
+			}
+			next, err := r.OpenRoot(name)
+			r.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			r = next
+		}
+		err = r.WriteFile("env_tagged.go", []byte(taggedEnvFile("GOMAIL_TEST_DEEP")), 0o644)
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		reads, problems, err := releaseEnvReads(root)
+		if !errors.Is(err, syscall.ENAMETOOLONG) {
+			t.Errorf("releaseEnvReads, a path too long under %s: %q, %q, %v; want the error ENAMETOOLONG", under, reads, problems, err)
+		}
 	}
 }

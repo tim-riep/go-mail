@@ -140,10 +140,14 @@ func toolPath(t *testing.T, env []string, dir, name string, omit []string, stubs
 // information), files without build information, a directory, an
 // unreadable file, a missing file, no argument, a PATH without go or
 // without awk, a go command that fails or prints nothing, a tool that
-// fails or prints no number, and a tr that exits with 0 but prints
-// nothing. A production program that ends with a capital letter (as a
-// darwin/arm64 program may) passes. Programs named -m and a\cb are
-// checked as files and named as given. The test program of
+// fails or prints no number, a tr that exits with 0 but prints
+// nothing, and a grep or sort in the search for test switches that
+// passes its whole output on and then exits with a status other than 0
+// (task 33 package 33B; list after M1 no. 110; for grep also 1, as it
+// always selects the line -end-), while the same wrappers exiting with 0
+// leave the program clean. A production program that ends with a
+// capital letter (as a darwin/arm64 program may) passes. Programs named
+// -m and a\cb are checked as files and named as given. The test program of
 // gomail-witness that go test -c builds without tags (its build
 // information is that of a production build) is refused for the marks
 // testing.tRunner and testing.MainStart (task 28 package 28B, list after
@@ -459,26 +463,49 @@ func TestCheckRelease(t *testing.T) {
 		// A tool that fails, or awk that prints no number, makes the
 		// program not clean.
 		p := filepath.Join(prod, "gomail-witness")
-		tr, err := exec.LookPath("tr")
-		if err != nil {
-			t.Fatal(err)
+		tool := map[string]string{}
+		for _, n := range []string{"tr", "grep", "sort"} {
+			path, err := exec.LookPath(n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tool[n] = "'" + path + "'"
 		}
+		// grepE runs grep and then exits with the status given, when
+		// called as grep -E (the search for test switches), and runs grep
+		// alone otherwise (the searches with grep -q).
+		grepE := func(status string) string {
+			return "case $1 in -E) " + tool["grep"] + " \"$@\"; exit " + status + " ;; esac\nexec " + tool["grep"] + " \"$@\""
+		}
+		const search = "Suche nach Testschaltern gescheitert (tr, grep, sort); nicht geprüft"
 		for i, c := range []struct {
 			tool, stub string
 			want       []string
+			// n is the number of findings, also counting those not in
+			// want.
+			n int
 		}{
-			{"awk", "exit 2", []string{"Auswertung der Build-Informationen gescheitert (awk)"}},
-			{"awk", "echo x", []string{"Auswertung der Build-Informationen gescheitert (awk)"}},
-			{"tr", "exit 2", []string{"Suche nach Testschaltern gescheitert"}},
+			{"awk", "exit 2", []string{"Auswertung der Build-Informationen gescheitert (awk)"}, 1},
+			{"awk", "echo x", []string{"Auswertung der Build-Informationen gescheitert (awk)"}, 1},
+			{"tr", "exit 2", []string{search}, 1},
 			// A tr that prints its whole output and then fails: the word
 			// GOOS is there, only the missing line -end- tells.
-			{"tr", "'" + tr + "' \"$@\"\nexit 2", []string{"Suche nach Testschaltern gescheitert"}},
+			{"tr", tool["tr"] + " \"$@\"\nexit 2", []string{search}, 1},
 			// A tr that exits with 0 and prints nothing (list after M1
 			// no. 97 H1): the word GOOS of the build information is
 			// missing from its output.
-			{"tr", "exit 0", []string{"Suche nach Testschaltern gescheitert"}},
-			{"grep", "exit 2", []string{"Suche nach Testschaltern gescheitert", `Suche nach "INSECURE - DEVELOPMENT ONLY" gescheitert (grep)`}},
-			{"sort", "exit 2", []string{"Suche nach Testschaltern gescheitert"}},
+			{"tr", "exit 0", []string{search}, 1},
+			{"grep", "exit 2", []string{search, `Suche nach "INSECURE - DEVELOPMENT ONLY" gescheitert (grep)`}, 5},
+			{"sort", "exit 2", []string{search}, 1},
+			// A grep or sort in the search for test switches that passes
+			// all its output on, the line -end- included, and then fails
+			// (task 33 package 33B, list after M1 no. 110): only its exit
+			// status tells. For grep, 1 fails as well: it selects -end-
+			// at least. The searches with grep -q succeed.
+			{"grep", grepE("2"), []string{search}, 1},
+			{"grep", grepE("1"), []string{search}, 1},
+			{"sort", tool["sort"] + " \"$@\"\nexit 2", []string{search}, 1},
+			{"sort", tool["sort"] + " \"$@\"\nexit 1", []string{search}, 1},
 		} {
 			failing := toolPath(t, env, dir, "failing-"+string(rune('a'+i)), nil, map[string]string{c.tool: c.stub})
 			code, stdout, stderr := checkRelease(t, shell, script, "", failing, p)
@@ -489,6 +516,23 @@ func TestCheckRelease(t *testing.T) {
 				if !strings.Contains(stderr, p+": "+w) {
 					t.Fatalf("%s %q: %q missing\nstderr:\n%s", c.tool, c.stub, w, stderr)
 				}
+			}
+			if n := strings.Count(stderr, "check-release.sh: "+p+": "); n != c.n {
+				t.Fatalf("%s %q: %d findings, want %d\nstderr:\n%s", c.tool, c.stub, n, c.n, stderr)
+			}
+		}
+
+		// Controls: the same wrappers of grep and sort exiting with 0
+		// leave the program clean, so the cases above fail for the exit
+		// status alone, not for the wrapper.
+		for i, c := range []struct{ tool, stub string }{
+			{"grep", "case $1 in -E) " + tool["grep"] + " \"$@\"; exit 0 ;; esac\nexec " + tool["grep"] + " \"$@\""},
+			{"sort", tool["sort"] + " \"$@\"\nexit 0"},
+		} {
+			passing := toolPath(t, env, dir, "passing-"+string(rune('a'+i)), nil, map[string]string{c.tool: c.stub})
+			code, stdout, stderr := checkRelease(t, shell, script, "", passing, p)
+			if code != 0 || stderr != "" || !strings.HasPrefix(stdout, p+": Produktionsbuild (") {
+				t.Fatalf("%s %q: exit status %d, want 0\nstdout:\n%s\nstderr:\n%s", c.tool, c.stub, code, stdout, stderr)
 			}
 		}
 	})
