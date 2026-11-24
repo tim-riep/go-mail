@@ -46,3 +46,13 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich, dazu di
 ## Fertig
 
 Wie Auftrag 24: Läufe, Gegenbelege per Mutation, genau ein Commit auf c6b2ea2 je Paket (33D ohne Commit), Notizen. Der Bericht nennt außerdem Vorschläge für den Doku-Nachzug.
+
+## Nacharbeit 33B2 (zweite Runde)
+
+Ausgangspunkt ist 48e8378 (33B). Ergebnis ist genau ein Commit auf c6b2ea2, der 33B insgesamt enthält. Quelle: Prüfung 33B (`scratchpad/rev33b/notes.md`, 20-notes „33B“).
+
+1. **F1 (niedrig):** Ein Verzeichnis, das während des Durchlaufs verschwindet (`fs.ErrNotExist` unterhalb der durchsuchten Wurzel, etwa ein Worktree, der gerade gelöscht wird), lässt `TestReleaseSwitches` nicht mehr scheitern; die Wurzel selbst bleibt ein Fehler. Ein Verzeichnis ohne `go.mod`, das gerade entsteht oder verschwindet, darf keinen falschen Treffer ergeben; prüfe, ob `.git` gezielt übersprungen werden kann (keine Go-Pakete darin) und ob `.claude/worktrees` als eigene Module sicher erkannt werden. Kein Fall darf still wegfallen, den `go build` übersetzen würde. Beleg mit dem Wettlauf aus `scratchpad/rev33b/churn.log` (Skript im selben Ordner).
+2. **H1:** Kopf von `check-release.sh`: der Satz zu `-end-` wie in der Prüfung vorgeschlagen.
+3. **H2:** Im echten `testdata/`-Ordner des Walk-Baums eine getaggte Datei, die die Umgebung liest (`GOMAIL_TEST_TESTDATA`); erwartet: ein Problem, der Name wird nicht gelesen.
+4. **H3:** Den Fehlerweg von `skippedTagged` testen, falls ohne root-Tricks möglich (sonst Grund in den Notizen); die tote Bedingung `name != "testdata"` entfernen, wenn sie wirklich unerreichbar ist.
+5. **Läufe** wie in Paket 33B, dazu der Wettlauf aus Punkt 1 (mindestens 150 Läufe, kein FAIL).
