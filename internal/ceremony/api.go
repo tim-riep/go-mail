@@ -713,7 +713,18 @@ type PublishOptions struct {
 	// touch witnesses.rec) or "was not replaced" when the rename failed
 	// (its cause may be another process that changed the name, a
 	// directory put there for example), then "nothing is logged" and
-	// the remedy (run the same publish again). It is not called, and
+	// the remedy (run the same publish again). When the rename happened
+	// but witnesses.rec is not the file publish wrote when it is looked
+	// at again (store.ErrReplacedMeanwhile: another process put
+	// something else under the temporary name, or changed witnesses.rec
+	// after the rename; review of task 33 A, H1), the error says "is not
+	// the file publish wrote" instead, and WitnessesReplaced and
+	// WitnessesLinkReplaced are not called: witnesses.rec was replaced,
+	// but not by the pin's witnesses. For every
+	// store.ErrReplacedMeanwhile the remedy names the other process
+	// (stop it, look at platform/, run the same publish again). The
+	// replacement after this callback is checked up to the Root.Lstat
+	// of that check; a change after it is not seen. It is not called, and
 	// nothing is announced, when witnesses.rec is written for the first
 	// time.
 	WitnessesReplacing func(before *witness.Witnesses, link string, after *witness.Witnesses)

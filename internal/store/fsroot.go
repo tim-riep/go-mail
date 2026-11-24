@@ -129,37 +129,178 @@ func ReadDirIn(root *os.Root) ([]fs.DirEntry, error) {
 	return entries, err
 }
 
+// ErrReplacedMeanwhile reports that a name the functions of this file
+// wrote through a temporary file is not that file when they look at it
+// again with Root.Lstat (backlog 108, review of task 33 A, H1): after
+// the rename or link, name is missing, is not a regular file or is
+// another file than the one written (os.SameFile against the fstat of
+// the temporary file); or, on an error before, the temporary name is
+// missing or is not the file written any more. Another process changed
+// the directory meanwhile. Nothing that is not the file written is
+// removed: such an entry stays where it is, and the error names it.
+var ErrReplacedMeanwhile = errors.New("another process changed the directory meanwhile")
+
+// tempInHook, if set, is called by the functions of this file that
+// write through a temporary file, with the root, the temporary name and
+// the point: "written" after the data are written and synced, before
+// the close; "rename" or "link" before the rename or link to the name;
+// "renamed" or "linked" after it, before the name is looked at again.
+// Only tests set it (SetTempInHook, in a build with the tag gomail_test
+// only, for the tests of gomail-ceremony publish): it stands for
+// another process that changes the directory at that point.
+var tempInHook func(root *os.Root, tmp, point string)
+
+func callTempInHook(root *os.Root, tmp, point string) {
+	if tempInHook != nil {
+		tempInHook(root, tmp, point)
+	}
+}
+
+// written is a temporary file that writeTempIn wrote: its name in the
+// directory, the FileInfo of fstat on its descriptor right after the
+// open, and held, a second descriptor of the same open file (a
+// duplicate, holdFile; never an open of the name), kept until the
+// caller is done. held keeps the inode in use after the close, so that
+// its number is not given to another file meanwhile: ext4 gives the
+// number of an inode freed by an unlink at once to the next file
+// created, and a file of another process could then look like the file
+// written to os.SameFile (review of task 34 A, M4). Where there is no
+// duplicate (Windows, Plan 9, js and wasip1: holdFile), held is nil;
+// on Windows a second handle opened without FILE_SHARE_DELETE would
+// make the rename fail, and the comparison rests on the file ID of
+// NTFS, which carries a sequence number.
+type written struct {
+	tmp  string
+	fi   fs.FileInfo
+	held *os.File
+}
+
+// release closes held.
+func (w *written) release() {
+	if w.held != nil {
+		w.held.Close()
+	}
+}
+
+// differs looks at name in the directory that root holds with
+// Root.Lstat (never an open: a FIFO or a device under the name is not
+// opened) and returns "" if it is the file written, a regular file that
+// os.SameFile takes for it, and otherwise what it is instead: "missing",
+// "not a regular file", "another file", or that it cannot be looked at,
+// with the error of Root.Lstat.
+func (w *written) differs(root *os.Root, name string) string {
+	fi, err := root.Lstat(name)
+	switch {
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+		return "missing"
+	case err != nil:
+		return "not to be looked at (" + underlying(err).Error() + ")"
+	case !fi.Mode().IsRegular():
+		return "not a regular file"
+	case !os.SameFile(fi, w.fi):
+		return "another file"
+	}
+	return ""
+}
+
+// meanwhileErr is ErrReplacedMeanwhile for name of the directory that
+// root holds, which is what instead of the file written (differs);
+// step is the step after which it was looked at ("rename", "link"), or
+// "" for the temporary name on an error, which stays as it is.
+func meanwhileErr(root *os.Root, name, what, step string) error {
+	p := filepath.Join(root.Name(), name)
+	switch {
+	case step != "" && what == "missing":
+		return fmt.Errorf("store: after the %s, %s is missing: %w", step, p, ErrReplacedMeanwhile)
+	case step != "":
+		return fmt.Errorf("store: after the %s, %s is %s, not the file written: %w", step, p, what, ErrReplacedMeanwhile)
+	case what == "missing":
+		return fmt.Errorf("store: %s is missing: %w", p, ErrReplacedMeanwhile)
+	}
+	return fmt.Errorf("store: %s is %s, not the file written, and stays: %w", p, what, ErrReplacedMeanwhile)
+}
+
+// check returns nil if name is the file written after step (the rename
+// or link to it), and ErrReplacedMeanwhile otherwise. The window left
+// is between the rename or link and the Root.Lstat of the check:
+// another process that changes name in it and puts the file written
+// back before the Root.Lstat goes unseen, as does any change after the
+// Root.Lstat; what a reader of name finds in that window is not this
+// function's to tell.
+func (w *written) check(root *os.Root, name, step string) error {
+	if what := w.differs(root, name); what != "" {
+		return meanwhileErr(root, name, what, step)
+	}
+	return nil
+}
+
+// removeTemp removes the temporary name on an error (cause) if it is
+// still the file written (differs) and returns cause; the error of the
+// removal is not reported, as before. If the name is anything else, or
+// missing, nothing is removed: the entry belongs to another process and
+// stays, and the error is cause and ErrReplacedMeanwhile (errors.Is
+// holds for both). The window left is between the Root.Lstat of differs
+// and the unlink of removeNameIn: an entry that another process puts
+// under the temporary name in it is removed (unlink removes a name,
+// whatever it is then; no system call removes a name only if it is a
+// given inode), a directory never.
+func (w *written) removeTemp(root *os.Root, cause error) error {
+	if what := w.differs(root, w.tmp); what != "" {
+		return fmt.Errorf("%w; %w", cause, meanwhileErr(root, w.tmp, what, ""))
+	}
+	removeNameIn(root, w.tmp)
+	return cause
+}
+
 // writeTempIn writes data to a new temporary file with mode perm in the
-// directory that root holds, syncs and closes it, and returns its name;
-// on an error it removes the name again where that is possible (not in
-// a directory with chattr +a, for example). The errors name the
-// temporary file as writeTemp does ("open <dir>/.tmp-...: ...",
-// pathErrIn).
-func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
+// directory that root holds, syncs and closes it, and returns it
+// (written; the caller releases it). On an error it removes the name
+// again where that is possible (not in a directory with chattr +a, for
+// example), and only if it is still the file it created
+// (written.removeTemp): an entry that another process put under the
+// name stays, and the error is ErrReplacedMeanwhile as well. If the
+// fstat right after the open fails, the name cannot be compared and
+// stays. The errors name the temporary file as writeTemp does ("open
+// <dir>/.tmp-...: ...", pathErrIn).
+func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (*written, error) {
 	var rnd [8]byte
 	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
-		return "", err
+		return nil, err
 	}
 	tmp := tmpPrefix + hex.EncodeToString(rnd[:])
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return "", pathErrIn(root, tmp, err)
+		return nil, pathErrIn(root, tmp, err)
 	}
-	err = f.Chmod(perm)
+	w := &written{tmp: tmp}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, pathErrIn(root, tmp, err)
+	}
+	w.fi = fi
+	w.held, err = holdFile(f)
+	if err == nil {
+		err = f.Chmod(perm)
+	}
 	if err == nil {
 		_, err = f.Write(data)
 	}
 	if err == nil {
 		err = f.Sync()
 	}
+	if err == nil {
+		callTempInHook(root, tmp, "written")
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
-		removeNameIn(root, tmp)
-		return "", pathErrIn(root, tmp, err)
+		err = w.removeTemp(root, pathErrIn(root, tmp, err))
+		w.release()
+		return nil, err
 	}
-	return tmp, nil
+	return w, nil
 }
 
 // ReplaceFileIn is WriteFileAtomicIn without its last step: it writes
@@ -169,33 +310,56 @@ func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
 // once name is replaced, whether or not the sync of the directory
 // succeeds, uses it (gomail-ceremony publish reports a replaced
 // witnesses.rec: backlog 83). The rename replaces a symbolic link
-// itself, never its target; a directory under name is an error. When
-// the temporary file or the rename fails, the temporary file is removed
-// again where that is possible (not in a directory with chattr +a, for
-// example: it stays there), and this function has not replaced name;
-// it does not say that name is as it was before, since its error may
-// come from another process that changed name or the temporary file
-// meanwhile (a directory put under name, for example; backlog 118). A
-// failing rename is "rename <dir>/.tmp-... <dir>/<name>: ...", an
-// *os.LinkError, as for WriteFileAtomic; the errors of the temporary
-// file name it as writeTempIn does.
+// itself, never its target; a directory under name is an error.
+//
+// After the rename, name is looked at again with Root.Lstat
+// (written.check; backlog 108, review of task 33 A, H1): it must be a
+// regular file that os.SameFile takes for the temporary file written
+// (fstat on its descriptor, whose duplicate held keeps the inode).
+// Otherwise the error is ErrReplacedMeanwhile: another process put
+// something else under the temporary name before the rename (a
+// directory, which renameat(2) puts over a missing name or an empty
+// directory, a FIFO, a link, another file), or changed name after it.
+// That entry is left under name; nothing is removed. There is no check
+// before the rename: the one after it sees every such change up to its
+// Root.Lstat (the window left is written.check's).
+//
+// When the temporary file or the rename fails, the temporary name is
+// removed again where that is possible (not in a directory with
+// chattr +a, for example: it stays there) and only if it is still the
+// file written (written.removeTemp; ErrReplacedMeanwhile otherwise),
+// and this function has not replaced name; it does not say that name
+// is as it was before, since its error may come from another process
+// that changed name or the temporary file meanwhile (a directory put
+// under name, for example; backlog 118). A failing rename is "rename
+// <dir>/.tmp-... <dir>/<name>: ...", an *os.LinkError, as for
+// WriteFileAtomic; the errors of the temporary file name it as
+// writeTempIn does, an *fs.PathError (or, for crypto/rand, no path).
+// So an ErrReplacedMeanwhile carries an *os.LinkError when the rename
+// failed, an *fs.PathError when the temporary file failed, and neither
+// when the rename happened and name is not the file written
+// (gomail-ceremony publish tells these apart).
 func ReplaceFileIn(root *os.Root, name string, data []byte) error {
-	tmp, err := writeTempIn(root, data, FilePerm)
+	w, err := writeTempIn(root, data, FilePerm)
 	if err != nil {
 		return err
 	}
-	if err := root.Rename(tmp, name); err != nil {
-		removeNameIn(root, tmp)
-		return pathErrIn(root, name, err)
+	defer w.release()
+	callTempInHook(root, w.tmp, "rename")
+	if err := root.Rename(w.tmp, name); err != nil {
+		return w.removeTemp(root, pathErrIn(root, name, err))
 	}
-	return nil
+	callTempInHook(root, w.tmp, "renamed")
+	return w.check(root, name, "rename")
 }
 
 // WriteFileAtomicIn is WriteFileAtomic for the file name in the
 // directory that root holds (backlog 72): temporary file, fsync, rename
 // and fsync of the directory all go through root, so the file lands in
 // that directory even if its path names another directory by now, or a
-// symbolic link.
+// symbolic link. Its errors are those of ReplaceFileIn
+// (ErrReplacedMeanwhile included) and of SyncDirIn; the directory is
+// not synced after an error of ReplaceFileIn.
 func WriteFileAtomicIn(root *os.Root, name string, data []byte) error {
 	if err := ReplaceFileIn(root, name, data); err != nil {
 		return err
@@ -210,20 +374,53 @@ func WriteFileAtomicIn(root *os.Root, name string, data []byte) error {
 // to name and fsync of the directory all go through root. A failing
 // link is "link <dir>/.tmp-... <dir>/<name>: ...", as for
 // CreateFileAtomic.
+//
+// After the link, name is looked at again as by ReplaceFileIn
+// (written.check): a link of something else that another process put
+// under the temporary name (link(2) links a FIFO, a socket or a
+// symbolic link itself), or a change of name after the link, is
+// ErrReplacedMeanwhile, and the entry stays under name. The temporary
+// name is removed after the link, and on every error, only if it is
+// still the file written (written.removeTemp); otherwise it stays and
+// the error is ErrReplacedMeanwhile (errors.Is holds for ErrExists as
+// well when the link found name present). An error of the removal
+// after a link that succeeded and was checked is returned as before
+// (ErrReplacedMeanwhile when the temporary name is gone by then): name
+// is the file written then, but the directory is not synced. The
+// window of written.removeTemp is on this path also after a link that
+// succeeded: between the Root.Lstat of the temporary name and its
+// unlink.
 func CreateFileAtomicIn(root *os.Root, name string, data []byte) error {
-	tmp, err := writeTempIn(root, data, FilePerm)
+	w, err := writeTempIn(root, data, FilePerm)
 	if err != nil {
 		return err
 	}
-	defer removeNameIn(root, tmp)
-	if err := root.Link(tmp, name); err != nil {
+	defer w.release()
+	callTempInHook(root, w.tmp, "link")
+	if err := root.Link(w.tmp, name); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("%w: %s", ErrExists, filepath.Base(name))
+			err = fmt.Errorf("%w: %s", ErrExists, filepath.Base(name))
+		} else {
+			err = pathErrIn(root, name, err)
 		}
-		return pathErrIn(root, name, err)
+		return w.removeTemp(root, err)
 	}
-	if err := removeNameIn(root, tmp); err != nil {
-		return err
+	callTempInHook(root, w.tmp, "linked")
+	cerr := w.check(root, name, "link")
+	if what := w.differs(root, w.tmp); what != "" {
+		if cerr == nil {
+			cerr = meanwhileErr(root, w.tmp, what, "")
+		}
+	} else if err := removeNameIn(root, w.tmp); err != nil && cerr == nil {
+		cerr = err
+		if errors.Is(err, fs.ErrNotExist) {
+			// Gone between the Root.Lstat and the unlink: removed or
+			// renamed by another process.
+			cerr = meanwhileErr(root, w.tmp, "missing", "")
+		}
+	}
+	if cerr != nil {
+		return cerr
 	}
 	return SyncDirIn(root)
 }

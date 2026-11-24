@@ -1188,14 +1188,14 @@ func runPublish(opts PublishOptions) error {
 			// rename replaces a symbolic or hard link itself, never its
 			// target or the file under its other name.
 			if err := store.WriteFileAtomicIn(pd, n, files[n].data); err != nil {
-				return err
+				return writeErr(st, n, err)
 			}
 			wrote = true
 		} else if err := store.CreateFileAtomicIn(pd, n, files[n].data); err == nil {
 			wrote = true
 		} else {
-			if !errors.Is(err, store.ErrExists) {
-				return err
+			if errors.Is(err, store.ErrReplacedMeanwhile) || !errors.Is(err, store.ErrExists) {
+				return writeErr(st, n, err)
 			}
 			// The name was missing above (a dangling link is not missing for
 			// readEntry): another process wrote it meanwhile. A link written
@@ -1242,7 +1242,7 @@ func runPublish(opts PublishOptions) error {
 			if announced {
 				return replaceFailedErr(st, err)
 			}
-			return err
+			return writeErr(st, WitnessesFile, err)
 		}
 		wrote = true
 		// witnesses.rec is replaced from here on: the callbacks report it
@@ -1314,17 +1314,21 @@ func runPublish(opts PublishOptions) error {
 // witnesses.rec after the replacement is announced (WitnessesReplacing,
 // whether or not it is set; review of task 28 A, F3): the line of the
 // command line says "fehlt die nächste Zeile, platform/witnesses.rec
-// selbst ansehen", and this error says what there is to see. No error
-// of store.ReplaceFileIn comes after a replacement: writing, syncing
-// and closing the temporary file come before the rename, and a rename
-// that fails (renameat(2), or the check of os.Root for a directory
-// under the name) does not replace witnesses.rec. The temporary file
-// is removed again where that is possible; one left (in an append-only
-// platform/, for example) is removed and reported by a later publish
-// before its checks (TempRemoved), which refuses while it cannot
-// remove it. Nothing is logged yet; the export's files are written
+// selbst ansehen", and this error says what there is to see. Writing,
+// syncing and closing the temporary file come before the rename, and a
+// rename that fails (renameat(2), or the check of os.Root for a
+// directory under the name) does not replace witnesses.rec; the one
+// error of store.ReplaceFileIn after a rename is its check of the name
+// (store.ErrReplacedMeanwhile, below). The temporary file is removed
+// again where that is possible, and only while it is the file written
+// (store removes no entry of another process); one left (in an
+// append-only platform/, for example) is removed and reported by a
+// later publish before its checks (TempRemoved), which refuses while it
+// cannot remove it, and an entry of another process that is no regular
+// file stays. Nothing is logged yet; the export's files are written
 // before witnesses.rec, so they may be in platform/ already. The
-// remedy is the same publish again. errors.Is holds for err.
+// remedy is the same publish again, after stopping the other process
+// for store.ErrReplacedMeanwhile. errors.Is holds for err.
 //
 // The state of witnesses.rec that the error names depends on how far
 // store.ReplaceFileIn came (backlog 118):
@@ -1349,6 +1353,23 @@ func runPublish(opts PublishOptions) error {
 //     (review of task 29 C, H1). A repeat refuses a directory under the
 //     name with store.ErrNotRegular. On NFS or FUSE a rename reported
 //     as failed may have happened all the same; no error tells that.
+//   - "is not the file publish wrote" when the rename happened, but
+//     store.ReplaceFileIn finds something else under witnesses.rec when
+//     it looks at the name again (store.ErrReplacedMeanwhile without an
+//     *os.LinkError or an *fs.PathError; review of task 33 A, H1, and of
+//     task 34 A, N2): another process put a directory, a FIFO, a link or
+//     another file under the temporary name before the rename, or
+//     changed witnesses.rec after it. witnesses.rec was replaced then,
+//     but not by the pin's witnesses, so "was not replaced" would be
+//     wrong. The callbacks WitnessesReplaced and WitnessesLinkReplaced
+//     are not called, as for every error here; what is there stays, and
+//     a repeat refuses anything but a regular file under the name.
+//
+// store.ErrReplacedMeanwhile in either of the first two states (after
+// the temporary file or the rename failed, the temporary name is not
+// the file written any more, and that entry stays) keeps its state. For
+// every store.ErrReplacedMeanwhile the remedy names the other process:
+// stop it, look at platform/, then run the same publish again.
 //
 // The fsync of platform/ after the rename is not part of it
 // (syncPlatform): the callbacks after the rename report the
@@ -1356,11 +1377,38 @@ func runPublish(opts PublishOptions) error {
 func replaceFailedErr(st *store.Store, err error) error {
 	state := "is unchanged"
 	var le *os.LinkError
-	if errors.As(err, &le) {
+	var pe *fs.PathError
+	meanwhile := errors.Is(err, store.ErrReplacedMeanwhile)
+	switch {
+	case errors.As(err, &le):
 		state = "was not replaced"
+	case meanwhile && !errors.As(err, &pe):
+		state = "is not the file publish wrote"
 	}
-	return fmt.Errorf("ceremony: replacing %s: %w; %s %s and nothing is logged (files of the export may be written already): run the same publish again",
-		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile), state)
+	remedy := "run the same publish again"
+	if meanwhile {
+		remedy = "another process writes platform/ during publish: stop it, look at platform/ and run the same publish again"
+	}
+	return fmt.Errorf("ceremony: replacing %s: %w; %s %s and nothing is logged (files of the export may be written already): %s",
+		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile), state, remedy)
+}
+
+// writeErr completes an error of store.WriteFileAtomicIn,
+// store.CreateFileAtomicIn or store.ReplaceFileIn for platform/<n>
+// when it is store.ErrReplacedMeanwhile (review of task 33 A, H1):
+// another process changed platform/ while publish wrote n, and the
+// error of store says what is where (an entry that is not the file
+// publish wrote stays where it is). The message names the path of n
+// and the remedy, as errChanged does; nothing is logged. Any other
+// error is returned as it is (the messages before). witnesses.rec comes
+// here only when its replacement was not announced (it was missing),
+// otherwise to replaceFailedErr.
+func writeErr(st *store.Store, n string, err error) error {
+	if !errors.Is(err, store.ErrReplacedMeanwhile) {
+		return err
+	}
+	return fmt.Errorf("ceremony: writing %s: %w; nothing is logged (files of the export may be written already): another process writes platform/ during publish: stop it, look at platform/ and run the same publish again",
+		st.Path("platform", n), err)
 }
 
 // syncPlatform fsyncs platform/ through pd after witnesses.rec was
