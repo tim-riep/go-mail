@@ -643,3 +643,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 20:34 UTC: Auftrag 34 (Paket 34A, in `docs/tasks/33-nach-m1-nacht4.md`): Prüfung nach dem Umbenennen in `ReplaceFileIn`, `WriteFileAtomicIn`, `CreateFileAtomicIn`, Basis 8d557b0. Gestartet.
 - 20:41 UTC: 33D-Bericht da (20-notes „33D“). V2 (Argon2 im Testbuild merken) berührt `internal/keys` (Phase 0) → Entscheidung des Auftraggebers. `TestRelayBrokenPipe` scheitert immer unter `-json` → Auftrag 35 (nur Testcode).
 - 20:42 UTC: Auftrag 35 (Paket 35A, in `docs/tasks/33-nach-m1-nacht4.md`): `TestRelayBrokenPipe` unter `-json`. Gestartet.
+- 20:49 UTC: 35A fertig (3a688c4 auf c6b2ea2; `stderrOfProgram` vor `m.Run` belegt, Test schreibt über Deskriptor 2 wie das Programm; keine weitere Stelle; Paket `cmd/gomailctl` unter `-json` grün). Ein Prüfer gestartet.
