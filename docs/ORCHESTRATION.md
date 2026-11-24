@@ -627,3 +627,8 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 **Zwischenfälle:** Neustart des Containers 01:05 UTC (alles fortgesetzt). Ein Implementierer nutzte in der Diagnose kurz Echtzeitpriorität für eine Last-Schleife; künftig ausdrücklich verboten.
 
 **Wie es weitergeht:** (1) Entscheidung zu 29B H1; danach `fr-n29b` fortsetzen, 29B zusammenführen, Doku-Nachzug 29B. (2) Offene Entscheidungen aus 27g. (3) Weitere Punkte der Liste nach M1 ohne Haltepunkt.
+
+## 14. Fortsetzung bis 25.11.2026, 06:00 Uhr MEZ (Anweisung 24.11.: „Weiter bis morgen 6 Uhr“)
+
+- 19:10 UTC: Neuer Container (Neustart seit dem 18.11.), Stand 8a000de unverändert, Toolchain go1.26.10 vorhanden. Build-Cache der Orchestrierung geleert (13 GB; 19 GB frei). Stopp um 05:00 UTC (trig_01VYwyXAp9bmKxVgnNku6Rce) und stündlicher Check-in (trig_013UT7uE8reKq4sUdFd1SG3Z) eingeplant. Keine Entscheidung zu 29B H1 erhalten: 29B bleibt ungemergt; Volllauf `fr-n29b` fortgesetzt, damit er nach der Entscheidung fertig ist.
+- 19:25 UTC: Auftrag 33 (`docs/tasks/33-nach-m1-nacht4.md`): 33A `publish` Nr. 118 und Hinweise aus Nr. 95 (sicherheitskritisch, zwei Prüfer), 33B Release-Prüfung Rest Nr. 110 und Fund D aus Nr. 119, 33C Test-Hilfen aus Nr. 121, 33D Messung der Testlaufzeit (Nr. 27, nur Bericht). Kein Paket ändert Code, den 29B ändert.
