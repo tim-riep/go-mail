@@ -1,0 +1,1525 @@
+From 656b2c390535e3f5eb2a5ad31e5aa64c41e0f889 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 24 Nov 2026 22:44:42 +0000
+Subject: [PATCH] store: check the name after the rename or link of a temporary
+ file
+
+ReplaceFileIn, WriteFileAtomicIn and CreateFileAtomicIn look at the
+name again with Root.Lstat after the rename or link: it must be a
+regular file that os.SameFile takes for the temporary file written
+(fstat on its descriptor; a duplicate of that descriptor keeps the
+inode in use, so that its number is not given to another file).
+Otherwise the error is the new store.ErrReplacedMeanwhile, and the
+entry stays. Another process that put a directory under the temporary
+name while witnesses.rec was missing made publish report success with
+a directory under witnesses.rec (review of task 33 A, H1).
+
+On every error the temporary name is removed only while it is still
+the file written; an entry of another process stays, and the error is
+ErrReplacedMeanwhile as well (review of task 34 A, N1). The name is
+never opened again: a FIFO, a device or a socket under it neither
+blocks nor is removed. The windows left (between the rename or link
+and the Root.Lstat, and between the Root.Lstat and the unlink of the
+temporary name) are named in the comments.
+
+gomail-ceremony publish reports ErrReplacedMeanwhile with the path and
+the remedy (stop the other process, look at platform/, run the same
+publish again) and logs nothing; for witnesses.rec after the line of
+WitnessesReplacing it says "is not the file publish wrote" when the
+rename happened, "was not replaced" only when it failed (review of
+task 34 A, N2), and calls no callback "replaced". A test build
+(gomail_test) sets the hook of store for the tests of publish
+(SetTempInHook).
+
+Task: docs/tasks/33-nach-m1-nacht4.md (Paket 34A)
+---
+ internal/ceremony/api.go                   |  13 +-
+ internal/ceremony/publish.go               |  82 +++-
+ internal/ceremony/publish34a_linux_test.go | 334 +++++++++++++++
+ internal/ceremony/publish34a_unix_test.go  |  75 ++++
+ internal/store/fsroot.go                   | 267 ++++++++++--
+ internal/store/fsroot34a_linux_test.go     | 468 +++++++++++++++++++++
+ internal/store/hold_other.go               |  13 +
+ internal/store/hold_unix.go                |  41 ++
+ internal/store/tempinhook_tagged.go        |  21 +
+ 9 files changed, 1261 insertions(+), 53 deletions(-)
+ create mode 100644 internal/ceremony/publish34a_linux_test.go
+ create mode 100644 internal/ceremony/publish34a_unix_test.go
+ create mode 100644 internal/store/fsroot34a_linux_test.go
+ create mode 100644 internal/store/hold_other.go
+ create mode 100644 internal/store/hold_unix.go
+ create mode 100644 internal/store/tempinhook_tagged.go
+
+diff --git a/internal/ceremony/api.go b/internal/ceremony/api.go
+index f7948ab..8702f56 100644
+--- a/internal/ceremony/api.go
++++ b/internal/ceremony/api.go
+@@ -713,7 +713,18 @@ type PublishOptions struct {
+ 	// touch witnesses.rec) or "was not replaced" when the rename failed
+ 	// (its cause may be another process that changed the name, a
+ 	// directory put there for example), then "nothing is logged" and
+-	// the remedy (run the same publish again). It is not called, and
++	// the remedy (run the same publish again). When the rename happened
++	// but witnesses.rec is not the file publish wrote when it is looked
++	// at again (store.ErrReplacedMeanwhile: another process put
++	// something else under the temporary name, or changed witnesses.rec
++	// after the rename; review of task 33 A, H1), the error says "is not
++	// the file publish wrote" instead, and WitnessesReplaced and
++	// WitnessesLinkReplaced are not called: witnesses.rec was replaced,
++	// but not by the pin's witnesses. For every
++	// store.ErrReplacedMeanwhile the remedy names the other process
++	// (stop it, look at platform/, run the same publish again). The
++	// replacement after this callback is checked up to the Root.Lstat
++	// of that check; a change after it is not seen. It is not called, and
+ 	// nothing is announced, when witnesses.rec is written for the first
+ 	// time.
+ 	WitnessesReplacing func(before *witness.Witnesses, link string, after *witness.Witnesses)
+diff --git a/internal/ceremony/publish.go b/internal/ceremony/publish.go
+index dc11dad..125d9f6 100644
+--- a/internal/ceremony/publish.go
++++ b/internal/ceremony/publish.go
+@@ -1188,14 +1188,14 @@ func runPublish(opts PublishOptions) error {
+ 			// rename replaces a symbolic or hard link itself, never its
+ 			// target or the file under its other name.
+ 			if err := store.WriteFileAtomicIn(pd, n, files[n].data); err != nil {
+-				return err
++				return writeErr(st, n, err)
+ 			}
+ 			wrote = true
+ 		} else if err := store.CreateFileAtomicIn(pd, n, files[n].data); err == nil {
+ 			wrote = true
+ 		} else {
+-			if !errors.Is(err, store.ErrExists) {
+-				return err
++			if errors.Is(err, store.ErrReplacedMeanwhile) || !errors.Is(err, store.ErrExists) {
++				return writeErr(st, n, err)
+ 			}
+ 			// The name was missing above (a dangling link is not missing for
+ 			// readEntry): another process wrote it meanwhile. A link written
+@@ -1242,7 +1242,7 @@ func runPublish(opts PublishOptions) error {
+ 			if announced {
+ 				return replaceFailedErr(st, err)
+ 			}
+-			return err
++			return writeErr(st, WitnessesFile, err)
+ 		}
+ 		wrote = true
+ 		// witnesses.rec is replaced from here on: the callbacks report it
+@@ -1314,17 +1314,21 @@ func runPublish(opts PublishOptions) error {
+ // witnesses.rec after the replacement is announced (WitnessesReplacing,
+ // whether or not it is set; review of task 28 A, F3): the line of the
+ // command line says "fehlt die nächste Zeile, platform/witnesses.rec
+-// selbst ansehen", and this error says what there is to see. No error
+-// of store.ReplaceFileIn comes after a replacement: writing, syncing
+-// and closing the temporary file come before the rename, and a rename
+-// that fails (renameat(2), or the check of os.Root for a directory
+-// under the name) does not replace witnesses.rec. The temporary file
+-// is removed again where that is possible; one left (in an append-only
+-// platform/, for example) is removed and reported by a later publish
+-// before its checks (TempRemoved), which refuses while it cannot
+-// remove it. Nothing is logged yet; the export's files are written
++// selbst ansehen", and this error says what there is to see. Writing,
++// syncing and closing the temporary file come before the rename, and a
++// rename that fails (renameat(2), or the check of os.Root for a
++// directory under the name) does not replace witnesses.rec; the one
++// error of store.ReplaceFileIn after a rename is its check of the name
++// (store.ErrReplacedMeanwhile, below). The temporary file is removed
++// again where that is possible, and only while it is the file written
++// (store removes no entry of another process); one left (in an
++// append-only platform/, for example) is removed and reported by a
++// later publish before its checks (TempRemoved), which refuses while it
++// cannot remove it, and an entry of another process that is no regular
++// file stays. Nothing is logged yet; the export's files are written
+ // before witnesses.rec, so they may be in platform/ already. The
+-// remedy is the same publish again. errors.Is holds for err.
++// remedy is the same publish again, after stopping the other process
++// for store.ErrReplacedMeanwhile. errors.Is holds for err.
+ //
+ // The state of witnesses.rec that the error names depends on how far
+ // store.ReplaceFileIn came (backlog 118):
+@@ -1349,6 +1353,23 @@ func runPublish(opts PublishOptions) error {
+ //     (review of task 29 C, H1). A repeat refuses a directory under the
+ //     name with store.ErrNotRegular. On NFS or FUSE a rename reported
+ //     as failed may have happened all the same; no error tells that.
++//   - "is not the file publish wrote" when the rename happened, but
++//     store.ReplaceFileIn finds something else under witnesses.rec when
++//     it looks at the name again (store.ErrReplacedMeanwhile without an
++//     *os.LinkError or an *fs.PathError; review of task 33 A, H1, and of
++//     task 34 A, N2): another process put a directory, a FIFO, a link or
++//     another file under the temporary name before the rename, or
++//     changed witnesses.rec after it. witnesses.rec was replaced then,
++//     but not by the pin's witnesses, so "was not replaced" would be
++//     wrong. The callbacks WitnessesReplaced and WitnessesLinkReplaced
++//     are not called, as for every error here; what is there stays, and
++//     a repeat refuses anything but a regular file under the name.
++//
++// store.ErrReplacedMeanwhile in either of the first two states (after
++// the temporary file or the rename failed, the temporary name is not
++// the file written any more, and that entry stays) keeps its state. For
++// every store.ErrReplacedMeanwhile the remedy names the other process:
++// stop it, look at platform/, then run the same publish again.
+ //
+ // The fsync of platform/ after the rename is not part of it
+ // (syncPlatform): the callbacks after the rename report the
+@@ -1356,11 +1377,38 @@ func runPublish(opts PublishOptions) error {
+ func replaceFailedErr(st *store.Store, err error) error {
+ 	state := "is unchanged"
+ 	var le *os.LinkError
+-	if errors.As(err, &le) {
++	var pe *fs.PathError
++	meanwhile := errors.Is(err, store.ErrReplacedMeanwhile)
++	switch {
++	case errors.As(err, &le):
+ 		state = "was not replaced"
++	case meanwhile && !errors.As(err, &pe):
++		state = "is not the file publish wrote"
++	}
++	remedy := "run the same publish again"
++	if meanwhile {
++		remedy = "another process writes platform/ during publish: stop it, look at platform/ and run the same publish again"
++	}
++	return fmt.Errorf("ceremony: replacing %s: %w; %s %s and nothing is logged (files of the export may be written already): %s",
++		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile), state, remedy)
++}
++
++// writeErr completes an error of store.WriteFileAtomicIn,
++// store.CreateFileAtomicIn or store.ReplaceFileIn for platform/<n>
++// when it is store.ErrReplacedMeanwhile (review of task 33 A, H1):
++// another process changed platform/ while publish wrote n, and the
++// error of store says what is where (an entry that is not the file
++// publish wrote stays where it is). The message names the path of n
++// and the remedy, as errChanged does; nothing is logged. Any other
++// error is returned as it is (the messages before). witnesses.rec comes
++// here only when its replacement was not announced (it was missing),
++// otherwise to replaceFailedErr.
++func writeErr(st *store.Store, n string, err error) error {
++	if !errors.Is(err, store.ErrReplacedMeanwhile) {
++		return err
+ 	}
+-	return fmt.Errorf("ceremony: replacing %s: %w; %s %s and nothing is logged (files of the export may be written already): run the same publish again",
+-		st.Path("platform", WitnessesFile), err, st.Path("platform", WitnessesFile), state)
++	return fmt.Errorf("ceremony: writing %s: %w; nothing is logged (files of the export may be written already): another process writes platform/ during publish: stop it, look at platform/ and run the same publish again",
++		st.Path("platform", n), err)
+ }
+ 
+ // syncPlatform fsyncs platform/ through pd after witnesses.rec was
+diff --git a/internal/ceremony/publish34a_linux_test.go b/internal/ceremony/publish34a_linux_test.go
+new file mode 100644
+index 0000000..c15e7a3
+--- /dev/null
++++ b/internal/ceremony/publish34a_linux_test.go
+@@ -0,0 +1,334 @@
++//go:build linux && gomail_test
++
++package ceremony
++
++import (
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/tim-riep/go-mail/internal/store"
++	"github.com/tim-riep/go-mail/internal/witness"
++)
++
++// Tests of task 34 package A (review of task 33 A, H1; review of task
++// 34 A, N2): another process changes the temporary file of a file
++// publish writes into platform/ (store.SetTempInHook, only with the tag
++// gomail_test, stands for it). publish refuses with the path, what is
++// there and the remedy, logs nothing and calls no callback "replaced";
++// the foreign entry stays.
++
++// afterMsg is the error of store for name after the rename or link.
++func afterMsg(step, p, what string) string {
++	return "store: after the " + step + ", " + p + " is " + what + ", not the file written: " + store.ErrReplacedMeanwhile.Error()
++}
++
++// tempSwap sets the hook of store for the test: at the first call with
++// point, change is called with the path of the temporary file.
++func tempSwap(t *testing.T, point string, change func(tmp string) error) *bool {
++	t.Helper()
++	done := new(bool)
++	restore := store.SetTempInHook(func(root *os.Root, tmp, pt string) {
++		if pt != point || *done {
++			return
++		}
++		*done = true
++		if err := change(filepath.Join(root.Name(), tmp)); err != nil {
++			t.Error(err)
++		}
++	})
++	t.Cleanup(restore)
++	return done
++}
++
++// toDir moves the temporary file away and puts a directory with a file
++// in it under its name.
++func toDir(tmp string) error {
++	if err := os.Rename(tmp, tmp+"-away"); err != nil {
++		return err
++	}
++	return os.Mkdir(tmp, 0o755)
++}
++
++// publishWithin runs Publish and fails the test if it does not return
++// within a minute (an open of a FIFO would wait for a writer).
++func publishWithin(t *testing.T, opts PublishOptions) error {
++	t.Helper()
++	done := make(chan error, 1)
++	go func() { done <- Publish(opts) }()
++	select {
++	case err := <-done:
++		return err
++	case <-time.After(time.Minute):
++		t.Fatal("publish hangs")
++		return nil
++	}
++}
++
++// replaceWitnessesSetup publishes the fixture and puts a working copy
++// with other witnesses under witnesses.rec, so that a publish with
++// ReplaceWitnesses announces the replacement.
++func replaceWitnessesSetup(t *testing.T, f *fixture) (*store.Store, string) {
++	t.Helper()
++	st, _ := f.published(t, "data")
++	other, err := (&witness.Witnesses{List: f.w[:1], Min: 1}).Encode()
++	if err != nil {
++		t.Fatal(err)
++	}
++	p := st.Path("platform", WitnessesFile)
++	if err := os.WriteFile(p, other, 0o660); err != nil {
++		t.Fatal(err)
++	}
++	return st, p
++}
++
++// logHook records whether publish reaches its log.
++func logHook(t *testing.T) *bool {
++	logged := new(bool)
++	crashHook = func(pt string) error {
++		if pt == "publish-log" {
++			*logged = true
++		}
++		return nil
++	}
++	t.Cleanup(func() { crashHook = nil })
++	return logged
++}
++
++// TestPublishWitnessesTempDirMissingName (review of task 33 A, H1): the
++// first publish writes witnesses.rec (missing, nothing announced);
++// another process puts a directory under the temporary file before the
++// rename, which renameat(2) puts over the missing name. Before, publish
++// reported success with a directory under witnesses.rec; now it
++// refuses with the path and the remedy, and the directory stays.
++func TestPublishWitnessesTempDirMissingName(t *testing.T) {
++	f := newFixture(t)
++	st := newData(t, filepath.Join(f.base, "data"))
++	p := st.Path("platform", WitnessesFile)
++	done := tempSwap(t, "rename", toDir)
++	logged := logHook(t)
++	err := publishWithin(t, PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin})
++	if !*done || *logged || !errors.Is(err, store.ErrReplacedMeanwhile) {
++		t.Fatalf("swap %v, logged %v, err %v", *done, *logged, err)
++	}
++	if want := meanwhileMsg(p, afterMsg("rename", p, "not a regular file")); err.Error() != want {
++		t.Fatalf("message\n%q, want\n%q", err.Error(), want)
++	}
++	if fi, err := os.Lstat(p); err != nil || !fi.IsDir() {
++		t.Fatalf("witnesses.rec: %v %v", fi, err)
++	}
++}
++
++// TestPublishWitnessesReplacedMeanwhile (review of task 34 A, N2): with
++// ReplaceWitnesses, after the line of WitnessesReplacing, another
++// process changes the temporary file or witnesses.rec. publish calls no
++// callback "replaced", logs nothing, says what holds for witnesses.rec
++// ("is not the file publish wrote" when the rename happened, "was not
++// replaced" when it failed) and names the other process; the foreign
++// entry stays, and nothing hangs.
++func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
++	for _, c := range []struct {
++		name, point string
++		change      func(p, tmp string) error
++		// state is the state of witnesses.rec, what the error of store
++		// (nil: another file under witnesses.rec), kind the type of the
++		// foreign entry.
++		state string
++		what  func(p, tmp string) string
++		kind  fs.FileMode
++	}{
++		{"dir-name-missing", "rename", func(p, tmp string) error {
++			if err := os.Remove(p); err != nil {
++				return err
++			}
++			return toDir(tmp)
++		}, stateNotWritten, func(p, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeDir},
++		{"dir-name-emptydir", "rename", func(p, tmp string) error {
++			if err := os.Remove(p); err != nil {
++				return err
++			}
++			if err := os.Mkdir(p, 0o755); err != nil {
++				return err
++			}
++			return toDir(tmp)
++			// The check of os.Root.Rename refuses a directory under the
++			// new name (EEXIST); renameat(2) would put the directory over
++			// an empty one only in the window after that check.
++		}, stateNotReplaced, func(p, tmp string) string {
++			return "rename " + tmp + " " + p + ": file exists; store: " + tmp + " is not a regular file, not the file written, and stays: " + store.ErrReplacedMeanwhile.Error()
++		}, fs.ModeDir},
++		{"fifo-before-close", "written", func(_, tmp string) error {
++			if err := os.Rename(tmp, tmp+"-away"); err != nil {
++				return err
++			}
++			return syscall.Mkfifo(tmp, 0o644)
++		}, stateNotWritten, func(p, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeNamedPipe},
++		{"other-after-rename", "renamed", func(p, _ string) error {
++			if err := os.WriteFile(p+"-other", []byte("x"), 0o660); err != nil {
++				return err
++			}
++			return os.Rename(p+"-other", p)
++		}, stateNotWritten, nil, 0},
++		{"dir-name-file", "rename", func(_, tmp string) error {
++			if err := toDir(tmp); err != nil {
++				return err
++			}
++			return os.WriteFile(filepath.Join(tmp, "x"), nil, 0o644)
++		}, stateNotReplaced, func(p, tmp string) string {
++			return "rename " + tmp + " " + p + ": not a directory; store: " + tmp + " is not a regular file, not the file written, and stays: " + store.ErrReplacedMeanwhile.Error()
++		}, fs.ModeDir},
++	} {
++		t.Run(c.name, func(t *testing.T) {
++			f := newFixture(t)
++			st, p := replaceWitnessesSetup(t, f)
++			var tmpPath string
++			done := tempSwap(t, c.point, func(tmp string) error {
++				tmpPath = tmp
++				return c.change(p, tmp)
++			})
++			logged := logHook(t)
++			calls, announced := 0, 0
++			err := publishWithin(t, PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin, ReplaceWitnesses: true,
++				WitnessesReplacing:    func(*witness.Witnesses, string, *witness.Witnesses) { announced++ },
++				WitnessesReplaced:     func(_, _ *witness.Witnesses) { calls++ },
++				WitnessesLinkReplaced: func(string, *witness.Witnesses) { calls++ }})
++			if !*done || *logged || calls != 0 || announced != 1 || !errors.Is(err, store.ErrReplacedMeanwhile) {
++				t.Fatalf("swap %v, logged %v, calls %d, announced %d, err %v", *done, *logged, calls, announced, err)
++			}
++			what := afterMsg("rename", p, "another file")
++			if c.what != nil {
++				what = c.what(p, tmpPath)
++			}
++			if want := replaceMeanwhileMsg(p, what, c.state); err.Error() != want {
++				t.Fatalf("message\n%q, want\n%q", err.Error(), want)
++			}
++			if strings.Contains(err.Error(), "was not replaced") != (c.state == stateNotReplaced) {
++				t.Fatalf("state: %v", err)
++			}
++			at := p
++			if c.state == stateNotReplaced {
++				at = tmpPath
++			}
++			fi, lerr := os.Lstat(at)
++			if lerr != nil || fi.Mode().Type() != c.kind {
++				t.Fatalf("the foreign entry under %s: %v %v", at, fi, lerr)
++			}
++		})
++	}
++}
++
++// TestPublishExportFileReplacedMeanwhile: the export's files are
++// written with store.CreateFileAtomicIn (a missing name) and
++// store.WriteFileAtomicIn (a hard link replaced, freeName); another
++// process puts a FIFO or a directory under the temporary file. publish
++// refuses with writeErr, logs nothing, and the foreign entry stays.
++func TestPublishExportFileReplacedMeanwhile(t *testing.T) {
++	t.Run("create-fifo", func(t *testing.T) {
++		f := newFixture(t)
++		st := newData(t, filepath.Join(f.base, "data"))
++		var tmpPath string
++		done := tempSwap(t, "link", func(tmp string) error {
++			tmpPath = tmp
++			if err := os.Rename(tmp, tmp+"-away"); err != nil {
++				return err
++			}
++			return syscall.Mkfifo(tmp, 0o644)
++		})
++		logged := logHook(t)
++		err := publishWithin(t, PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin})
++		if !*done || *logged || !errors.Is(err, store.ErrReplacedMeanwhile) {
++			t.Fatalf("swap %v, logged %v, err %v", *done, *logged, err)
++		}
++		msg := err.Error()
++		i := strings.Index(msg, ": store: after the link, ")
++		if i < 0 || !strings.HasPrefix(msg, "ceremony: writing ") {
++			t.Fatalf("message %q", msg)
++		}
++		p := msg[len("ceremony: writing "):i]
++		if want := meanwhileMsg(p, afterMsg("link", p, "not a regular file")); msg != want {
++			t.Fatalf("message\n%q, want\n%q", msg, want)
++		}
++		for _, at := range []string{p, tmpPath} {
++			if fi, err := os.Lstat(at); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
++				t.Fatalf("the FIFO under %s: %v %v", at, fi, err)
++			}
++		}
++	})
++	t.Run("create-exists-fifo", func(t *testing.T) {
++		// The name taken meanwhile by the export's file itself and a
++		// FIFO under the temporary name: the link finds the name
++		// (store.ErrExists), but the temporary name is not the file
++		// written, so publish refuses instead of taking the name for
++		// the export's file (writeErr before the check of ErrExists).
++		f := newFixture(t)
++		st := newData(t, filepath.Join(f.base, "data"))
++		exp := filepath.Join(f.base, "out", "platform")
++		var p string
++		done := tempSwap(t, "link", func(tmp string) error {
++			b, err := os.ReadFile(tmp)
++			if err != nil {
++				return err
++			}
++			ents, err := os.ReadDir(exp)
++			if err != nil {
++				return err
++			}
++			for _, e := range ents {
++				if eb, err := os.ReadFile(filepath.Join(exp, e.Name())); err == nil && string(eb) == string(b) {
++					p = st.Path("platform", e.Name())
++				}
++			}
++			if p == "" {
++				return errors.New("no export file with the content of the temporary file")
++			}
++			if err := os.WriteFile(p, b, 0o660); err != nil {
++				return err
++			}
++			if err := os.Rename(tmp, tmp+"-away"); err != nil {
++				return err
++			}
++			return syscall.Mkfifo(tmp, 0o644)
++		})
++		logged := logHook(t)
++		err := publishWithin(t, PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin})
++		if !*done || *logged || !errors.Is(err, store.ErrReplacedMeanwhile) || !errors.Is(err, store.ErrExists) {
++			t.Fatalf("swap %v, logged %v, err %v", *done, *logged, err)
++		}
++		if !strings.HasPrefix(err.Error(), "ceremony: writing "+p+": store: file exists: "+filepath.Base(p)+"; store: ") {
++			t.Fatalf("message %q", err.Error())
++		}
++	})
++	t.Run("replace-dir", func(t *testing.T) {
++		f := newFixture(t)
++		st, _ := f.published(t, "data")
++		p := st.Path("platform", "admin-1.cert")
++		if err := os.Link(p, filepath.Join(f.base, "second-name")); err != nil {
++			t.Skip(err)
++		}
++		done := tempSwap(t, "rename", toDir)
++		logged := logHook(t)
++		err := publishWithin(t, PublishOptions{From: filepath.Join(f.base, "out"), Data: st, Pin: f.res.Pin})
++		if !*done || *logged || !errors.Is(err, store.ErrReplacedMeanwhile) {
++			t.Fatalf("swap %v, logged %v, err %v", *done, *logged, err)
++		}
++		// A directory is not put over a file: the rename fails, the
++		// directory stays under the temporary name, and admin-1.cert is
++		// the hard link it was.
++		var le *os.LinkError
++		if !errors.As(err, &le) {
++			t.Fatalf("no *os.LinkError: %v", err)
++		}
++		if want := meanwhileMsg(p, "rename "+le.Old+" "+p+": not a directory; store: "+le.Old+
++			" is not a regular file, not the file written, and stays: "+store.ErrReplacedMeanwhile.Error()); err.Error() != want {
++			t.Fatalf("message\n%q, want\n%q", err.Error(), want)
++		}
++		if fi, err := os.Lstat(le.Old); err != nil || !fi.IsDir() {
++			t.Fatalf("the directory under %s: %v %v", le.Old, fi, err)
++		}
++	})
++}
+diff --git a/internal/ceremony/publish34a_unix_test.go b/internal/ceremony/publish34a_unix_test.go
+new file mode 100644
+index 0000000..60ef3c2
+--- /dev/null
++++ b/internal/ceremony/publish34a_unix_test.go
+@@ -0,0 +1,75 @@
++//go:build unix
++
++package ceremony
++
++import (
++	"errors"
++	"fmt"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++
++	"github.com/tim-riep/go-mail/internal/store"
++)
++
++// TestReplaceFailedErrMeanwhile (task 34 package A, review of task 34
++// A, N2): store.ErrReplacedMeanwhile gets the remedy that names the
++// other process, in each of the three states: "is unchanged" when the
++// temporary file failed (an *fs.PathError), "was not replaced" when
++// the rename failed (an *os.LinkError), and "is not the file publish
++// wrote" when the rename happened (neither); never "was not replaced"
++// after a rename. errors.Is holds for the cause. writeErr completes
++// store.ErrReplacedMeanwhile only and returns every other error as it
++// is.
++func TestReplaceFailedErrMeanwhile(t *testing.T) {
++	st := newData(t, filepath.Join(t.TempDir(), "data"))
++	p := st.Path("platform", WitnessesFile)
++	tmp := st.Path("platform", ".tmp-0123456789abcdef")
++	stays := fmt.Errorf("store: %s is not a regular file, not the file written, and stays: %w", tmp, store.ErrReplacedMeanwhile)
++	for _, c := range []struct {
++		name  string
++		err   error
++		state string
++	}{
++		{"temp", fmt.Errorf("%w; %w", &fs.PathError{Op: "write", Path: tmp, Err: syscall.EFBIG}, stays), stateUnchanged},
++		{"rename", fmt.Errorf("%w; %w", &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.ENOTDIR}, stays), stateNotReplaced},
++		{"after", fmt.Errorf("store: after the rename, %s is not a regular file, not the file written: %w", p, store.ErrReplacedMeanwhile), stateNotWritten},
++	} {
++		t.Run(c.name, func(t *testing.T) {
++			err := replaceFailedErr(st, c.err)
++			if got, want := err.Error(), replaceMeanwhileMsg(p, c.err.Error(), c.state); got != want {
++				t.Fatalf("message\n%q, want\n%q", got, want)
++			}
++			if !errors.Is(err, c.err) || !errors.Is(err, store.ErrReplacedMeanwhile) {
++				t.Fatalf("errors.Is lost the cause: %v", err)
++			}
++			if got, want := writeErr(st, WitnessesFile, c.err).Error(), meanwhileMsg(p, c.err.Error()); got != want {
++				t.Fatalf("writeErr\n%q, want\n%q", got, want)
++			}
++		})
++	}
++	other := &os.LinkError{Op: "rename", Old: tmp, New: p, Err: syscall.EXDEV}
++	if err := writeErr(st, WitnessesFile, other); err != error(other) {
++		t.Fatalf("writeErr changed %v", err)
++	}
++}
++
++// meanwhileMsg is the message of writeErr.
++func meanwhileMsg(p, cause string) string {
++	return "ceremony: writing " + p + ": " + cause + "; nothing is logged (files of the export may be written already): " +
++		"another process writes platform/ during publish: stop it, look at platform/ and run the same publish again"
++}
++
++// replaceMeanwhileMsg is the message of replaceFailedErr for
++// store.ErrReplacedMeanwhile.
++func replaceMeanwhileMsg(p, cause, state string) string {
++	return "ceremony: replacing " + p + ": " + cause + "; " + p + " " + state +
++		" and nothing is logged (files of the export may be written already): " +
++		"another process writes platform/ during publish: stop it, look at platform/ and run the same publish again"
++}
++
++// stateNotWritten is the state of witnesses.rec in replaceMeanwhileMsg
++// after a rename that happened.
++const stateNotWritten = "is not the file publish wrote"
+diff --git a/internal/store/fsroot.go b/internal/store/fsroot.go
+index 2b88a47..94680e4 100644
+--- a/internal/store/fsroot.go
++++ b/internal/store/fsroot.go
+@@ -129,37 +129,178 @@ func ReadDirIn(root *os.Root) ([]fs.DirEntry, error) {
+ 	return entries, err
+ }
+ 
++// ErrReplacedMeanwhile reports that a name the functions of this file
++// wrote through a temporary file is not that file when they look at it
++// again with Root.Lstat (backlog 108, review of task 33 A, H1): after
++// the rename or link, name is missing, is not a regular file or is
++// another file than the one written (os.SameFile against the fstat of
++// the temporary file); or, on an error before, the temporary name is
++// missing or is not the file written any more. Another process changed
++// the directory meanwhile. Nothing that is not the file written is
++// removed: such an entry stays where it is, and the error names it.
++var ErrReplacedMeanwhile = errors.New("another process changed the directory meanwhile")
++
++// tempInHook, if set, is called by the functions of this file that
++// write through a temporary file, with the root, the temporary name and
++// the point: "written" after the data are written and synced, before
++// the close; "rename" or "link" before the rename or link to the name;
++// "renamed" or "linked" after it, before the name is looked at again.
++// Only tests set it (SetTempInHook, in a build with the tag gomail_test
++// only, for the tests of gomail-ceremony publish): it stands for
++// another process that changes the directory at that point.
++var tempInHook func(root *os.Root, tmp, point string)
++
++func callTempInHook(root *os.Root, tmp, point string) {
++	if tempInHook != nil {
++		tempInHook(root, tmp, point)
++	}
++}
++
++// written is a temporary file that writeTempIn wrote: its name in the
++// directory, the FileInfo of fstat on its descriptor right after the
++// open, and held, a second descriptor of the same open file (a
++// duplicate, holdFile; never an open of the name), kept until the
++// caller is done. held keeps the inode in use after the close, so that
++// its number is not given to another file meanwhile: ext4 gives the
++// number of an inode freed by an unlink at once to the next file
++// created, and a file of another process could then look like the file
++// written to os.SameFile (review of task 34 A, M4). Where there is no
++// duplicate (Windows, Plan 9, js and wasip1: holdFile), held is nil;
++// on Windows a second handle opened without FILE_SHARE_DELETE would
++// make the rename fail, and the comparison rests on the file ID of
++// NTFS, which carries a sequence number.
++type written struct {
++	tmp  string
++	fi   fs.FileInfo
++	held *os.File
++}
++
++// release closes held.
++func (w *written) release() {
++	if w.held != nil {
++		w.held.Close()
++	}
++}
++
++// differs looks at name in the directory that root holds with
++// Root.Lstat (never an open: a FIFO or a device under the name is not
++// opened) and returns "" if it is the file written, a regular file that
++// os.SameFile takes for it, and otherwise what it is instead: "missing",
++// "not a regular file", "another file", or that it cannot be looked at,
++// with the error of Root.Lstat.
++func (w *written) differs(root *os.Root, name string) string {
++	fi, err := root.Lstat(name)
++	switch {
++	case err != nil && errors.Is(err, fs.ErrNotExist):
++		return "missing"
++	case err != nil:
++		return "not to be looked at (" + underlying(err).Error() + ")"
++	case !fi.Mode().IsRegular():
++		return "not a regular file"
++	case !os.SameFile(fi, w.fi):
++		return "another file"
++	}
++	return ""
++}
++
++// meanwhileErr is ErrReplacedMeanwhile for name of the directory that
++// root holds, which is what instead of the file written (differs);
++// step is the step after which it was looked at ("rename", "link"), or
++// "" for the temporary name on an error, which stays as it is.
++func meanwhileErr(root *os.Root, name, what, step string) error {
++	p := filepath.Join(root.Name(), name)
++	switch {
++	case step != "" && what == "missing":
++		return fmt.Errorf("store: after the %s, %s is missing: %w", step, p, ErrReplacedMeanwhile)
++	case step != "":
++		return fmt.Errorf("store: after the %s, %s is %s, not the file written: %w", step, p, what, ErrReplacedMeanwhile)
++	case what == "missing":
++		return fmt.Errorf("store: %s is missing: %w", p, ErrReplacedMeanwhile)
++	}
++	return fmt.Errorf("store: %s is %s, not the file written, and stays: %w", p, what, ErrReplacedMeanwhile)
++}
++
++// check returns nil if name is the file written after step (the rename
++// or link to it), and ErrReplacedMeanwhile otherwise. The window left
++// is between the rename or link and the Root.Lstat of the check:
++// another process that changes name in it and puts the file written
++// back before the Root.Lstat goes unseen, as does any change after the
++// Root.Lstat; what a reader of name finds in that window is not this
++// function's to tell.
++func (w *written) check(root *os.Root, name, step string) error {
++	if what := w.differs(root, name); what != "" {
++		return meanwhileErr(root, name, what, step)
++	}
++	return nil
++}
++
++// removeTemp removes the temporary name on an error (cause) if it is
++// still the file written (differs) and returns cause; the error of the
++// removal is not reported, as before. If the name is anything else, or
++// missing, nothing is removed: the entry belongs to another process and
++// stays, and the error is cause and ErrReplacedMeanwhile (errors.Is
++// holds for both). The window left is between the Root.Lstat of differs
++// and the unlink of removeNameIn: an entry that another process puts
++// under the temporary name in it is removed (unlink removes a name,
++// whatever it is then; no system call removes a name only if it is a
++// given inode), a directory never.
++func (w *written) removeTemp(root *os.Root, cause error) error {
++	if what := w.differs(root, w.tmp); what != "" {
++		return fmt.Errorf("%w; %w", cause, meanwhileErr(root, w.tmp, what, ""))
++	}
++	removeNameIn(root, w.tmp)
++	return cause
++}
++
+ // writeTempIn writes data to a new temporary file with mode perm in the
+-// directory that root holds, syncs and closes it, and returns its name;
+-// on an error it removes the name again where that is possible (not in
+-// a directory with chattr +a, for example). The errors name the
+-// temporary file as writeTemp does ("open <dir>/.tmp-...: ...",
+-// pathErrIn).
+-func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
++// directory that root holds, syncs and closes it, and returns it
++// (written; the caller releases it). On an error it removes the name
++// again where that is possible (not in a directory with chattr +a, for
++// example), and only if it is still the file it created
++// (written.removeTemp): an entry that another process put under the
++// name stays, and the error is ErrReplacedMeanwhile as well. If the
++// fstat right after the open fails, the name cannot be compared and
++// stays. The errors name the temporary file as writeTemp does ("open
++// <dir>/.tmp-...: ...", pathErrIn).
++func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (*written, error) {
+ 	var rnd [8]byte
+ 	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
+-		return "", err
++		return nil, err
+ 	}
+ 	tmp := tmpPrefix + hex.EncodeToString(rnd[:])
+ 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+ 	if err != nil {
+-		return "", pathErrIn(root, tmp, err)
++		return nil, pathErrIn(root, tmp, err)
++	}
++	w := &written{tmp: tmp}
++	fi, err := f.Stat()
++	if err != nil {
++		f.Close()
++		return nil, pathErrIn(root, tmp, err)
++	}
++	w.fi = fi
++	w.held, err = holdFile(f)
++	if err == nil {
++		err = f.Chmod(perm)
+ 	}
+-	err = f.Chmod(perm)
+ 	if err == nil {
+ 		_, err = f.Write(data)
+ 	}
+ 	if err == nil {
+ 		err = f.Sync()
+ 	}
++	if err == nil {
++		callTempInHook(root, tmp, "written")
++	}
+ 	if cerr := f.Close(); err == nil {
+ 		err = cerr
+ 	}
+ 	if err != nil {
+-		removeNameIn(root, tmp)
+-		return "", pathErrIn(root, tmp, err)
++		err = w.removeTemp(root, pathErrIn(root, tmp, err))
++		w.release()
++		return nil, err
+ 	}
+-	return tmp, nil
++	return w, nil
+ }
+ 
+ // ReplaceFileIn is WriteFileAtomicIn without its last step: it writes
+@@ -169,33 +310,56 @@ func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
+ // once name is replaced, whether or not the sync of the directory
+ // succeeds, uses it (gomail-ceremony publish reports a replaced
+ // witnesses.rec: backlog 83). The rename replaces a symbolic link
+-// itself, never its target; a directory under name is an error. When
+-// the temporary file or the rename fails, the temporary file is removed
+-// again where that is possible (not in a directory with chattr +a, for
+-// example: it stays there), and this function has not replaced name;
+-// it does not say that name is as it was before, since its error may
+-// come from another process that changed name or the temporary file
+-// meanwhile (a directory put under name, for example; backlog 118). A
+-// failing rename is "rename <dir>/.tmp-... <dir>/<name>: ...", an
+-// *os.LinkError, as for WriteFileAtomic; the errors of the temporary
+-// file name it as writeTempIn does.
++// itself, never its target; a directory under name is an error.
++//
++// After the rename, name is looked at again with Root.Lstat
++// (written.check; backlog 108, review of task 33 A, H1): it must be a
++// regular file that os.SameFile takes for the temporary file written
++// (fstat on its descriptor, whose duplicate held keeps the inode).
++// Otherwise the error is ErrReplacedMeanwhile: another process put
++// something else under the temporary name before the rename (a
++// directory, which renameat(2) puts over a missing name or an empty
++// directory, a FIFO, a link, another file), or changed name after it.
++// That entry is left under name; nothing is removed. There is no check
++// before the rename: the one after it sees every such change up to its
++// Root.Lstat (the window left is written.check's).
++//
++// When the temporary file or the rename fails, the temporary name is
++// removed again where that is possible (not in a directory with
++// chattr +a, for example: it stays there) and only if it is still the
++// file written (written.removeTemp; ErrReplacedMeanwhile otherwise),
++// and this function has not replaced name; it does not say that name
++// is as it was before, since its error may come from another process
++// that changed name or the temporary file meanwhile (a directory put
++// under name, for example; backlog 118). A failing rename is "rename
++// <dir>/.tmp-... <dir>/<name>: ...", an *os.LinkError, as for
++// WriteFileAtomic; the errors of the temporary file name it as
++// writeTempIn does, an *fs.PathError (or, for crypto/rand, no path).
++// So an ErrReplacedMeanwhile carries an *os.LinkError when the rename
++// failed, an *fs.PathError when the temporary file failed, and neither
++// when the rename happened and name is not the file written
++// (gomail-ceremony publish tells these apart).
+ func ReplaceFileIn(root *os.Root, name string, data []byte) error {
+-	tmp, err := writeTempIn(root, data, FilePerm)
++	w, err := writeTempIn(root, data, FilePerm)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err := root.Rename(tmp, name); err != nil {
+-		removeNameIn(root, tmp)
+-		return pathErrIn(root, name, err)
++	defer w.release()
++	callTempInHook(root, w.tmp, "rename")
++	if err := root.Rename(w.tmp, name); err != nil {
++		return w.removeTemp(root, pathErrIn(root, name, err))
+ 	}
+-	return nil
++	callTempInHook(root, w.tmp, "renamed")
++	return w.check(root, name, "rename")
+ }
+ 
+ // WriteFileAtomicIn is WriteFileAtomic for the file name in the
+ // directory that root holds (backlog 72): temporary file, fsync, rename
+ // and fsync of the directory all go through root, so the file lands in
+ // that directory even if its path names another directory by now, or a
+-// symbolic link.
++// symbolic link. Its errors are those of ReplaceFileIn
++// (ErrReplacedMeanwhile included) and of SyncDirIn; the directory is
++// not synced after an error of ReplaceFileIn.
+ func WriteFileAtomicIn(root *os.Root, name string, data []byte) error {
+ 	if err := ReplaceFileIn(root, name, data); err != nil {
+ 		return err
+@@ -210,20 +374,53 @@ func WriteFileAtomicIn(root *os.Root, name string, data []byte) error {
+ // to name and fsync of the directory all go through root. A failing
+ // link is "link <dir>/.tmp-... <dir>/<name>: ...", as for
+ // CreateFileAtomic.
++//
++// After the link, name is looked at again as by ReplaceFileIn
++// (written.check): a link of something else that another process put
++// under the temporary name (link(2) links a FIFO, a socket or a
++// symbolic link itself), or a change of name after the link, is
++// ErrReplacedMeanwhile, and the entry stays under name. The temporary
++// name is removed after the link, and on every error, only if it is
++// still the file written (written.removeTemp); otherwise it stays and
++// the error is ErrReplacedMeanwhile (errors.Is holds for ErrExists as
++// well when the link found name present). An error of the removal
++// after a link that succeeded and was checked is returned as before
++// (ErrReplacedMeanwhile when the temporary name is gone by then): name
++// is the file written then, but the directory is not synced. The
++// window of written.removeTemp is on this path also after a link that
++// succeeded: between the Root.Lstat of the temporary name and its
++// unlink.
+ func CreateFileAtomicIn(root *os.Root, name string, data []byte) error {
+-	tmp, err := writeTempIn(root, data, FilePerm)
++	w, err := writeTempIn(root, data, FilePerm)
+ 	if err != nil {
+ 		return err
+ 	}
+-	defer removeNameIn(root, tmp)
+-	if err := root.Link(tmp, name); err != nil {
++	defer w.release()
++	callTempInHook(root, w.tmp, "link")
++	if err := root.Link(w.tmp, name); err != nil {
+ 		if errors.Is(err, fs.ErrExist) {
+-			return fmt.Errorf("%w: %s", ErrExists, filepath.Base(name))
++			err = fmt.Errorf("%w: %s", ErrExists, filepath.Base(name))
++		} else {
++			err = pathErrIn(root, name, err)
+ 		}
+-		return pathErrIn(root, name, err)
++		return w.removeTemp(root, err)
+ 	}
+-	if err := removeNameIn(root, tmp); err != nil {
+-		return err
++	callTempInHook(root, w.tmp, "linked")
++	cerr := w.check(root, name, "link")
++	if what := w.differs(root, w.tmp); what != "" {
++		if cerr == nil {
++			cerr = meanwhileErr(root, w.tmp, what, "")
++		}
++	} else if err := removeNameIn(root, w.tmp); err != nil && cerr == nil {
++		cerr = err
++		if errors.Is(err, fs.ErrNotExist) {
++			// Gone between the Root.Lstat and the unlink: removed or
++			// renamed by another process.
++			cerr = meanwhileErr(root, w.tmp, "missing", "")
++		}
++	}
++	if cerr != nil {
++		return cerr
+ 	}
+ 	return SyncDirIn(root)
+ }
+diff --git a/internal/store/fsroot34a_linux_test.go b/internal/store/fsroot34a_linux_test.go
+new file mode 100644
+index 0000000..07ba9fc
+--- /dev/null
++++ b/internal/store/fsroot34a_linux_test.go
+@@ -0,0 +1,468 @@
++package store
++
++import (
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++)
++
++// Tests of task 34 package A (review of task 33 A, H1; reviews of task
++// 34 A, N1 and N3): ReplaceFileIn, WriteFileAtomicIn and
++// CreateFileAtomicIn look at the name again after the rename or link
++// and refuse anything but the file they wrote (ErrReplacedMeanwhile),
++// and they never remove an entry of another process, neither under the
++// name nor under the temporary name. tempInHook stands for the other
++// process.
++
++// foreignKinds are the entries another process puts under the
++// temporary name in these tests: make makes one at p in the directory
++// dir (which holds the file "other"). A make that returns errSkipKind
++// is skipped (a device without CAP_MKNOD).
++var foreignKinds = []struct {
++	name string
++	make func(dir, p string) error
++}{
++	{"dir", func(_, p string) error { return os.Mkdir(p, 0o755) }},
++	{"dir-full", func(_, p string) error {
++		if err := os.Mkdir(p, 0o755); err != nil {
++			return err
++		}
++		return os.WriteFile(filepath.Join(p, "x"), nil, 0o644)
++	}},
++	{"fifo", func(_, p string) error { return syscall.Mkfifo(p, 0o644) }},
++	{"socket", func(_, p string) error { return syscall.Mknod(p, syscall.S_IFSOCK|0o644, 0) }},
++	{"link-out", func(_, p string) error { return os.Symlink("/etc/passwd", p) }},
++	{"link-loop", func(_, p string) error { return os.Symlink(filepath.Base(p), p) }},
++	{"link-in", func(dir, p string) error { return os.Symlink("other", p) }},
++	// A symbolic link to the file written itself (moved to "away"):
++	// only Root.Lstat, never Root.Stat, sees that the name is no
++	// regular file.
++	{"link-own", func(dir, p string) error { return os.Symlink("away", p) }},
++	{"hardlink", func(dir, p string) error { return os.Link(filepath.Join(dir, "other"), p) }},
++	{"file", func(_, p string) error { return os.WriteFile(p, []byte("data"), 0o660) }},
++	{"device", func(_, p string) error {
++		err := syscall.Mknod(p, syscall.S_IFCHR|0o600, int(1<<8|3))
++		if errors.Is(err, syscall.EPERM) {
++			return errSkipKind
++		}
++		return err
++	}},
++}
++
++var errSkipKind = errors.New("kind not possible here")
++
++// entryID is the identity of an entry for the test: device and inode
++// of its Lstat, and its type.
++type entryID struct {
++	dev, ino uint64
++	mode     fs.FileMode
++}
++
++func lstatID(t *testing.T, p string) (entryID, bool) {
++	t.Helper()
++	fi, err := os.Lstat(p)
++	if errors.Is(err, fs.ErrNotExist) {
++		return entryID{}, false
++	}
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := fi.Sys().(*syscall.Stat_t)
++	return entryID{uint64(s.Dev), uint64(s.Ino), fi.Mode().Type()}, true
++}
++
++// fdCount counts the descriptors of the process (/proc/self/fd).
++func fdCount(t *testing.T) int {
++	t.Helper()
++	ents, err := os.ReadDir("/proc/self/fd")
++	if err != nil {
++		t.Fatal(err)
++	}
++	return len(ents)
++}
++
++// withTempInHook sets tempInHook to h for the test.
++func withTempInHook(t *testing.T, h func(root *os.Root, tmp, point string)) {
++	t.Helper()
++	old := tempInHook
++	tempInHook = h
++	t.Cleanup(func() { tempInHook = old })
++}
++
++// callWithin runs f and fails the test if it does not return within a
++// minute (an open of a FIFO under the name would wait for a writer).
++func callWithin(t *testing.T, f func() error) error {
++	t.Helper()
++	done := make(chan error, 1)
++	go func() { done <- f() }()
++	select {
++	case err := <-done:
++		return err
++	case <-time.After(time.Minute):
++		t.Fatal("the call hangs")
++		return nil
++	}
++}
++
++// swapCase is one run: before is what is under name before the call
++// ("" for nothing, "file", "emptydir"), point the point of tempInHook
++// at which the temporary name is swapped, kind the foreign entry.
++type swapCase struct {
++	fn     string
++	before string
++	point  string
++	kind   int
++}
++
++// runSwap runs one swapCase: at point, the temporary file is moved
++// away (to "away", so its inode stays) and the foreign entry is put
++// under the temporary name. The call must fail with
++// ErrReplacedMeanwhile, the foreign entry must still be there (under
++// the temporary name or under name, the same inode), no temporary
++// file of the call may be left that is the file written, and no
++// descriptor may be left.
++func runSwap(t *testing.T, c swapCase) {
++	k := foreignKinds[c.kind]
++	dir := t.TempDir()
++	if err := os.WriteFile(filepath.Join(dir, "other"), []byte("other"), 0o660); err != nil {
++		t.Fatal(err)
++	}
++	name := "witnesses.rec"
++	p := filepath.Join(dir, name)
++	switch c.before {
++	case "file":
++		if err := os.WriteFile(p, []byte("old"), 0o660); err != nil {
++			t.Fatal(err)
++		}
++	case "emptydir":
++		if err := os.Mkdir(p, 0o755); err != nil {
++			t.Fatal(err)
++		}
++	}
++	root := openDotRoot(t, dir)
++	var tmpPath string
++	var foreign entryID
++	swapped, skip := false, false
++	withTempInHook(t, func(_ *os.Root, tmp, point string) {
++		if point != c.point || swapped {
++			return
++		}
++		swapped = true
++		tmpPath = filepath.Join(dir, tmp)
++		if err := os.Rename(tmpPath, filepath.Join(dir, "away")); err != nil {
++			t.Error(err)
++			return
++		}
++		if err := k.make(dir, tmpPath); err != nil {
++			if err == errSkipKind {
++				skip = true
++				return
++			}
++			t.Error(err)
++			return
++		}
++		foreign, _ = lstatID(t, tmpPath)
++	})
++	fds := fdCount(t)
++	err := callWithin(t, func() error {
++		switch c.fn {
++		case "replace":
++			return ReplaceFileIn(root, name, []byte("new"))
++		case "write":
++			return WriteFileAtomicIn(root, name, []byte("new"))
++		}
++		return CreateFileAtomicIn(root, name, []byte("new"))
++	})
++	tempInHook = nil
++	if skip {
++		t.Skip("no device without CAP_MKNOD")
++	}
++	if t.Failed() || !swapped {
++		t.Fatalf("swapped %v, err %v", swapped, err)
++	}
++	if n := fdCount(t); n != fds {
++		t.Errorf("descriptors %d before, %d after", fds, n)
++	}
++	if c.fn == "create" && c.before != "" {
++		// The name is taken: ErrExists, and ErrReplacedMeanwhile for
++		// the foreign entry under the temporary name.
++		if !errors.Is(err, ErrExists) {
++			t.Errorf("not ErrExists: %v", err)
++		}
++	}
++	if !errors.Is(err, ErrReplacedMeanwhile) {
++		t.Fatalf("not ErrReplacedMeanwhile: %v", err)
++	}
++	if strings.Contains(err.Error(), "new") {
++		t.Fatalf("content in the message: %v", err)
++	}
++	atTmp, okTmp := lstatID(t, tmpPath)
++	atName, okName := lstatID(t, p)
++	// The foreign entry is where the other process put it, or, after a
++	// rename that happened, under name; a link leaves it under the
++	// temporary name as well, and it stays there.
++	if !(okTmp && atTmp == foreign) && !(c.fn != "create" && !okTmp && okName && atName == foreign) {
++		t.Fatalf("the foreign entry %s is gone (tmp %v %v, name %v %v): %v", k.name, okTmp, atTmp, okName, atName, err)
++	}
++}
++
++// TestFilesInTempSwapped (task 34 package A points 1 and 3, review of
++// task 34 A, N1 and N3): every kind of foreign entry under the
++// temporary name, put there before the close of the temporary file
++// ("written") or before the rename or link, for every function and
++// every state of the name before (missing, a file, an empty
++// directory: renameat(2) puts a directory over a missing name or an
++// empty directory, review of task 33 A, H1). Each call fails with
++// ErrReplacedMeanwhile, leaves the foreign entry where it is, does
++// not hang (no open of a FIFO or a device) and leaves no descriptor.
++func TestFilesInTempSwapped(t *testing.T) {
++	for _, fn := range []string{"replace", "write", "create"} {
++		points := []string{"written", "rename"}
++		if fn == "create" {
++			points = []string{"written", "link"}
++		}
++		for _, before := range []string{"", "file", "emptydir"} {
++			for _, point := range points {
++				for i, k := range foreignKinds {
++					c := swapCase{fn, before, point, i}
++					t.Run(fn+"/"+before+"/"+point+"/"+k.name, func(t *testing.T) { runSwap(t, c) })
++				}
++			}
++		}
++	}
++}
++
++// TestFilesInTempRemoved: the temporary file removed by another
++// process before the rename or link (nothing put there): the rename or
++// link fails with ENOENT, nothing is removed, and the error is
++// ErrReplacedMeanwhile and the *os.LinkError.
++func TestFilesInTempRemoved(t *testing.T) {
++	for _, fn := range []string{"replace", "create"} {
++		t.Run(fn, func(t *testing.T) {
++			dir := t.TempDir()
++			root := openDotRoot(t, dir)
++			point := map[string]string{"replace": "rename", "create": "link"}[fn]
++			withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++				if pt == point {
++					if err := os.Remove(filepath.Join(dir, tmp)); err != nil {
++						t.Error(err)
++					}
++				}
++			})
++			var err error
++			if fn == "replace" {
++				err = ReplaceFileIn(root, "w", []byte("new"))
++			} else {
++				err = CreateFileAtomicIn(root, "w", []byte("new"))
++			}
++			var le *os.LinkError
++			if !errors.Is(err, ErrReplacedMeanwhile) || !errors.As(err, &le) || !errors.Is(err, syscall.ENOENT) {
++				t.Fatalf("err %v", err)
++			}
++			if !strings.HasSuffix(err.Error(), " is missing: "+ErrReplacedMeanwhile.Error()) {
++				t.Fatalf("message %v", err)
++			}
++		})
++	}
++}
++
++// TestCreateFileAtomicInTempGoneAfterLink: the temporary name removed
++// or replaced by another process after the link, before it is looked
++// at again: name is the file written and stays, but the call fails with
++// ErrReplacedMeanwhile, and a FIFO put under the temporary name stays.
++func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
++	for _, c := range []struct{ name, what string }{{"removed", "is missing"}, {"fifo", "is not a regular file, not the file written, and stays"}} {
++		t.Run(c.name, func(t *testing.T) {
++			dir := t.TempDir()
++			root := openDotRoot(t, dir)
++			var tmpPath string
++			withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++				if pt == "linked" {
++					tmpPath = filepath.Join(dir, tmp)
++					if err := os.Remove(tmpPath); err != nil {
++						t.Error(err)
++					}
++					if c.name == "fifo" {
++						if err := syscall.Mkfifo(tmpPath, 0o644); err != nil {
++							t.Error(err)
++						}
++					}
++				}
++			})
++			err := callWithin(t, func() error { return CreateFileAtomicIn(root, "w", []byte("new")) })
++			tempInHook = nil
++			if want := "store: " + tmpPath + " " + c.what + ": " + ErrReplacedMeanwhile.Error(); err == nil || err.Error() != want {
++				t.Fatalf("err %v, want %s", err, want)
++			}
++			if b, err := os.ReadFile(filepath.Join(dir, "w")); err != nil || string(b) != "new" {
++				t.Fatalf("name: %q %v", b, err)
++			}
++			if c.name == "fifo" {
++				if fi, err := os.Lstat(tmpPath); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
++					t.Fatalf("the FIFO: %v %v", fi, err)
++				}
++			}
++		})
++	}
++}
++
++// TestFilesInNameChangedAfter: the name changed by another process
++// after the rename or link, before it is looked at again ("renamed",
++// "linked"): removed, replaced by a directory, by a FIFO or by another
++// file. ErrReplacedMeanwhile without an *os.LinkError or an
++// *fs.PathError (the rename happened: gomail-ceremony publish says "is
++// not the file publish wrote"), the entry stays, and the message says
++// what is there. For CreateFileAtomicIn the temporary name, still the
++// file written, is removed.
++func TestFilesInNameChangedAfter(t *testing.T) {
++	for _, fn := range []string{"replace", "write", "create"} {
++		for _, c := range []struct {
++			name, what string
++			change     func(p string) error
++		}{
++			{"removed", "is missing", os.Remove},
++			{"dir", "is not a regular file, not the file written", func(p string) error {
++				if err := os.Remove(p); err != nil {
++					return err
++				}
++				return os.Mkdir(p, 0o755)
++			}},
++			{"fifo", "is not a regular file, not the file written", func(p string) error {
++				if err := os.Remove(p); err != nil {
++					return err
++				}
++				return syscall.Mkfifo(p, 0o644)
++			}},
++			{"file", "is another file, not the file written", func(p string) error {
++				return os.Rename(filepath.Join(filepath.Dir(p), "other"), p)
++			}},
++		} {
++			t.Run(fn+"/"+c.name, func(t *testing.T) {
++				dir := t.TempDir()
++				if err := os.WriteFile(filepath.Join(dir, "other"), []byte("other"), 0o660); err != nil {
++					t.Fatal(err)
++				}
++				p := filepath.Join(dir, "w")
++				root := openDotRoot(t, dir)
++				point, step := "renamed", "rename"
++				if fn == "create" {
++					point, step = "linked", "link"
++				}
++				var tmpPath string
++				withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++					if pt == point {
++						tmpPath = filepath.Join(dir, tmp)
++						if err := c.change(p); err != nil {
++							t.Error(err)
++						}
++					}
++				})
++				before, _ := lstatID(t, filepath.Join(dir, "other"))
++				fds := fdCount(t)
++				err := callWithin(t, func() error {
++					switch fn {
++					case "replace":
++						return ReplaceFileIn(root, "w", []byte("new"))
++					case "write":
++						return WriteFileAtomicIn(root, "w", []byte("new"))
++					}
++					return CreateFileAtomicIn(root, "w", []byte("new"))
++				})
++				tempInHook = nil
++				if n := fdCount(t); n != fds {
++					t.Errorf("descriptors %d before, %d after", fds, n)
++				}
++				var le *os.LinkError
++				var pe *fs.PathError
++				if !errors.Is(err, ErrReplacedMeanwhile) || errors.As(err, &le) || errors.As(err, &pe) {
++					t.Fatalf("err %v", err)
++				}
++				if want := "store: after the " + step + ", " + filepath.Join(dir, ".", "w") + " " + c.what + ": " + ErrReplacedMeanwhile.Error(); err.Error() != want {
++					t.Fatalf("message\n%q, want\n%q", err.Error(), want)
++				}
++				switch c.name {
++				case "removed":
++					if _, ok := lstatID(t, p); ok {
++						t.Fatal("name is back")
++					}
++				case "file":
++					if id, _ := lstatID(t, p); id != before {
++						t.Fatal("the other file is not under the name")
++					}
++				default:
++					if id, ok := lstatID(t, p); !ok || id.mode.IsRegular() {
++						t.Fatal("the entry under the name is gone")
++					}
++				}
++				if fn == "create" {
++					if _, ok := lstatID(t, tmpPath); ok {
++						t.Fatal("the temporary name, the file written, is left")
++					}
++				}
++			})
++		}
++	}
++}
++
++// TestFilesInInodeReused (review of task 34 A, M4): the temporary file
++// removed before the rename and a new file of the same content created
++// under its name. On ext4 the new file may get the inode number just
++// freed; held keeps the inode of the file written in use, so the
++// numbers differ and the rename of the new file is refused. Without
++// held (a mutant) the check can take the new file for the file
++// written, so the test repeats the case.
++func TestFilesInInodeReused(t *testing.T) {
++	for i := 0; i < 50; i++ {
++		dir := t.TempDir()
++		root := openDotRoot(t, dir)
++		withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++			if pt == "rename" {
++				p := filepath.Join(dir, tmp)
++				if err := os.Remove(p); err != nil {
++					t.Error(err)
++				}
++				if err := os.WriteFile(p, []byte("new"), 0o660); err != nil {
++					t.Error(err)
++				}
++			}
++		})
++		err := ReplaceFileIn(root, "w", []byte("new"))
++		tempInHook = nil
++		if !errors.Is(err, ErrReplacedMeanwhile) || !strings.Contains(err.Error(), "is another file") {
++			t.Fatalf("run %d: err %v", i, err)
++		}
++	}
++}
++
++// TestFilesInTempGoneOnError: on an error of the temporary file or the
++// rename, the temporary name is removed only while it is the file
++// written. A rename that fails for a directory under the name removes
++// the temporary file (still the file written), and the error is the
++// *os.LinkError alone, not ErrReplacedMeanwhile.
++func TestFilesInTempGoneOnError(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.Mkdir(filepath.Join(dir, "w"), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, "w", "x"), nil, 0o644); err != nil {
++		t.Fatal(err)
++	}
++	root := openDotRoot(t, dir)
++	err := ReplaceFileIn(root, "w", []byte("new"))
++	var le *os.LinkError
++	if !errors.As(err, &le) || errors.Is(err, ErrReplacedMeanwhile) {
++		t.Fatalf("err %v", err)
++	}
++	ents, err := os.ReadDir(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(ents) != 1 {
++		t.Fatalf("entries %v", ents)
++	}
++}
+diff --git a/internal/store/hold_other.go b/internal/store/hold_other.go
+new file mode 100644
+index 0000000..bcc2029
+--- /dev/null
++++ b/internal/store/hold_other.go
+@@ -0,0 +1,13 @@
++//go:build !unix
++
++package store
++
++import "os"
++
++// holdFile keeps no second descriptor where syscall has no Dup or where
++// one would be in the way (written.held): on Windows a second handle,
++// which os opens without FILE_SHARE_DELETE, would make the rename of
++// the temporary file fail; Plan 9, js and wasip1 are not run. The
++// comparison of written.differs rests on os.SameFile alone there (on
++// Windows the file ID of NTFS, which carries a sequence number).
++func holdFile(*os.File) (*os.File, error) { return nil, nil }
+diff --git a/internal/store/hold_unix.go b/internal/store/hold_unix.go
+new file mode 100644
+index 0000000..bf5516a
+--- /dev/null
++++ b/internal/store/hold_unix.go
+@@ -0,0 +1,41 @@
++//go:build unix
++
++package store
++
++import (
++	"io/fs"
++	"os"
++	"syscall"
++)
++
++// holdFile returns a duplicate of the descriptor of f (dup(2), marked
++// close-on-exec under syscall.ForkLock, as os/exec expects of a
++// descriptor made without O_CLOEXEC), for written.held: the same open
++// file, so that its inode stays in use after f is closed. The name of f
++// is never opened again: a FIFO, a device, a socket or a link that
++// another process puts under it meanwhile is neither opened nor
++// followed, and nothing is removed because such an open failed. Every
++// error is an *fs.PathError ("dup <name>: ..."), an error of the
++// temporary file for the callers (EMFILE, for example).
++func holdFile(f *os.File) (*os.File, error) {
++	dupErr := func(err error) error { return &fs.PathError{Op: "dup", Path: f.Name(), Err: underlying(err)} }
++	rc, err := f.SyscallConn()
++	if err != nil {
++		return nil, dupErr(err)
++	}
++	nfd, derr := -1, error(nil)
++	if err := rc.Control(func(fd uintptr) {
++		syscall.ForkLock.RLock()
++		nfd, derr = syscall.Dup(int(fd))
++		if derr == nil {
++			syscall.CloseOnExec(nfd)
++		}
++		syscall.ForkLock.RUnlock()
++	}); err != nil {
++		return nil, dupErr(err)
++	}
++	if derr != nil {
++		return nil, dupErr(derr)
++	}
++	return os.NewFile(uintptr(nfd), f.Name()), nil
++}
+diff --git a/internal/store/tempinhook_tagged.go b/internal/store/tempinhook_tagged.go
+new file mode 100644
+index 0000000..9927f1b
+--- /dev/null
++++ b/internal/store/tempinhook_tagged.go
+@@ -0,0 +1,21 @@
++//go:build gomail_test
++
++package store
++
++import "os"
++
++// SetTempInHook sets the function that ReplaceFileIn, WriteFileAtomicIn
++// and CreateFileAtomicIn call at their points ("written", "rename" or
++// "link", "renamed" or "linked"; tempInHook) and returns a function
++// that puts back the one before. It exists only in a build with the tag
++// gomail_test, for the tests of gomail-ceremony publish, which stand
++// for another process that changes the temporary file of witnesses.rec
++// (review of task 33 A, H1); a production build has no way to set the
++// hook, and it reads no environment. h is not called concurrently by
++// one call of those functions; the caller does not change it while one
++// runs.
++func SetTempInHook(h func(root *os.Root, tmp, point string)) (restore func()) {
++	old := tempInHook
++	tempInHook = h
++	return func() { tempInHook = old }
++}
+-- 
+2.43.0
+
