@@ -640,3 +640,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 20:22 UTC: 33A Prüfer 1: abnahmefähig, nur niedrig (Testlücke ohne Rückruf). Prüfer 2 läuft.
 - 20:29 UTC: 33B abnahmefähig (nur niedrig), trotzdem Nacharbeit 33B2 für F1 (Zufallsfehler bei sich ändernden Verzeichnissen im Checkout) und H1–H3, weil Zeit bleibt.
 - 20:33 UTC: 33A abnahmefähig mit 8d557b0 (beide Prüfer, nur niedrig). H1 von Prüfer 2 (vorbestehend: `publish` meldet Erfolg, obwohl `witnesses.rec` nach einem Wettlauf ein Verzeichnis ist) wird Auftrag 34 (strengere Prüfung nach dem Umbenennen, nur zusätzliche Ablehnung).
+- 20:34 UTC: Auftrag 34 (Paket 34A, in `docs/tasks/33-nach-m1-nacht4.md`): Prüfung nach dem Umbenennen in `ReplaceFileIn`, `WriteFileAtomicIn`, `CreateFileAtomicIn`, Basis 8d557b0. Gestartet.

@@ -56,3 +56,16 @@ Ausgangspunkt ist 48e8378 (33B). Ergebnis ist genau ein Commit auf c6b2ea2, der 
 3. **H2:** Im echten `testdata/`-Ordner des Walk-Baums eine getaggte Datei, die die Umgebung liest (`GOMAIL_TEST_TESTDATA`); erwartet: ein Problem, der Name wird nicht gelesen.
 4. **H3:** Den Fehlerweg von `skippedTagged` testen, falls ohne root-Tricks möglich (sonst Grund in den Notizen); die tote Bedingung `name != "testdata"` entfernen, wenn sie wirklich unerreichbar ist.
 5. **Läufe** wie in Paket 33B, dazu der Wettlauf aus Punkt 1 (mindestens 150 Läufe, kein FAIL).
+
+# Auftrag 34: `publish`, Prüfung nach dem Umbenennen (24./25.11.2026)
+
+Es gelten Kopf und Regeln von Auftrag 33 oben. Commit-Zeile `Task: docs/tasks/33-nach-m1-nacht4.md (Paket 34A)`; Notizen `scratchpad/impl34a/notes.md`.
+
+## Paket 34A. Sicherheitskritisch.
+
+- **Basis:** 8d557b0 (Endstand von 33A; `git reset --hard 8d557b0`). Ergebnis: genau ein Commit auf 8d557b0.
+- **Fund (Prüfer 2 von 33A, H1, vorbestehend):** Ersetzt ein fremder Prozess die temporäre Datei von `store.ReplaceFileIn` durch ein Verzeichnis, während `witnesses.rec` gerade fehlt (oder ein leeres Verzeichnis ist), gelingt `renameat`. `publish` meldet dann Erfolg (`WitnessesReplaced`/`WitnessesLinkReplaced`), obwohl unter dem Namen ein Verzeichnis liegt. Beleg und Test: `scratchpad/rev33a-robust/` (`real2-*.log`, `t/rev33ar_real_linux_test.go`).
+1. **Abhilfe:** Nach dem Umbenennen prüfen `store.ReplaceFileIn`, `store.WriteFileAtomicIn` und `store.CreateFileAtomicIn` mit `Lstat` über die Root, dass der Name eine reguläre Datei mit Gerät und Inode der temporären Datei ist (`fstat` am Deskriptor vor dem Schließen). Sonst liefern sie einen eigenen Fehler (Sentinel, etwa `store.ErrReplacedMeanwhile`), und `publish` meldet ihn mit Pfad und Abhilfe, fest formuliert, ohne Inhalt; für `witnesses.rec` mit der Fassung „was not replaced“ bzw. einer gleich genauen. Nichts wird danach geloggt. Prüfe alle Aufrufer der drei Funktionen (`grep`), auch außerhalb von `internal/ceremony`, und dass sich für sie nur zusätzliche Ablehnungen ergeben.
+2. **Restfenster** zwischen Umbenennen und `Lstat` im Kommentar nennen.
+3. **Tests:** der Wettlauf aus `rev33ar_real_linux_test.go` (Temp durch Verzeichnis ersetzt, Name fehlt bzw. leeres Verzeichnis) über den Haken des Pakets reproduzierbar; erwartet Ablehnung, nichts geloggt, kein Rückruf „replaced“. Dazu je ein Test für `WriteFileAtomicIn` und `CreateFileAtomicIn`.
+4. **Läufe:** `internal/store` und `internal/ceremony` unter race mit und ohne Tags und unter 386 mit Tags; `cmd/gomail-ceremony` unter race mit Tags; alle übrigen Aufrufer der drei Funktionen mit ihren Paketen unter race mit Tags; die Matrix aus `scratchpad/impl33a/` (Skript `matrix.sh`) ohne neue Verletzung und ohne Übergang von Ablehnung zu Annahme; Gegenbelege per Mutation.
