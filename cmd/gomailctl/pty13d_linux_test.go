@@ -428,11 +428,35 @@ func TestPtyRestoreStderrClosed(t *testing.T) {
 	c.must(0, dir, "", "sync")
 }
 
+// stderrOfProgram is os.Stderr as gomailctl has it: main passes
+// os.Stderr to run, and the os package makes it a file of descriptor 2
+// whose EPIPE raises SIGPIPE. It is taken at package initialisation,
+// before testing.M.Run: under go test -json (-test.v=test2json) Run
+// sets os.Stderr to os.Stdout, so that os.Stderr in a test is then
+// descriptor 1 (task 35A).
+var stderrOfProgram = os.Stderr
+
 // TestRelayBrokenPipe (task 13d finding 2): with SIGPIPE taken over as
 // main does, a write to standard error without a reader fails with
-// EPIPE and the program goes on.
+// EPIPE and the program goes on. The write goes through the standard
+// error of the program on descriptor 2 (stderrOfProgram), not through
+// os.Stderr of the test, which is descriptor 1 under go test -json
+// (task 35A).
 func TestRelayBrokenPipe(t *testing.T) {
 	relayBrokenPipe()
+	// Control does not change the mode of the descriptor (Fd would make
+	// it blocking).
+	rc, err := stderrOfProgram.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := -1
+	if err := rc.Control(func(d uintptr) { fd = int(d) }); err != nil {
+		t.Fatal(err)
+	}
+	if fd != 2 {
+		t.Fatalf("standard error of the program on descriptor %d", fd)
+	}
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -447,7 +471,7 @@ func TestRelayBrokenPipe(t *testing.T) {
 		syscall.Close(saved)
 		t.Fatal(err)
 	}
-	_, werr := os.Stderr.Write([]byte("x"))
+	_, werr := stderrOfProgram.Write([]byte("x"))
 	syscall.Dup3(saved, 2, 0)
 	syscall.Close(saved)
 	if !errors.Is(werr, syscall.EPIPE) {
