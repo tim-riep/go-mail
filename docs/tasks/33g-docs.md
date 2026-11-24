@@ -20,3 +20,7 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahm
 ## Fertig
 
 Ein Commit; jeder Meldungstext wörtlich wie im Code; Bericht mit geänderten Stellen, neuen Nummern, offenen Punkten. Notizen: `scratchpad/impl33g/notes.md`.
+
+## Nacharbeit 33g2
+
+Ausgangspunkt ist der Patch `docs/tasks/patches/33g-e0f4c2b.patch` (auf 789245b). Ergebnis ist genau ein Commit, der 33g insgesamt enthält, auf dem aktuellen Arbeitsbranch. Quelle: Prüfung 33g in `docs/tasks/20-notes.md` (Eintrag „33g“) mit den Textvorschlägen. Umzusetzen: F1 bis F6 (niedrig) und die Hinweise F7 bis F11, jeweils am Code geprüft. Keine `go`-Befehle außer `go env`.
