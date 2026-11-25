@@ -681,3 +681,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 02:08 UTC: Nacharbeit 36g2 gestartet (Doku auf 36A2 angepasst, Funde der Prüfung 36g).
 - 02:15 UTC: 36A2 Prüfer 1: abnahmefähig, nur Hinweise. Prüfer 2, Volllauf und 36g2 laufen.
 - 02:17 UTC: 36g2 fertig (28924d8 auf 833a3a8; Doku auf 36A2 angepasst, F1/F2/H1–H5 aus der Prüfung 36g). Patch `docs/tasks/patches/36g2-28924d8.patch`. Nachprüfung gestartet.
+- 02:23 UTC: 36g2 abnahmefähig (nur niedrig; Reste in den nächsten Doku-Nachzug). Zahlen von 36A2 in 20-notes „36A2 Bericht“ gesichert. Merge von 36A (24c35c6) und 36g (28924d8) nach Prüfer 2 von 36A2 und grünem `fr-n36a`.
