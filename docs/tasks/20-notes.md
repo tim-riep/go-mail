@@ -621,3 +621,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 
 - **Prüfer** (`scratchpad/rev38a/notes.md`): Verhalten richtig (nur `return err` für Fehler von `os.Stat` außer `fs.ErrNotExist` beim Folgen eines Links; hängende/verschwundene Links, echte Verzeichnisse und FIXB unverändert; keine Links im echten Baum außerhalb von `.git`, dort unter übersprungenen Ordnern). **Mittel:** Der Fall `{"testdata", "_m"}` von `TestReleaseSwitchesLinkStat` erreicht `testdata` nie (`_m` sortiert davor und scheitert schon); Mutant „Prüfung nur für `_*` und `.*`“ übersteht. Niedrig/Hinweis: `ENOTDIR` (Ziel durch eine Datei) scheitert jetzt auch, nicht genannt; „like a directory of the same path“ ungenau. Läufe: race mit Tags grün; eigener Mutant (ELOOP als Skip) gefangen.
 - **Orchestrator:** mittel offen → nicht zusammengeführt; Nacharbeit 38A2 in neuem Agenten.
+
+### 38A2 (Nacharbeit; 11de09a auf df4bd58): Nachprüfung
+
+- **Prüfer** (`scratchpad/rev38a2/notes.md`): abnahmefähig, nichts über Info. Der Fall `{"testdata", "z"}` erreicht den Link `testdata` zuerst (WalkDir: cmd, testdata, z); der Mutant „nur versteckte Namen“ scheitert jetzt („a chain testdata -> z -> testdata: …; want the error ELOOP“). `ENOTDIR` und die Formulierung im Kommentar stimmen mit dem Code.
+- **Orchestrator:** zusammengeführt als 2671814. Schritte auf `src-n38a2`: gofmt (Modul), vet für `internal/e2e` mit und ohne Tags, `internal/e2e` race (114 s) und race mit Tags (122 s) grün; übrige Schritte gelten aus `fr-n36a`/`fr-n37a` (nur `internal/e2e/release28b_test.go` geändert). Doku zu 38A (Nr. 129 H1 erledigt; `EACCES` nur als root übersprungen, ungeprüft als Nicht-root; `ENAMETOOLONG` ohne eigenen Fall; H2 offen) folgt im nächsten Doku-Nachzug.
