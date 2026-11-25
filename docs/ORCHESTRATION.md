@@ -684,3 +684,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 02:23 UTC: 36g2 abnahmefähig (nur niedrig; Reste in den nächsten Doku-Nachzug). Zahlen von 36A2 in 20-notes „36A2 Bericht“ gesichert. Merge von 36A (24c35c6) und 36g (28924d8) nach Prüfer 2 von 36A2 und grünem `fr-n36a`.
 - 02:35 UTC: 36A2 von beiden Prüfern abnahmefähig (nur Hinweise). Merge von 36A (24c35c6) und 36g (28924d8), sobald `fr-n36a` grün ist.
 - 02:35 UTC: `fr-n36a`: `racetag-cmd_gomail-ceremony` FAIL in `TestPTYSignals/Ctrl-backslash_shown` („program does not exit“, 60 s), unter hoher Last durch die Prüfer. Kein bekannter Zufallsfehler. Vergleich je 5 Läufe mit 36A2 (`orch/n36a`) und ohne 36A (`orch/n36`) läuft; Merge von 36A erst nach Klärung.
+- 02:36 UTC: Vergleich `TestPTYSignals` je 5×: mit 36A2 5/5, ohne 36A 5/5 → Last, nicht 36A; `racetag-cmd_gomail-ceremony` läuft nach dem Volllauf einmal neu.
