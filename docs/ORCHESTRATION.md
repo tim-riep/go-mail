@@ -701,3 +701,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 04:27 UTC: 37A von beiden Prüfern abnahmefähig (je ein niedriger Fund, Hinweise; 20-notes „Auftrag 37“). Store-Schritte `fr-n37a` grün. **Zusammengeführt** als b463c4a (Code gleich `src-n37a`); Vektoren unverändert. Doku zu 37A (Nr. 130 Teil erledigt, Reste) folgt im nächsten Doku-Nachzug.
 - 04:31 UTC: 37g fertig (c6f470b auf ca74a38; Nr. 130 Teil erledigt mit 37A und neue Reste, AUDIT 6.2, HANDOFF Punkt 7, Quellen D93, Köpfe; Patch `docs/tasks/patches/37g-c6f470b.patch`). Ein Prüfer läuft.
 - 04:33 UTC: Prüfer 37g abnahmefähig (L1 niedrig, H1–H4; 20-notes „37g“). Zusammengeführt als 1d56b3d.
+- 04:35 UTC: 37g2 fertig (7fa509b auf 5c77195; L1, H1–H4 der Prüfung von 37g; Patch `docs/tasks/patches/37g2-7fa509b.patch`). Ein Prüfer läuft.
