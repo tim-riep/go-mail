@@ -18,3 +18,7 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich, mit der
 ## Fertig
 
 Ein Commit; Meldungen wörtlich wie im Code; Bericht mit geänderten Stellen und neuen Nummern. Notizen `scratchpad/impl36g/notes.md`.
+
+## Nacharbeit 36g2
+
+Ausgangspunkt ist der Patch `docs/tasks/patches/36g-171436a.patch` (auf fc49c68). Ergebnis ist genau ein Commit, der 36g insgesamt enthält, auf dem aktuellen Arbeitsbranch. 36A ist inzwischen als Nacharbeit 36A2 neu gefasst (Patch `docs/tasks/patches/36a2-24c35c6.patch` auf c8cda58): Scheitert das Umbenennen auf `aside`, fällt `store` auf das geprüfte Entfernen wie vor 36A zurück; damit entfällt die neue Ablehnung bei `ENOSPC` nach dem Link (F1 der Prüfung 36g), die Temp-Datei bleibt bei `ENOSPC` nicht mehr liegen, und die Meldung bei `chattr +a` nach dem Link ist wieder `unlink <tmp>: operation not permitted`. Alle Aussagen zu 36A am Code von 24c35c6 prüfen und anpassen (auch die Prüfstatus: 36A erste Runde von beiden Prüfern abnahmefähig, Nacharbeit 36A2 in Prüfung). Dazu aus der Prüfung 36g (20-notes „36g“, `scratchpad/rev36g/notes.md`): F2 (Verweis auf `docs/tasks/36a-untersuchung-128.md` statt Scratchpad) und H1–H5 mit den Textvorschlägen; H2 Entscheidungshilfe zu `WriteAccept` aufnehmen. Fenster 2' und die Gründe gegen einen Unterordner 0700 (Notizen `scratchpad/impl36a2/notes.md`, Kommentar an `dropTemp`) kurz nennen.
