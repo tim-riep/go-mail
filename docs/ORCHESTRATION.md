@@ -668,3 +668,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 00:24 UTC: **Zusammengeführt: Auftrag 34** — 34A 8ddbed3 (Code gleich `orch/n34` c8cda58), Doku 34g 3732791; Hashes und Volllauf eingetragen. Volllauf `fr-n34` 67/67 grün bis 00:24 UTC. Phase-0-Vektoren unverändert (seit 526cb21; der neue Checkout ist flach, 38626a9 fehlt lokal).
 - 00:29 UTC: 36B fertig (2e0109e auf 526cb21; FIXB, R01, R04, PATH_MAX-Fall; Dauertausch 1133–2231 → 0 Fehltreffer). Patch `docs/tasks/patches/36b-2e0109e.patch`. Prüfer gestartet.
 - 00:34 UTC: Neustart im selben Container (Scratchpad und Worktrees erhalten). Abgebrochen: Läufe von 36A (WIP cda73e3) und der Prüfung 36B; beide Agenten per Nachricht fortgesetzt.
+- 00:46 UTC: 36B abnahmefähig (nur Hinweise). Quelle `orch/n36` = c8cda58 (Code wie 8ddbed3) + 36B; Volllauf `fr-n36` aus `fr-n34` übernommen, neu nur gofmt, vet und `internal/e2e` (36B ändert nur `internal/e2e/release28b_test.go`).
