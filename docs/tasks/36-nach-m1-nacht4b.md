@@ -27,3 +27,11 @@ Ausgangspunkt ist 558ce2b (Patch `docs/tasks/patches/36a-558ce2b.patch` auf c8cd
 3. **Tests (N1, N2 Prüfer 1):** Fehlerweg des Umbenennens in `dropTemp` (chattr +a, Probe `scratchpad/rev36a-spec/scripts/zz_rev36_chattr_linux_test.go`; ENOSPC auf einem kleinen loop-Dateisystem, wenn als root möglich, sonst Skip mit Grund); `aside` aus zwei Aufrufen verschieden.
 4. **Hinweise:** Meldung bei scheiterndem Umbenennen nennt keinen nie existierenden Namen als Ort (H2 Prüfer 1, H3 Prüfer 2); Kommentare zu Linux/AIX; zu lange Kommentarzeilen.
 5. **Läufe** wie in Paket 36A, dazu der ENOSPC-Fall aus `logs/enospc.log` (alt c8cda58, 558ce2b, neu) und die Wettläufe M2–M4 aus dem Harness von Prüfer 2 (fremd entfernt unter Temp-Name und unter dem neuen Namen; falsche Erfolge außerhalb Fenster 1 = 0).
+
+## Nacharbeit 36A3 (dritte Runde, nur Testcode)
+
+Ausgangspunkt 24c35c6 (Patch `docs/tasks/patches/36a2-24c35c6.patch` auf c8cda58). Ergebnis: genau ein Commit auf c8cda58 mit 36A insgesamt.
+
+- **Fehler (Volllauf `fr-n36a`):** `go test ./internal/store` (race, race mit Tags, 386 mit Tags; ohne `-count=1`, also mit Testcache) endet mit `testing: can't write /tmp/go-build…/testlog.txt: write …: file too large` und FAIL, obwohl alle Tests bestehen. Ein neuer Test (`RLIMIT_FSIZE`, etwa `TestWriteTempInErrorSwapped` oder `TestDropTempNoSpace`) senkt das Dateigrößenlimit des ganzen Prozesses und stellt es nicht (oder nicht vollständig, weich und hart) wieder her.
+- **Abhilfe:** Jeder Test, der `RLIMIT_FSIZE` ändert, setzt den alten Wert (weich und hart) sicher zurück (`t.Cleanup`, auch bei `t.Fatal`), und schreibt in der Zwischenzeit nichts außer der eigenen Probe. Prüfe, ob sich die Änderung auf einen Kindprozess beschränken lässt. Kein Produktionscode.
+- **Beleg:** `go test` für `internal/store` ohne `-count=1` (Testcache an, `GOFLAGS` leer) unter race, race mit Tags und 386 mit Tags endet mit `ok`; dazu `-count=3`.
