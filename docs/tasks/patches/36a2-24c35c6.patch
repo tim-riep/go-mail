@@ -1,0 +1,1503 @@
+From 24c35c607c75b414f6d451409a22a58ae95302f9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 01:45:45 +0000
+Subject: [PATCH] store: move the temporary name aside before it is removed
+
+ReplaceFileIn, WriteFileAtomicIn and CreateFileAtomicIn no longer look
+at the temporary name and then unlink it. written.dropTemp renames it
+first to a new name of its own (.tmp- and 16 random hex digits, through
+the root), looks at that name with Root.Lstat and os.SameFile, and
+unlinks it only if it is the file written. An entry that another
+process put under the temporary name is at most renamed, never removed,
+and the error (ErrReplacedMeanwhile) names both names (review of task
+34 A, hint of the second reviewer). The window between the Root.Lstat
+and the unlink stays, now on a name that exists only from the rename on
+and that no other process can know before; the comment of dropTemp
+describes it, that inotify announces it (IN_MOVED_TO), and the rename
+over an entry put under the new name before it (64 random bits to
+guess). The directory is opened for the unlink before the Root.Lstat
+(openDirIn, removeNameInDir on Linux and AIX), so that the window holds
+no open any more. A subdirectory of mode 0700 for the new name is not
+used: it would stay, empty, in a directory with chattr +a, where
+RemoveTempReportIn does not remove it, and its rmdir by name would open
+a window of its own.
+
+When the rename to the new name fails for whatever reason (a full file
+system with no room for its entry, a directory with chattr +a, the
+temporary name gone), dropTemp falls back to the way before: it looks
+at the temporary name itself and unlinks it only if it is the file
+written (dropTempInPlace). So no call that succeeded before fails now:
+CreateFileAtomicIn on a full file system succeeds as before after a
+link that was checked, and with chattr +a it reports the unlink of the
+temporary name as before, never a rename to a name that never existed;
+on the error paths the temporary file is removed again on a full file
+system (review of task 36 A, N1 and N2 of the second reviewer, H2 of
+the first, F1 of the review of task 36 g).
+
+The unlink that finds the name gone (ENOENT) or a directory (EISDIR) is
+ErrReplacedMeanwhile, after the link of CreateFileAtomicIn and on the
+error paths alike, where removeTemp swallowed it before (review of task
+34 A, N1 of the second reviewer). When the check after the link fails
+and the temporary name is foreign as well, the error of
+CreateFileAtomicIn names both.
+
+Tests: the error path of writeTempIn with a swapped temporary name and
+a write that fails (EFBIG under RLIMIT_FSIZE 0, at the new hook point
+"opened"); FD_CLOEXEC of the duplicate held; the ENOENT and EISDIR
+branches at the new hook point "unlink" (reviews of task 34 A, N1 and
+N2 of the first reviewer and its hints); the failing rename to the new
+name with chattr +a and with ENOSPC on a small ext4 of its own (loop
+mount, as root only, skipped otherwise), with a FIFO put under the
+temporary name in the fallback; two calls move to two different new
+names (review of task 36 A, N1 and N2 of the first reviewer). The
+comments "a directory never" and on openDirIn are limited to Linux and
+AIX. The tests of publish expect the new messages; publish itself is
+unchanged but for two comments.
+
+Task: docs/tasks/36-nach-m1-nacht4b.md (Paket 36A)
+---
+ internal/ceremony/publish.go               |  11 +-
+ internal/ceremony/publish34a_linux_test.go |  75 ++++-
+ internal/store/fsroot.go                   | 257 ++++++++++++---
+ internal/store/fsroot34a_linux_test.go     | 175 ++++++++++-
+ internal/store/fsroot36a2_linux_test.go    | 343 +++++++++++++++++++++
+ internal/store/fsroot36a_linux_test.go     | 227 ++++++++++++++
+ internal/store/removenamein_other.go       |  14 +-
+ internal/store/removenamein_unlinkat.go    |  36 ++-
+ internal/store/tempinhook_tagged.go        |   5 +-
+ 9 files changed, 1043 insertions(+), 100 deletions(-)
+ create mode 100644 internal/store/fsroot36a2_linux_test.go
+ create mode 100644 internal/store/fsroot36a_linux_test.go
+
+diff --git a/internal/ceremony/publish.go b/internal/ceremony/publish.go
+index 125d9f6..d203eba 100644
+--- a/internal/ceremony/publish.go
++++ b/internal/ceremony/publish.go
+@@ -1367,9 +1367,11 @@ func runPublish(opts PublishOptions) error {
+ //
+ // store.ErrReplacedMeanwhile in either of the first two states (after
+ // the temporary file or the rename failed, the temporary name is not
+-// the file written any more, and that entry stays) keeps its state. For
+-// every store.ErrReplacedMeanwhile the remedy names the other process:
+-// stop it, look at platform/, then run the same publish again.
++// the file written any more, and that entry stays, under that name or
++// moved by store to a new temporary name; the error names where) keeps
++// its state. For every store.ErrReplacedMeanwhile the remedy names the
++// other process: stop it, look at platform/, then run the same publish
++// again.
+ //
+ // The fsync of platform/ after the rename is not part of it
+ // (syncPlatform): the callbacks after the rename report the
+@@ -1398,7 +1400,8 @@ func replaceFailedErr(st *store.Store, err error) error {
+ // when it is store.ErrReplacedMeanwhile (review of task 33 A, H1):
+ // another process changed platform/ while publish wrote n, and the
+ // error of store says what is where (an entry that is not the file
+-// publish wrote stays where it is). The message names the path of n
++// publish wrote stays where it is, or under the new temporary name that
++// store moved it to). The message names the path of n
+ // and the remedy, as errChanged does; nothing is logged. Any other
+ // error is returned as it is (the messages before). witnesses.rec comes
+ // here only when its replacement was not announced (it was missing),
+diff --git a/internal/ceremony/publish34a_linux_test.go b/internal/ceremony/publish34a_linux_test.go
+index c15e7a3..32d8182 100644
+--- a/internal/ceremony/publish34a_linux_test.go
++++ b/internal/ceremony/publish34a_linux_test.go
+@@ -139,7 +139,7 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
+ 		// (nil: another file under witnesses.rec), kind the type of the
+ 		// foreign entry.
+ 		state string
+-		what  func(p, tmp string) string
++		what  func(p, tmp, aside string) string
+ 		kind  fs.FileMode
+ 	}{
+ 		{"dir-name-missing", "rename", func(p, tmp string) error {
+@@ -147,7 +147,7 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
+ 				return err
+ 			}
+ 			return toDir(tmp)
+-		}, stateNotWritten, func(p, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeDir},
++		}, stateNotWritten, func(p, _, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeDir},
+ 		{"dir-name-emptydir", "rename", func(p, tmp string) error {
+ 			if err := os.Remove(p); err != nil {
+ 				return err
+@@ -159,15 +159,15 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
+ 			// The check of os.Root.Rename refuses a directory under the
+ 			// new name (EEXIST); renameat(2) would put the directory over
+ 			// an empty one only in the window after that check.
+-		}, stateNotReplaced, func(p, tmp string) string {
+-			return "rename " + tmp + " " + p + ": file exists; store: " + tmp + " is not a regular file, not the file written, and stays: " + store.ErrReplacedMeanwhile.Error()
++		}, stateNotReplaced, func(p, tmp, aside string) string {
++			return "rename " + tmp + " " + p + ": file exists; " + asideMsg(tmp, aside, "not a regular file")
+ 		}, fs.ModeDir},
+ 		{"fifo-before-close", "written", func(_, tmp string) error {
+ 			if err := os.Rename(tmp, tmp+"-away"); err != nil {
+ 				return err
+ 			}
+ 			return syscall.Mkfifo(tmp, 0o644)
+-		}, stateNotWritten, func(p, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeNamedPipe},
++		}, stateNotWritten, func(p, _, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeNamedPipe},
+ 		{"other-after-rename", "renamed", func(p, _ string) error {
+ 			if err := os.WriteFile(p+"-other", []byte("x"), 0o660); err != nil {
+ 				return err
+@@ -179,8 +179,8 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
+ 				return err
+ 			}
+ 			return os.WriteFile(filepath.Join(tmp, "x"), nil, 0o644)
+-		}, stateNotReplaced, func(p, tmp string) string {
+-			return "rename " + tmp + " " + p + ": not a directory; store: " + tmp + " is not a regular file, not the file written, and stays: " + store.ErrReplacedMeanwhile.Error()
++		}, stateNotReplaced, func(p, tmp, aside string) string {
++			return "rename " + tmp + " " + p + ": not a directory; " + asideMsg(tmp, aside, "not a regular file")
+ 		}, fs.ModeDir},
+ 	} {
+ 		t.Run(c.name, func(t *testing.T) {
+@@ -201,8 +201,15 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
+ 				t.Fatalf("swap %v, logged %v, calls %d, announced %d, err %v", *done, *logged, calls, announced, err)
+ 			}
+ 			what := afterMsg("rename", p, "another file")
++			// The rename failed: store moved the temporary name, the
++			// foreign entry, to a name of its own (task 36 package A
++			// point 1), where it stays.
++			aside := ""
++			if c.state == stateNotReplaced {
++				aside = movedTo(t, err, tmpPath)
++			}
+ 			if c.what != nil {
+-				what = c.what(p, tmpPath)
++				what = c.what(p, tmpPath, aside)
+ 			}
+ 			if want := replaceMeanwhileMsg(p, what, c.state); err.Error() != want {
+ 				t.Fatalf("message\n%q, want\n%q", err.Error(), want)
+@@ -212,7 +219,7 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
+ 			}
+ 			at := p
+ 			if c.state == stateNotReplaced {
+-				at = tmpPath
++				at = aside
+ 			}
+ 			fi, lerr := os.Lstat(at)
+ 			if lerr != nil || fi.Mode().Type() != c.kind {
+@@ -250,10 +257,14 @@ func TestPublishExportFileReplacedMeanwhile(t *testing.T) {
+ 			t.Fatalf("message %q", msg)
+ 		}
+ 		p := msg[len("ceremony: writing "):i]
+-		if want := meanwhileMsg(p, afterMsg("link", p, "not a regular file")); msg != want {
++		// The FIFO, linked to the name, is moved from the temporary name
++		// to a name of store's own (task 36 package A point 1); the
++		// message names both.
++		aside := movedTo(t, err, tmpPath)
++		if want := meanwhileMsg(p, afterMsg("link", p, "not a regular file")+"; "+asideMsg(tmpPath, aside, "not a regular file")); msg != want {
+ 			t.Fatalf("message\n%q, want\n%q", msg, want)
+ 		}
+-		for _, at := range []string{p, tmpPath} {
++		for _, at := range []string{p, aside} {
+ 			if fi, err := os.Lstat(at); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
+ 				t.Fatalf("the FIFO under %s: %v %v", at, fi, err)
+ 			}
+@@ -317,18 +328,48 @@ func TestPublishExportFileReplacedMeanwhile(t *testing.T) {
+ 			t.Fatalf("swap %v, logged %v, err %v", *done, *logged, err)
+ 		}
+ 		// A directory is not put over a file: the rename fails, the
+-		// directory stays under the temporary name, and admin-1.cert is
+-		// the hard link it was.
++		// directory is moved from the temporary name to a name of store's
++		// own and stays there, and admin-1.cert is the hard link it was.
+ 		var le *os.LinkError
+ 		if !errors.As(err, &le) {
+ 			t.Fatalf("no *os.LinkError: %v", err)
+ 		}
+-		if want := meanwhileMsg(p, "rename "+le.Old+" "+p+": not a directory; store: "+le.Old+
+-			" is not a regular file, not the file written, and stays: "+store.ErrReplacedMeanwhile.Error()); err.Error() != want {
++		aside := movedTo(t, err, le.Old)
++		if want := meanwhileMsg(p, "rename "+le.Old+" "+p+": not a directory; "+asideMsg(le.Old, aside, "not a regular file")); err.Error() != want {
+ 			t.Fatalf("message\n%q, want\n%q", err.Error(), want)
+ 		}
+-		if fi, err := os.Lstat(le.Old); err != nil || !fi.IsDir() {
+-			t.Fatalf("the directory under %s: %v %v", le.Old, fi, err)
++		if fi, err := os.Lstat(aside); err != nil || !fi.IsDir() {
++			t.Fatalf("the directory under %s: %v %v", aside, fi, err)
+ 		}
+ 	})
+ }
++
++// movedTo returns the name that store moved the temporary name tmp to
++// when it found something else than the file written under it (task 36
++// package A point 1), as the message of err names it: a new temporary
++// name in the same directory.
++func movedTo(t *testing.T, err error, tmp string) string {
++	t.Helper()
++	msg := err.Error()
++	pre := "store: " + tmp + ", moved to "
++	i := strings.Index(msg, pre)
++	if i < 0 {
++		t.Fatalf("no move of %s in %q", tmp, msg)
++	}
++	rest := msg[i+len(pre):]
++	j := strings.Index(rest, ", is ")
++	if j < 0 {
++		t.Fatalf("no state after the move in %q", msg)
++	}
++	aside := rest[:j]
++	if filepath.Dir(aside) != filepath.Dir(tmp) || !strings.HasPrefix(filepath.Base(aside), ".tmp-") || aside == tmp {
++		t.Fatalf("moved to %q, not a new temporary name next to %q", aside, tmp)
++	}
++	return aside
++}
++
++// asideMsg is the message of store for the temporary name tmp, moved to
++// aside, where it found what instead of the file written.
++func asideMsg(tmp, aside, what string) string {
++	return "store: " + tmp + ", moved to " + aside + ", is " + what + ", not the file written, and stays there: " + store.ErrReplacedMeanwhile.Error()
++}
+diff --git a/internal/store/fsroot.go b/internal/store/fsroot.go
+index 94680e4..c4157bf 100644
+--- a/internal/store/fsroot.go
++++ b/internal/store/fsroot.go
+@@ -134,17 +134,49 @@ func ReadDirIn(root *os.Root) ([]fs.DirEntry, error) {
+ // again with Root.Lstat (backlog 108, review of task 33 A, H1): after
+ // the rename or link, name is missing, is not a regular file or is
+ // another file than the one written (os.SameFile against the fstat of
+-// the temporary file); or, on an error before, the temporary name is
+-// missing or is not the file written any more. Another process changed
+-// the directory meanwhile. Nothing that is not the file written is
+-// removed: such an entry stays where it is, and the error names it.
++// the temporary file); or, when the temporary name is to be removed, it
++// is missing or is not the file written any more (written.dropTemp).
++// Another process changed the directory meanwhile. Nothing that is not
++// the file written is removed: such an entry stays where it is, or under
++// the name the temporary name was moved to (written.dropTemp), and the
++// error names it.
+ var ErrReplacedMeanwhile = errors.New("another process changed the directory meanwhile")
+ 
++// errIsDirIn reports a directory under a name that removeNameIn must
++// remove with unlink (removenamein_other.go; unlinkat(2) reports
++// EISDIR itself).
++var errIsDirIn = errors.New("is a directory")
++
++// isDirErr tells whether err of removeNameIn reports a directory under
++// the name: EISDIR of unlinkat(2) on Linux, errIsDirIn on the systems of
++// removenamein_other.go. On AIX unlinkat(2) of a directory may report
++// EPERM instead (POSIX allows both); that error is returned as it is,
++// and the directory stays all the same.
++func isDirErr(err error) bool {
++	return errors.Is(err, syscall.EISDIR) || errors.Is(err, errIsDirIn)
++}
++
++// newTempName returns a new name for a temporary file in a directory:
++// tmpPrefix and 16 hexadecimal digits from crypto/rand, so that no
++// other process can know it before it is there.
++func newTempName() (string, error) {
++	var rnd [8]byte
++	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
++		return "", err
++	}
++	return tmpPrefix + hex.EncodeToString(rnd[:]), nil
++}
++
+ // tempInHook, if set, is called by the functions of this file that
+ // write through a temporary file, with the root, the temporary name and
+-// the point: "written" after the data are written and synced, before
+-// the close; "rename" or "link" before the rename or link to the name;
+-// "renamed" or "linked" after it, before the name is looked at again.
++// the point: "opened" after the open of the temporary file, its fstat
++// and the duplicate of its descriptor, before anything is written;
++// "written" after the data are written and synced, before the close;
++// "rename" or "link" before the rename or link to the name; "renamed"
++// or "linked" after it, before the name is looked at again; "unlink"
++// with the name the temporary name was moved to (written.dropTemp), or
++// with the temporary name itself when that rename failed
++// (written.dropTempInPlace), after it was looked at, before its unlink.
+ // Only tests set it (SetTempInHook, in a build with the tag gomail_test
+ // only, for the tests of gomail-ceremony publish): it stands for
+ // another process that changes the directory at that point.
+@@ -234,21 +266,140 @@ func (w *written) check(root *os.Root, name, step string) error {
+ 	return nil
+ }
+ 
++// asideErr is ErrReplacedMeanwhile for the temporary name tmp that
++// written.dropTemp moved to aside, where it found what instead of the
++// file written (differs; "missing" also for an unlink that found aside
++// gone, "not a regular file" for one that found a directory there).
++func asideErr(root *os.Root, tmp, aside, what string) error {
++	t, a := filepath.Join(root.Name(), tmp), filepath.Join(root.Name(), aside)
++	if what == "missing" {
++		return fmt.Errorf("store: %s, moved to %s, is missing: %w", t, a, ErrReplacedMeanwhile)
++	}
++	return fmt.Errorf("store: %s, moved to %s, is %s, not the file written, and stays there: %w", t, a, what, ErrReplacedMeanwhile)
++}
++
++// dropTemp removes the temporary name if it is still the file written,
++// and never removes an entry that another process put under it (task 36
++// package A point 1, review of task 34 A, H1 of the second reviewer):
++// it renames the temporary name to a new name of its own first (aside,
++// newTempName; renameat(2) through root), looks at aside with
++// Root.Lstat (differs) and removes aside (removeNameIn, unlink) only if
++// it is the file written. Whatever is under the temporary name at the
++// rename moves to aside; an entry of another process is thus at most
++// renamed, never removed, and stays under aside, which the error names.
++//
++// If the rename fails, for whatever reason (the temporary name missing,
++// a full file system with no room for the entry of aside, a directory
++// with chattr +a, ...), dropTemp falls back to the way before task 36
++// package A (dropTempInPlace, task 36 package A2 point 1): it looks at
++// the temporary name itself and removes it only if it is the file
++// written. The error of the rename is not reported: aside never existed,
++// and the outcome is that of the unlink, as before. So a full file
++// system or chattr +a refuses nothing that succeeded before.
++//
++// It returns nil when the file written is removed. It returns
++// ErrReplacedMeanwhile (asideErr, meanwhileErr) when the temporary name
++// or aside is missing or not the file written, or when the unlink finds
++// it missing (ENOENT) or a directory (EISDIR, task 36 package A point
++// 2): another process changed the directory meanwhile, and nothing of it
++// is removed. Any other error of the unlink is returned as it is (the
++// file written stays, under aside or the temporary name; a later
++// RemoveTempReportIn removes it).
++//
++// The windows left:
++//   - between the Root.Lstat of aside and its unlink: an entry that
++//     another process puts under aside in it is removed (unlink removes
++//     a name, whatever it is then; no system call removes a name only
++//     if it is a given inode); a directory never on Linux and AIX
++//     (unlinkat(2) without AT_REMOVEDIR), elsewhere an empty one in the
++//     window of removenamein_other.go. aside is a name that no other
++//     process can know before the rename puts it there: it has to see
++//     the new name and act inside this window, while the temporary name
++//     is there from the open on. The window is narrower than the one
++//     between a Root.Lstat of the temporary name and its unlink (the
++//     directory is opened for the unlink before the Root.Lstat on Linux
++//     and AIX, openDirIn), but it is not closed, and it is announced:
++//     inotify reports the rename to aside (IN_MOVED_TO with its name),
++//     and a process that waits for it with an entry at hand hits the
++//     window in a fair share of the calls (review of task 36 A, H1 of
++//     the second reviewer: 12-36 %). Only a process that may change the
++//     directory can do this, and it gains nothing it could not do with
++//     its own entries; a subdirectory of mode 0700 for aside would shut
++//     out other users, but it is not done (task 36 package A2 point 2:
++//     an empty directory would stay in a directory with chattr +a, where
++//     RemoveTempReportIn does not remove it, and its rmdir by name has a
++//     window of its own);
++//   - on the fallback, the window of dropTempInPlace;
++//   - the rename replaces an entry that another process put under aside
++//     before it (a directory makes os.Root refuse it, and dropTemp falls
++//     back): that process would have to guess 64 random bits.
++//     renameat2(2) with RENAME_NOREPLACE is not in package syscall.
++func (w *written) dropTemp(root *os.Root) error {
++	aside, err := newTempName()
++	if err == nil {
++		err = root.Rename(w.tmp, aside)
++	}
++	if err != nil {
++		return w.dropTempInPlace(root)
++	}
++	return w.dropName(root, aside, func(what string) error { return asideErr(root, w.tmp, aside, what) })
++}
++
++// dropTempInPlace is the fallback of dropTemp when the rename to aside
++// fails: it looks at the temporary name itself with Root.Lstat and
++// removes it (unlink) only if it is the file written, as the functions
++// of this file did before task 36 package A. Its window is between that
++// Root.Lstat and the unlink (window 2 of the review of task 34 A): an
++// entry that another process puts under the temporary name in it is
++// removed (on Linux and AIX never a directory).
++func (w *written) dropTempInPlace(root *os.Root) error {
++	return w.dropName(root, w.tmp, func(what string) error { return meanwhileErr(root, w.tmp, what, "") })
++}
++
++// dropName removes name, which is the temporary name or the name aside
++// that dropTemp moved it to, only if it is the file written (differs),
++// and returns gone(what) for what is there instead, or for an unlink
++// that finds name missing or a directory; any other error of the unlink
++// is returned as it is.
++func (w *written) dropName(root *os.Root, name string, gone func(what string) error) error {
++	// The directory is opened before the Root.Lstat, so that the window
++	// up to the unlink holds no open (Linux and AIX; elsewhere d is nil,
++	// and an error leaves it nil: removeNameIn opens it then and reports
++	// the error).
++	d, _ := openDirIn(root)
++	if d != nil {
++		defer d.Close()
++	}
++	if what := w.differs(root, name); what != "" {
++		return gone(what)
++	}
++	callTempInHook(root, name, "unlink")
++	if err := removeNameInDir(root, d, name); err != nil {
++		switch {
++		case errors.Is(err, fs.ErrNotExist):
++			// Gone between the Root.Lstat and the unlink: removed or
++			// renamed by another process.
++			return gone("missing")
++		case isDirErr(err):
++			// A directory put under name in that window; it stays.
++			return gone("not a regular file")
++		}
++		return err
++	}
++	return nil
++}
++
+ // removeTemp removes the temporary name on an error (cause) if it is
+-// still the file written (differs) and returns cause; the error of the
+-// removal is not reported, as before. If the name is anything else, or
+-// missing, nothing is removed: the entry belongs to another process and
+-// stays, and the error is cause and ErrReplacedMeanwhile (errors.Is
+-// holds for both). The window left is between the Root.Lstat of differs
+-// and the unlink of removeNameIn: an entry that another process puts
+-// under the temporary name in it is removed (unlink removes a name,
+-// whatever it is then; no system call removes a name only if it is a
+-// given inode), a directory never.
++// still the file written (dropTemp) and returns cause; any other error
++// of the removal is not reported, as before. If the temporary name is
++// anything else, or missing, nothing of it is removed: the entry
++// belongs to another process and stays (under the name dropTemp moved
++// it to, or under the temporary name), and the error is cause and ErrReplacedMeanwhile (errors.Is
++// holds for both). The windows left are those of dropTemp.
+ func (w *written) removeTemp(root *os.Root, cause error) error {
+-	if what := w.differs(root, w.tmp); what != "" {
+-		return fmt.Errorf("%w; %w", cause, meanwhileErr(root, w.tmp, what, ""))
++	if err := w.dropTemp(root); errors.Is(err, ErrReplacedMeanwhile) {
++		return fmt.Errorf("%w; %w", cause, err)
+ 	}
+-	removeNameIn(root, w.tmp)
+ 	return cause
+ }
+ 
+@@ -257,17 +408,17 @@ func (w *written) removeTemp(root *os.Root, cause error) error {
+ // (written; the caller releases it). On an error it removes the name
+ // again where that is possible (not in a directory with chattr +a, for
+ // example), and only if it is still the file it created
+-// (written.removeTemp): an entry that another process put under the
+-// name stays, and the error is ErrReplacedMeanwhile as well. If the
+-// fstat right after the open fails, the name cannot be compared and
+-// stays. The errors name the temporary file as writeTemp does ("open
++// (written.removeTemp, written.dropTemp): an entry that another process
++// put under the name is at most renamed and stays (outside the windows
++// of written.dropTemp), and the error is ErrReplacedMeanwhile as well.
++// If the fstat right after the open fails, the name cannot be compared
++// and stays. The errors name the temporary file as writeTemp does ("open
+ // <dir>/.tmp-...: ...", pathErrIn).
+ func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (*written, error) {
+-	var rnd [8]byte
+-	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
++	tmp, err := newTempName()
++	if err != nil {
+ 		return nil, err
+ 	}
+-	tmp := tmpPrefix + hex.EncodeToString(rnd[:])
+ 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+ 	if err != nil {
+ 		return nil, pathErrIn(root, tmp, err)
+@@ -281,6 +432,7 @@ func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (*written, error)
+ 	w.fi = fi
+ 	w.held, err = holdFile(f)
+ 	if err == nil {
++		callTempInHook(root, tmp, "opened")
+ 		err = f.Chmod(perm)
+ 	}
+ 	if err == nil {
+@@ -327,8 +479,11 @@ func writeTempIn(root *os.Root, data []byte, perm fs.FileMode) (*written, error)
+ // When the temporary file or the rename fails, the temporary name is
+ // removed again where that is possible (not in a directory with
+ // chattr +a, for example: it stays there) and only if it is still the
+-// file written (written.removeTemp; ErrReplacedMeanwhile otherwise),
+-// and this function has not replaced name; it does not say that name
++// file written (written.removeTemp, which moves it to a name of its own
++// first and removes it there, or removes it in place when that rename
++// fails; an entry of another process is at most renamed outside the
++// windows of written.dropTemp, and the error is ErrReplacedMeanwhile
++// then), and this function has not replaced name; it does not say that name
+ // is as it was before, since its error may come from another process
+ // that changed name or the temporary file meanwhile (a directory put
+ // under name, for example; backlog 118). A failing rename is "rename
+@@ -381,15 +536,21 @@ func WriteFileAtomicIn(root *os.Root, name string, data []byte) error {
+ // symbolic link itself), or a change of name after the link, is
+ // ErrReplacedMeanwhile, and the entry stays under name. The temporary
+ // name is removed after the link, and on every error, only if it is
+-// still the file written (written.removeTemp); otherwise it stays and
+-// the error is ErrReplacedMeanwhile (errors.Is holds for ErrExists as
+-// well when the link found name present). An error of the removal
+-// after a link that succeeded and was checked is returned as before
+-// (ErrReplacedMeanwhile when the temporary name is gone by then): name
+-// is the file written then, but the directory is not synced. The
+-// window of written.removeTemp is on this path also after a link that
+-// succeeded: between the Root.Lstat of the temporary name and its
+-// unlink.
++// still the file written (written.dropTemp, written.removeTemp: moved
++// to a name of its own first and looked at there, or looked at in place
++// when that rename fails); otherwise that entry stays, under the name it
++// was moved to, and the error is ErrReplacedMeanwhile (errors.Is holds
++// for ErrExists as well when the link found name present; after a link
++// of that entry to name the error names what is under name and where the
++// entry was moved to). An error of the removal after a link that
++// succeeded and was checked is returned as before 36A (an error of the
++// unlink, never one of the rename to aside, which falls back: task 36
++// package A2 point 1), and is ErrReplacedMeanwhile when the temporary
++// name is gone or not the file written by then, or when the unlink finds
++// it gone (ENOENT) or a directory (EISDIR; task 36 package A point 2):
++// name is the file written then, but the directory is not synced. The
++// windows of written.dropTemp are on this path also after a link that
++// succeeded.
+ func CreateFileAtomicIn(root *os.Root, name string, data []byte) error {
+ 	w, err := writeTempIn(root, data, FilePerm)
+ 	if err != nil {
+@@ -407,16 +568,14 @@ func CreateFileAtomicIn(root *os.Root, name string, data []byte) error {
+ 	}
+ 	callTempInHook(root, w.tmp, "linked")
+ 	cerr := w.check(root, name, "link")
+-	if what := w.differs(root, w.tmp); what != "" {
+-		if cerr == nil {
+-			cerr = meanwhileErr(root, w.tmp, what, "")
+-		}
+-	} else if err := removeNameIn(root, w.tmp); err != nil && cerr == nil {
+-		cerr = err
+-		if errors.Is(err, fs.ErrNotExist) {
+-			// Gone between the Root.Lstat and the unlink: removed or
+-			// renamed by another process.
+-			cerr = meanwhileErr(root, w.tmp, "missing", "")
++	if err := w.dropTemp(root); err != nil {
++		switch {
++		case cerr == nil:
++			cerr = err
++		case errors.Is(err, ErrReplacedMeanwhile):
++			// Both: what is under name, and where the entry under the
++			// temporary name (linked to name as well) is now.
++			cerr = fmt.Errorf("%w; %w", cerr, err)
+ 		}
+ 	}
+ 	if cerr != nil {
+@@ -442,7 +601,9 @@ func SyncDirIn(root *os.Root) error {
+ // RemoveTempReport: a temporary file is an entry that is a regular file
+ // when the directory is listed and whose name starts with ".tmp-"; its
+ // name is removed with unlink (removeNameIn), never with rmdir, so that
+-// a directory put under the name meanwhile stays and is an error; a name
++// a directory put under the name meanwhile stays and is an error (on
++// Linux and AIX; elsewhere an empty one is removed in the window of
++// removenamein_other.go); a name
+ // that is gone meanwhile is skipped and not reported.
+ func RemoveTempReportIn(root *os.Root, removed func(name string)) error {
+ 	entries, err := ReadDirIn(root)
+diff --git a/internal/store/fsroot34a_linux_test.go b/internal/store/fsroot34a_linux_test.go
+index 07ba9fc..804298a 100644
+--- a/internal/store/fsroot34a_linux_test.go
++++ b/internal/store/fsroot34a_linux_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"io/fs"
+ 	"os"
+ 	"path/filepath"
++	"regexp"
+ 	"strings"
+ 	"syscall"
+ 	"testing"
+@@ -56,6 +57,9 @@ var foreignKinds = []struct {
+ 
+ var errSkipKind = errors.New("kind not possible here")
+ 
++// tempNameRE is a name of newTempName.
++var tempNameRE = regexp.MustCompile(`^\.tmp-[0-9a-f]{16}$`)
++
+ // entryID is the identity of an entry for the test: device and inode
+ // of its Lstat, and its type.
+ type entryID struct {
+@@ -201,14 +205,56 @@ func runSwap(t *testing.T, c swapCase) {
+ 	if strings.Contains(err.Error(), "new") {
+ 		t.Fatalf("content in the message: %v", err)
+ 	}
+-	atTmp, okTmp := lstatID(t, tmpPath)
+-	atName, okName := lstatID(t, p)
+-	// The foreign entry is where the other process put it, or, after a
+-	// rename that happened, under name; a link leaves it under the
+-	// temporary name as well, and it stays there.
+-	if !(okTmp && atTmp == foreign) && !(c.fn != "create" && !okTmp && okName && atName == foreign) {
+-		t.Fatalf("the foreign entry %s is gone (tmp %v %v, name %v %v): %v", k.name, okTmp, atTmp, okName, atName, err)
++	// The foreign entry is still there: under name after a rename that
++	// happened, or under the name that the temporary name was moved to
++	// (dropTemp; the message names it), never removed.
++	at := findID(t, dir, foreign)
++	if len(at) == 0 {
++		t.Fatalf("the foreign entry %s is gone: %v", k.name, err)
++	}
++	for _, n := range at {
++		if n != name && n != "other" && !strings.Contains(err.Error(), "moved to "+filepath.Join(dir, n)+", is ") {
++			t.Fatalf("the foreign entry %s is under %s, which the message does not name: %v", k.name, n, err)
++		}
++	}
++	if n, ok := tempWritten(t, dir); ok {
++		t.Fatalf("the temporary name %s, the file written, is left", n)
++	}
++}
++
++// findID returns the names in dir whose entry is id.
++func findID(t *testing.T, dir string, id entryID) []string {
++	t.Helper()
++	ents, err := os.ReadDir(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var at []string
++	for _, e := range ents {
++		if got, ok := lstatID(t, filepath.Join(dir, e.Name())); ok && got == id {
++			at = append(at, e.Name())
++		}
+ 	}
++	return at
++}
++
++// tempWritten returns a temporary name in dir that is a regular file
++// with the content "new", the content the tests write.
++func tempWritten(t *testing.T, dir string) (string, bool) {
++	t.Helper()
++	ents, err := os.ReadDir(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, e := range ents {
++		if !strings.HasPrefix(e.Name(), tmpPrefix) || !e.Type().IsRegular() {
++			continue
++		}
++		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil && string(b) == "new" {
++			return e.Name(), true
++		}
++	}
++	return "", false
+ }
+ 
+ // TestFilesInTempSwapped (task 34 package A points 1 and 3, review of
+@@ -274,10 +320,12 @@ func TestFilesInTempRemoved(t *testing.T) {
+ // TestCreateFileAtomicInTempGoneAfterLink: the temporary name removed
+ // or replaced by another process after the link, before it is looked
+ // at again: name is the file written and stays, but the call fails with
+-// ErrReplacedMeanwhile, and a FIFO put under the temporary name stays.
++// ErrReplacedMeanwhile. A FIFO put under the temporary name is moved to
++// a name of the call's own (dropTemp, task 36 package A point 1) and
++// stays there; the message names both names.
+ func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
+-	for _, c := range []struct{ name, what string }{{"removed", "is missing"}, {"fifo", "is not a regular file, not the file written, and stays"}} {
+-		t.Run(c.name, func(t *testing.T) {
++	for _, name := range []string{"removed", "fifo"} {
++		t.Run(name, func(t *testing.T) {
+ 			dir := t.TempDir()
+ 			root := openDotRoot(t, dir)
+ 			var tmpPath string
+@@ -287,7 +335,7 @@ func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
+ 					if err := os.Remove(tmpPath); err != nil {
+ 						t.Error(err)
+ 					}
+-					if c.name == "fifo" {
++					if name == "fifo" {
+ 						if err := syscall.Mkfifo(tmpPath, 0o644); err != nil {
+ 							t.Error(err)
+ 						}
+@@ -296,21 +344,114 @@ func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
+ 			})
+ 			err := callWithin(t, func() error { return CreateFileAtomicIn(root, "w", []byte("new")) })
+ 			tempInHook = nil
+-			if want := "store: " + tmpPath + " " + c.what + ": " + ErrReplacedMeanwhile.Error(); err == nil || err.Error() != want {
++			want := "store: " + tmpPath + " is missing: " + ErrReplacedMeanwhile.Error()
++			if name == "fifo" {
++				fifo := ""
++				ents, _ := os.ReadDir(dir)
++				for _, e := range ents {
++					if e.Type() == fs.ModeNamedPipe {
++						fifo = filepath.Join(dir, e.Name())
++					}
++				}
++				if fifo == "" || fifo == tmpPath {
++					t.Fatalf("the FIFO is gone or not moved: %q", fifo)
++				}
++				want = "store: " + tmpPath + ", moved to " + fifo + ", is not a regular file, not the file written, and stays there: " + ErrReplacedMeanwhile.Error()
++			}
++			if err == nil || err.Error() != want {
+ 				t.Fatalf("err %v, want %s", err, want)
+ 			}
+ 			if b, err := os.ReadFile(filepath.Join(dir, "w")); err != nil || string(b) != "new" {
+ 				t.Fatalf("name: %q %v", b, err)
+ 			}
+-			if c.name == "fifo" {
+-				if fi, err := os.Lstat(tmpPath); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
+-					t.Fatalf("the FIFO: %v %v", fi, err)
+-				}
+-			}
+ 		})
+ 	}
+ }
+ 
++// TestFilesInTempChangedAtUnlink (task 36 package A points 2 and 3):
++// the temporary name, moved to a name of its own and found to be the
++// file written there, is removed or replaced by a directory before the
++// unlink (the point "unlink"). The unlink finds the name missing
++// (ENOENT) or a directory (EISDIR): both are ErrReplacedMeanwhile, with
++// fixed messages, and the directory stays. For CreateFileAtomicIn the
++// link succeeded and name is the file written; for ReplaceFileIn the
++// rename failed (a full directory under name), and the error is its
++// *os.LinkError and ErrReplacedMeanwhile (review of task 34 A, H2 of
++// the second reviewer: removeTemp reports it).
++func TestFilesInTempChangedAtUnlink(t *testing.T) {
++	for _, fn := range []string{"create", "replace"} {
++		for _, change := range []string{"removed", "dir"} {
++			t.Run(fn+"/"+change, func(t *testing.T) {
++				dir := t.TempDir()
++				if fn == "replace" {
++					if err := os.MkdirAll(filepath.Join(dir, "w", "x"), 0o755); err != nil {
++						t.Fatal(err)
++					}
++				}
++				root := openDotRoot(t, dir)
++				var tmpPath, aside string
++				withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++					switch pt {
++					case "opened":
++						tmpPath = filepath.Join(dir, tmp)
++					case "unlink":
++						aside = filepath.Join(dir, tmp)
++						if err := os.Rename(aside, filepath.Join(dir, "away")); err != nil {
++							t.Error(err)
++						}
++						if change == "dir" {
++							if err := os.Mkdir(aside, 0o755); err != nil {
++								t.Error(err)
++							}
++						}
++					}
++				})
++				fds := fdCount(t)
++				var err error
++				if fn == "create" {
++					err = CreateFileAtomicIn(root, "w", []byte("new"))
++				} else {
++					err = ReplaceFileIn(root, "w", []byte("new"))
++				}
++				tempInHook = nil
++				if n := fdCount(t); n != fds {
++					t.Errorf("descriptors %d before, %d after", fds, n)
++				}
++				// A new temporary name of its own: random, like the
++				// temporary name, not one derived from it that another
++				// process could put an entry under before the rename.
++				if aside == "" || aside == tmpPath || !tempNameRE.MatchString(filepath.Base(aside)) || strings.Contains(aside, filepath.Base(tmpPath)) {
++					t.Fatalf("no unlink of a new name of its own: %q %q %v", tmpPath, aside, err)
++				}
++				what := "is missing"
++				if change == "dir" {
++					what = "is not a regular file, not the file written, and stays there"
++				}
++				want := "store: " + tmpPath + ", moved to " + aside + ", " + what + ": " + ErrReplacedMeanwhile.Error()
++				var le *os.LinkError
++				if fn == "create" {
++					if err == nil || err.Error() != want {
++						t.Fatalf("err %v, want %s", err, want)
++					}
++					if b, err := os.ReadFile(filepath.Join(dir, "w")); err != nil || string(b) != "new" {
++						t.Fatalf("name: %q %v", b, err)
++					}
++				} else if !errors.Is(err, ErrReplacedMeanwhile) || !errors.As(err, &le) || !strings.HasSuffix(err.Error(), "; "+want) {
++					t.Fatalf("err %v, want ...; %s", err, want)
++				}
++				if change == "dir" {
++					if fi, err := os.Lstat(aside); err != nil || !fi.IsDir() {
++						t.Fatalf("the directory: %v %v", fi, err)
++					}
++				}
++				if _, err := os.Lstat(tmpPath); !errors.Is(err, fs.ErrNotExist) {
++					t.Fatalf("the temporary name is back: %v", err)
++				}
++			})
++		}
++	}
++}
++
+ // TestFilesInNameChangedAfter: the name changed by another process
+ // after the rename or link, before it is looked at again ("renamed",
+ // "linked"): removed, replaced by a directory, by a FIFO or by another
+diff --git a/internal/store/fsroot36a2_linux_test.go b/internal/store/fsroot36a2_linux_test.go
+new file mode 100644
+index 0000000..9d6e746
+--- /dev/null
++++ b/internal/store/fsroot36a2_linux_test.go
+@@ -0,0 +1,343 @@
++package store
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"io/fs"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++)
++
++// Tests of task 36 package A2 (review of task 36 A, N1 and N2 of both
++// reviewers): written.dropTemp falls back to the temporary name itself
++// when its rename to aside fails, and aside is new in every call.
++
++// tempEntries lists the entries of dir whose names start with ".tmp-".
++func tempEntries(t *testing.T, dir string) []string {
++	t.Helper()
++	ents, err := os.ReadDir(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var names []string
++	for _, e := range ents {
++		if strings.HasPrefix(e.Name(), tmpPrefix) {
++			names = append(names, e.Name())
++		}
++	}
++	return names
++}
++
++// TestDropTempAppendOnly (task 36 package A2 points 1 and 3): in a
++// directory with chattr +a a link and a create succeed, a rename and an
++// unlink fail with EPERM. The rename to aside fails, and dropTemp falls
++// back to the temporary name: CreateFileAtomicIn reports the unlink of
++// the temporary name as before task 36 package A, never a rename to a
++// name that does not exist; ReplaceFileIn reports its failing rename to
++// name only. The temporary file stays under its own name, and
++// RemoveTempReportIn removes it once chattr -a is back. Skipped where
++// chattr +a is not possible (not root, or a file system without it).
++func TestDropTempAppendOnly(t *testing.T) {
++	chattr, err := exec.LookPath("chattr")
++	if err != nil {
++		t.Skip("no chattr")
++	}
++	for _, fn := range []string{"create", "replace"} {
++		t.Run(fn, func(t *testing.T) {
++			dir := t.TempDir()
++			if fn == "replace" {
++				// A full directory under name: the rename to it fails.
++				if err := os.MkdirAll(filepath.Join(dir, "w", "x"), 0o755); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if out, err := exec.Command(chattr, "+a", dir).CombinedOutput(); err != nil {
++				t.Skipf("chattr +a not possible here: %v %s", err, bytes.TrimSpace(out))
++			}
++			appendOnly := true
++			unset := func() {
++				if appendOnly {
++					if out, err := exec.Command(chattr, "-a", dir).CombinedOutput(); err != nil {
++						t.Errorf("chattr -a: %v %s", err, out)
++					}
++					appendOnly = false
++				}
++			}
++			t.Cleanup(unset)
++			root := openDotRoot(t, dir)
++			var tmpPath string
++			withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++				if pt == "opened" {
++					tmpPath = filepath.Join(dir, tmp)
++				}
++			})
++			fds := fdCount(t)
++			if fn == "create" {
++				err = CreateFileAtomicIn(root, "w", []byte("new"))
++			} else {
++				err = ReplaceFileIn(root, "w", []byte("new"))
++			}
++			tempInHook = nil
++			if n := fdCount(t); n != fds {
++				t.Errorf("descriptors %d before, %d after", fds, n)
++			}
++			if errors.Is(err, ErrReplacedMeanwhile) {
++				t.Fatalf("err %v is ErrReplacedMeanwhile", err)
++			}
++			if fn == "create" {
++				want := "unlink " + tmpPath + ": " + syscall.EPERM.Error()
++				var pe *fs.PathError
++				if err == nil || err.Error() != want || !errors.As(err, &pe) || !errors.Is(err, syscall.EPERM) {
++					t.Fatalf("err %v, want %s", err, want)
++				}
++				if b, err := os.ReadFile(filepath.Join(dir, "w")); err != nil || string(b) != "new" {
++					t.Fatalf("name: %q %v", b, err)
++				}
++			} else {
++				var le *os.LinkError
++				if !errors.As(err, &le) || le.Op != "rename" || le.Old != tmpPath || le.New != filepath.Join(dir, "w") {
++					t.Fatalf("err %v, want the *os.LinkError of the rename of %s", err, tmpPath)
++				}
++			}
++			if got := tempEntries(t, dir); len(got) != 1 || got[0] != filepath.Base(tmpPath) {
++				t.Fatalf("temporary entries %q, want %s under its own name", got, filepath.Base(tmpPath))
++			}
++			unset()
++			var removed []string
++			if err := RemoveTempReportIn(root, func(n string) { removed = append(removed, n) }); err != nil || len(removed) != 1 {
++				t.Fatalf("RemoveTempReportIn: %q %v", removed, err)
++			}
++		})
++	}
++}
++
++// mountSmallExt4 mounts a new ext4 file system of 8 MiB (blocks of 1 KiB,
++// no reserved blocks) from an image in a new directory of the test and
++// returns its root; the test unmounts it when it ends. Skipped where
++// that is not possible: not root, no mkfs.ext4 or mount, no loop device.
++func mountSmallExt4(t *testing.T) string {
++	t.Helper()
++	if os.Geteuid() != 0 {
++		t.Skip("a full file system of its own needs a loop mount, as root only")
++	}
++	var tools [3]string
++	for i, name := range []string{"mkfs.ext4", "mount", "umount"} {
++		p, err := exec.LookPath(name)
++		if err != nil {
++			t.Skipf("no %s", name)
++		}
++		tools[i] = p
++	}
++	base := t.TempDir()
++	img, mnt := filepath.Join(base, "img"), filepath.Join(base, "mnt")
++	if err := os.Mkdir(mnt, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(img, nil, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Truncate(img, 8<<20); err != nil {
++		t.Fatal(err)
++	}
++	if out, err := exec.Command(tools[0], "-q", "-F", "-m", "0", "-b", "1024", "-N", "2048", img).CombinedOutput(); err != nil {
++		t.Skipf("mkfs.ext4: %v %s", err, bytes.TrimSpace(out))
++	}
++	if out, err := exec.Command(tools[1], "-o", "loop", img, mnt).CombinedOutput(); err != nil {
++		t.Skipf("loop mount not possible here: %v %s", err, bytes.TrimSpace(out))
++	}
++	t.Cleanup(func() {
++		if out, err := exec.Command(tools[2], mnt).CombinedOutput(); err != nil {
++			t.Errorf("umount: %v %s", err, out)
++		}
++	})
++	return mnt
++}
++
++// fillExt4 fills the file system of mnt: one big file until ENOSPC,
++// then empty files with names as long as a temporary name in sub until
++// its directory has no room for another entry; then it removes free of
++// them, which leaves room for free entries in sub and none for a new
++// block of the directory.
++func fillExt4(t *testing.T, mnt, sub string, free int) {
++	t.Helper()
++	f, err := os.Create(filepath.Join(mnt, "big"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	buf := make([]byte, 1<<16)
++	for _, n := range []int{len(buf), 512} {
++		for {
++			if _, err := f.Write(buf[:n]); err != nil {
++				break
++			}
++		}
++	}
++	if err := f.Close(); err != nil && !errors.Is(err, syscall.ENOSPC) {
++		t.Fatal(err)
++	}
++	name := func(i int) string { return filepath.Join(sub, fmt.Sprintf("f%020d", i)) }
++	i := 0
++	for ; ; i++ {
++		g, err := os.OpenFile(name(i), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
++		if err != nil {
++			if !errors.Is(err, syscall.ENOSPC) {
++				t.Fatalf("fill: %v", err)
++			}
++			break
++		}
++		g.Close()
++	}
++	if i < 2*free+10 {
++		t.Fatalf("fill: only %d entries", i)
++	}
++	for j := 0; j < free; j++ {
++		if err := os.Remove(name(2 + 2*j)); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++// TestDropTempNoSpace (task 36 package A2 points 1 and 3; review of
++// task 36 A, N1 and N2 of the second reviewer, F1 of the review of
++// task 36 g): a full file system whose directory has room for the
++// entries a call makes but not for aside. The rename to aside fails
++// with ENOSPC and dropTemp falls back to the temporary name:
++//   - "link": CreateFileAtomicIn with empty data succeeds, as before
++//     task 36 package A (no new refusal on its way to success), and
++//     leaves no temporary file;
++//   - "link-fifo": the same, but another process put a FIFO under the
++//     temporary name after the link: ErrReplacedMeanwhile, and the FIFO
++//     stays (the fallback looks at the name before its unlink);
++//   - "write-create", "write-replace": the write fails with ENOSPC, and
++//     the temporary file is removed (it stayed in 558ce2b).
++func TestDropTempNoSpace(t *testing.T) {
++	// A name as long as a temporary name: its entry takes a slot as
++	// large as that of aside.
++	const name = "w00000000000000000000"
++	for _, c := range []string{"link", "link-fifo", "write-create", "write-replace"} {
++		t.Run(c, func(t *testing.T) {
++			mnt := mountSmallExt4(t)
++			sub := filepath.Join(mnt, "d")
++			if err := os.Mkdir(sub, 0o700); err != nil {
++				t.Fatal(err)
++			}
++			data := []byte{}
++			free := 2
++			if strings.HasPrefix(c, "write-") {
++				if err := os.WriteFile(filepath.Join(sub, name), []byte("old"), 0o600); err != nil {
++					t.Fatal(err)
++				}
++				data = make([]byte, 1<<16)
++				free = 1
++			}
++			fillExt4(t, mnt, sub, free)
++			root := openDotRoot(t, sub)
++			var tmpPath, unlinked string
++			withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++				switch pt {
++				case "opened":
++					tmpPath = filepath.Join(sub, tmp)
++				case "unlink":
++					unlinked = tmp
++				case "linked":
++					if c == "link-fifo" {
++						if err := os.Remove(tmpPath); err != nil {
++							t.Error(err)
++						}
++						if err := syscall.Mkfifo(tmpPath, 0o644); err != nil {
++							t.Error(err)
++						}
++					}
++				}
++			})
++			fds := fdCount(t)
++			var err error
++			if c == "write-replace" {
++				err = callWithin(t, func() error { return ReplaceFileIn(root, name, data) })
++			} else {
++				err = callWithin(t, func() error { return CreateFileAtomicIn(root, name, data) })
++			}
++			tempInHook = nil
++			if n := fdCount(t); n != fds {
++				t.Errorf("descriptors %d before, %d after", fds, n)
++			}
++			wantName := ""
++			switch c {
++			case "link":
++				if err != nil {
++					t.Fatalf("err %v, want nil", err)
++				}
++			case "link-fifo":
++				want := "store: " + tmpPath + " is not a regular file, not the file written, and stays: " + ErrReplacedMeanwhile.Error()
++				if err == nil || err.Error() != want {
++					t.Fatalf("err %v, want %s", err, want)
++				}
++				if fi, err := os.Lstat(tmpPath); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
++					t.Fatalf("the FIFO: %v %v", fi, err)
++				}
++			default:
++				wantName = "old"
++				var pe *fs.PathError
++				if !errors.As(err, &pe) || pe.Op != "write" || pe.Path != tmpPath || !errors.Is(err, syscall.ENOSPC) || errors.Is(err, ErrReplacedMeanwhile) {
++					t.Fatalf("err %v, want the ENOSPC of the write to %s", err, tmpPath)
++				}
++			}
++			if c != "link-fifo" && unlinked != filepath.Base(tmpPath) {
++				// The rename to aside must have failed (the fallback
++				// unlinks the temporary name itself).
++				t.Fatalf("unlink of %q, want the fallback to %s", unlinked, tmpPath)
++			}
++			if b, err := os.ReadFile(filepath.Join(sub, name)); err != nil || string(b) != wantName {
++				t.Fatalf("name: %q %v, want %q", b, err, wantName)
++			}
++			got := tempEntries(t, sub)
++			if c == "link-fifo" {
++				if len(got) != 1 || got[0] != filepath.Base(tmpPath) {
++					t.Fatalf("temporary entries %q, want the FIFO only", got)
++				}
++			} else if len(got) != 0 {
++				t.Fatalf("temporary entries %q left", got)
++			}
++		})
++	}
++}
++
++// TestDropTempAsideNew (task 36 package A2 point 3; review of task
++// 36 A, N2 of the first reviewer): two calls move their temporary names
++// to two different names aside, each a name of newTempName and none of
++// them a temporary name of either call.
++func TestDropTempAsideNew(t *testing.T) {
++	dir := t.TempDir()
++	root := openDotRoot(t, dir)
++	var tmps, asides []string
++	withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++		switch pt {
++		case "opened":
++			tmps = append(tmps, tmp)
++		case "unlink":
++			asides = append(asides, tmp)
++		}
++	})
++	for _, name := range []string{"a", "b"} {
++		if err := CreateFileAtomicIn(root, name, []byte(name)); err != nil {
++			t.Fatal(err)
++		}
++	}
++	tempInHook = nil
++	if len(tmps) != 2 || len(asides) != 2 || asides[0] == asides[1] {
++		t.Fatalf("temporary names %q, aside %q", tmps, asides)
++	}
++	for _, a := range asides {
++		if !tempNameRE.MatchString(a) || a == tmps[0] || a == tmps[1] {
++			t.Fatalf("aside %q: temporary names %q", asides, tmps)
++		}
++	}
++	if got := tempEntries(t, dir); len(got) != 0 {
++		t.Fatalf("temporary entries %q left", got)
++	}
++}
+diff --git a/internal/store/fsroot36a_linux_test.go b/internal/store/fsroot36a_linux_test.go
+new file mode 100644
+index 0000000..679d35b
+--- /dev/null
++++ b/internal/store/fsroot36a_linux_test.go
+@@ -0,0 +1,227 @@
++package store
++
++import (
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"testing"
++)
++
++// Tests of task 36 package A (reviews of task 34 A, N1 and N2 of the
++// first reviewer): the error path of writeTempIn with a temporary name
++// swapped by another process, and FD_CLOEXEC of held.
++
++// limitFileSize sets RLIMIT_FSIZE to 0 (the hard limit stays), so that
++// the next write to a regular file fails with EFBIG (the runtime
++// ignores SIGXFSZ), and returns the function that puts the limit
++// before back; the test puts it back as well when it ends. Only tests
++// that do not run in parallel call it.
++func limitFileSize(t *testing.T) (restore func()) {
++	t.Helper()
++	var old syscall.Rlimit
++	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &old); err != nil {
++		t.Fatal(err)
++	}
++	done := false
++	restore = func() {
++		if done {
++			return
++		}
++		done = true
++		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &old); err != nil {
++			t.Errorf("RLIMIT_FSIZE not put back: %v", err)
++		}
++	}
++	t.Cleanup(restore)
++	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: 0, Max: old.Max}); err != nil {
++		t.Fatal(err)
++	}
++	return restore
++}
++
++// TestWriteTempInErrorSwapped (task 36 package A point 3; review of
++// task 34 A, N1 of the first reviewer): the temporary file fails to be
++// written (EFBIG under RLIMIT_FSIZE 0, set at the point "opened") after
++// another process moved it away and put a foreign entry under its name,
++// or removed it, or did nothing. The error is the *fs.PathError of the
++// write; with a swap it is ErrReplacedMeanwhile as well, and the foreign
++// entry is still there (at most moved to a name the message names);
++// without one the temporary file is removed and nothing is left. A
++// mutant that removes the temporary name on the error without looking
++// at it removes the foreign entry.
++func TestWriteTempInErrorSwapped(t *testing.T) {
++	kinds := []string{"none", "removed"}
++	for _, k := range foreignKinds {
++		kinds = append(kinds, k.name)
++	}
++	for _, fn := range []string{"replace", "write", "create"} {
++		for ki, kind := range kinds {
++			t.Run(fn+"/"+kind, func(t *testing.T) {
++				dir := t.TempDir()
++				if err := os.WriteFile(filepath.Join(dir, "other"), []byte("other"), 0o660); err != nil {
++					t.Fatal(err)
++				}
++				root := openDotRoot(t, dir)
++				var tmpPath string
++				var foreign entryID
++				var restore func()
++				skip := false
++				withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++					if pt != "opened" {
++						return
++					}
++					tmpPath = filepath.Join(dir, tmp)
++					if kind != "none" {
++						if err := os.Rename(tmpPath, filepath.Join(dir, "away")); err != nil {
++							t.Error(err)
++						}
++					}
++					if ki >= 2 {
++						if err := foreignKinds[ki-2].make(dir, tmpPath); err != nil {
++							if err == errSkipKind {
++								skip = true
++							} else {
++								t.Error(err)
++							}
++						}
++						foreign, _ = lstatID(t, tmpPath)
++					}
++					restore = limitFileSize(t)
++				})
++				fds := fdCount(t)
++				err := callWithin(t, func() error {
++					switch fn {
++					case "replace":
++						return ReplaceFileIn(root, "w", []byte("new"))
++					case "write":
++						return WriteFileAtomicIn(root, "w", []byte("new"))
++					}
++					return CreateFileAtomicIn(root, "w", []byte("new"))
++				})
++				if restore != nil {
++					restore()
++				}
++				tempInHook = nil
++				if skip {
++					t.Skip("no device without CAP_MKNOD")
++				}
++				if t.Failed() || tmpPath == "" {
++					t.Fatalf("hook: %q, err %v", tmpPath, err)
++				}
++				if n := fdCount(t); n != fds {
++					t.Errorf("descriptors %d before, %d after", fds, n)
++				}
++				var pe *fs.PathError
++				if !errors.Is(err, syscall.EFBIG) || !errors.As(err, &pe) || pe.Op != "write" || pe.Path != tmpPath {
++					t.Fatalf("not the error of the write of %s: %v", tmpPath, err)
++				}
++				if strings.Contains(err.Error(), "new") {
++					t.Fatalf("content in the message: %v", err)
++				}
++				if _, ok := lstatID(t, filepath.Join(dir, "w")); ok {
++					t.Fatal("name written")
++				}
++				switch {
++				case kind == "none":
++					if errors.Is(err, ErrReplacedMeanwhile) {
++						t.Fatalf("ErrReplacedMeanwhile without a swap: %v", err)
++					}
++				case kind == "removed":
++					if want := "; store: " + tmpPath + " is missing: " + ErrReplacedMeanwhile.Error(); !strings.HasSuffix(err.Error(), want) {
++						t.Fatalf("err %v, want ...%s", err, want)
++					}
++				default:
++					if !errors.Is(err, ErrReplacedMeanwhile) {
++						t.Fatalf("not ErrReplacedMeanwhile: %v", err)
++					}
++					at := findID(t, dir, foreign)
++					if len(at) == 0 {
++						t.Fatalf("the foreign entry %s is gone: %v", kind, err)
++					}
++					for _, n := range at {
++						if n != "other" && !strings.Contains(err.Error(), "store: "+tmpPath+", moved to "+filepath.Join(dir, n)+", is ") {
++							t.Fatalf("the foreign entry %s is under %s, which the message does not name: %v", kind, n, err)
++						}
++					}
++				}
++				// Nothing of the call is left: the entries are those of
++				// the test ("other", "away") and the foreign one.
++				ents, rerr := os.ReadDir(dir)
++				if rerr != nil {
++					t.Fatal(rerr)
++				}
++				want := map[string]bool{"other": true, "away": kind != "none"}
++				for _, e := range ents {
++					if want[e.Name()] {
++						continue
++					}
++					if id, ok := lstatID(t, filepath.Join(dir, e.Name())); ki >= 2 && ok && id == foreign {
++						continue
++					}
++					t.Fatalf("left in the directory: %s (%v)", e.Name(), err)
++				}
++			})
++		}
++	}
++}
++
++// fdsOn returns the descriptors of the process on path (/proc/self/fd)
++// and whether each has FD_CLOEXEC.
++func fdsOn(t *testing.T, path string) map[int]bool {
++	t.Helper()
++	ents, err := os.ReadDir("/proc/self/fd")
++	if err != nil {
++		t.Fatal(err)
++	}
++	fds := map[int]bool{}
++	for _, e := range ents {
++		l, err := os.Readlink("/proc/self/fd/" + e.Name())
++		if err != nil || l != path {
++			continue
++		}
++		fd, err := strconv.Atoi(e.Name())
++		if err != nil {
++			t.Fatal(err)
++		}
++		fl, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
++		if errno != 0 {
++			t.Fatalf("F_GETFD %d: %v", fd, errno)
++		}
++		fds[fd] = fl&syscall.FD_CLOEXEC != 0
++	}
++	return fds
++}
++
++// TestHeldCloseOnExec (task 36 package A point 3; review of task 34 A,
++// N2 of the first reviewer, after its probe): the duplicate held has
++// FD_CLOEXEC, as the descriptor of the open has, so that no child
++// started meanwhile inherits the temporary file. At "opened" there are
++// two descriptors on the temporary file (the file and held), at
++// "rename" one (held; the file is closed); each has FD_CLOEXEC.
++func TestHeldCloseOnExec(t *testing.T) {
++	dir := t.TempDir()
++	root := openDotRoot(t, dir)
++	got := map[string]int{}
++	withTempInHook(t, func(_ *os.Root, tmp, pt string) {
++		if pt != "opened" && pt != "rename" {
++			return
++		}
++		for fd, cloexec := range fdsOn(t, filepath.Join(dir, tmp)) {
++			if !cloexec {
++				t.Errorf("at %s descriptor %d on the temporary file without FD_CLOEXEC", pt, fd)
++			}
++			got[pt]++
++		}
++	})
++	if err := ReplaceFileIn(root, "w", []byte("new")); err != nil {
++		t.Fatal(err)
++	}
++	tempInHook = nil
++	if got["opened"] != 2 || got["rename"] != 1 {
++		t.Fatalf("descriptors on the temporary file: %v", got)
++	}
++}
+diff --git a/internal/store/removenamein_other.go b/internal/store/removenamein_other.go
+index b90207a..ae0fe2b 100644
+--- a/internal/store/removenamein_other.go
++++ b/internal/store/removenamein_other.go
+@@ -3,16 +3,11 @@
+ package store
+ 
+ import (
+-	"errors"
+ 	"io/fs"
+ 	"os"
+ 	"path/filepath"
+ )
+ 
+-// errIsDirIn reports a directory under a name that removeNameIn must
+-// remove with unlink.
+-var errIsDirIn = errors.New("is a directory")
+-
+ // removeNameIn is removeName for the name in the directory that root
+ // holds, where syscall has no Unlinkat (every system but Linux and AIX,
+ // removenamein_unlinkat.go; the module does not import golang.org/x/sys).
+@@ -45,3 +40,12 @@ func removeNameIn(root *os.Root, name string) error {
+ 	}
+ 	return nil
+ }
++
++// openDirIn opens nothing where removeNameIn has no unlinkat relative to
++// a descriptor (written.dropTemp then calls removeNameIn).
++func openDirIn(*os.Root) (*os.File, error) { return nil, nil }
++
++// removeNameInDir is removeNameIn; d is nil here (openDirIn).
++func removeNameInDir(root *os.Root, _ *os.File, name string) error {
++	return removeNameIn(root, name)
++}
+diff --git a/internal/store/removenamein_unlinkat.go b/internal/store/removenamein_unlinkat.go
+index f7aef8c..48040cc 100644
+--- a/internal/store/removenamein_unlinkat.go
++++ b/internal/store/removenamein_unlinkat.go
+@@ -21,24 +21,46 @@ func removeNameIn(root *os.Root, name string) error {
+ 	if err := checkNameIn(root, name); err != nil {
+ 		return err
+ 	}
+-	unlinkErr := func(err error) error {
+-		return &fs.PathError{Op: "unlink", Path: filepath.Join(root.Name(), name), Err: underlying(err)}
+-	}
+ 	d, err := root.Open(".")
+ 	if err != nil {
+-		return unlinkErr(err)
++		return unlinkErrIn(root, name, err)
+ 	}
+ 	defer d.Close()
++	return removeNameInDir(root, d, name)
++}
++
++// openDirIn opens the directory that root holds for removeNameInDir, so
++// that a caller can open it before it looks at a name it is to remove
++// (written.dropTemp): the open is then not in the window between that
++// look and the unlink.
++func openDirIn(root *os.Root) (*os.File, error) { return root.Open(".") }
++
++// removeNameInDir is removeNameIn with d, a descriptor of the directory
++// that root holds which the caller opened before (openDirIn) and
++// closes; with d nil it is removeNameIn.
++func removeNameInDir(root *os.Root, d *os.File, name string) error {
++	if d == nil {
++		return removeNameIn(root, name)
++	}
++	if err := checkNameIn(root, name); err != nil {
++		return err
++	}
+ 	rc, err := d.SyscallConn()
+ 	if err != nil {
+-		return unlinkErr(err)
++		return unlinkErrIn(root, name, err)
+ 	}
+ 	var uerr error
+ 	if err := rc.Control(func(fd uintptr) { uerr = syscall.Unlinkat(int(fd), name) }); err != nil {
+-		return unlinkErr(err)
++		return unlinkErrIn(root, name, err)
+ 	}
+ 	if uerr != nil {
+-		return unlinkErr(uerr)
++		return unlinkErrIn(root, name, uerr)
+ 	}
+ 	return nil
+ }
++
++// unlinkErrIn is err of removeNameIn for name, with the path as
++// removeName names it.
++func unlinkErrIn(root *os.Root, name string, err error) error {
++	return &fs.PathError{Op: "unlink", Path: filepath.Join(root.Name(), name), Err: underlying(err)}
++}
+diff --git a/internal/store/tempinhook_tagged.go b/internal/store/tempinhook_tagged.go
+index 9927f1b..736df48 100644
+--- a/internal/store/tempinhook_tagged.go
++++ b/internal/store/tempinhook_tagged.go
+@@ -5,8 +5,9 @@ package store
+ import "os"
+ 
+ // SetTempInHook sets the function that ReplaceFileIn, WriteFileAtomicIn
+-// and CreateFileAtomicIn call at their points ("written", "rename" or
+-// "link", "renamed" or "linked"; tempInHook) and returns a function
++// and CreateFileAtomicIn call at their points ("opened", "written",
++// "rename" or "link", "renamed" or "linked", "unlink"; tempInHook) and
++// returns a function
+ // that puts back the one before. It exists only in a build with the tag
+ // gomail_test, for the tests of gomail-ceremony publish, which stand
+ // for another process that changes the temporary file of witnesses.rec
+-- 
+2.43.0
+
