@@ -663,3 +663,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 23:15 UTC: 34A Prüfer 1: abnahmefähig, nur niedrig (zwei Testlücken). Prüfer 2 und `fr-n34` laufen.
 - 23:58 UTC: 34A von beiden Prüfern abnahmefähig (656b2c3; nur niedrig). Zusammenführen nach grünem `fr-n34`; niedrige Reste (Testlücken, EISDIR-Meldung, Fenster 2) in die Liste; keine weitere Runde.
 - 00:10 UTC: 34g fertig (0e59314 auf 8c9d80f; RUNBOOK 7.2/7.3/8.6/0.2, D93 Nachtrag 34 A, AUDIT R17/6.2, HANDOFF, Liste Nr. 124 erledigt, neu 127/128; Hinweise aus 33g2). Patch `docs/tasks/patches/34g-0e59314.patch`. Prüfer gestartet.
+- 00:12 UTC: Auftrag 36 (`docs/tasks/36-nach-m1-nacht4b.md`): 36A `store` Reste aus 34A (Fenster 2 schließen, EISDIR, Tests; Basis c8cda58) und Nr. 128 nur als Untersuchung (die Pfad-Varianten haben viele Aufrufer mit möglicher rechtmäßiger Nebenläufigkeit; eine Prüfung dort wäre eine Verhaltensänderung), 36B FIXB im Release-Test.
