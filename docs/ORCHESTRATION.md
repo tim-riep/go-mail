@@ -680,3 +680,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 02:08 UTC: 36A2 fertig (24c35c6 auf c8cda58; Rückfall auf das geprüfte unlink, wenn das Umbenennen auf `aside` scheitert: ENOSPC nach Link wieder Erfolg, Temp-Datei im Fehlerweg wieder entfernt; Unterordner 0700 mit Gründen verworfen; neue Tests chattr +a, ENOSPC auf loop-ext4, `aside` zufällig). Patch `docs/tasks/patches/36a2-24c35c6.patch`. Zwei Prüfer gestartet; Volllauf `fr-n36a` neu auf 0271c96 + 36A2.
 - 02:08 UTC: Nacharbeit 36g2 gestartet (Doku auf 36A2 angepasst, Funde der Prüfung 36g).
 - 02:15 UTC: 36A2 Prüfer 1: abnahmefähig, nur Hinweise. Prüfer 2, Volllauf und 36g2 laufen.
+- 02:17 UTC: 36g2 fertig (28924d8 auf 833a3a8; Doku auf 36A2 angepasst, F1/F2/H1–H5 aus der Prüfung 36g). Patch `docs/tasks/patches/36g2-28924d8.patch`. Nachprüfung gestartet.
