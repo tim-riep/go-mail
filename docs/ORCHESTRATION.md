@@ -703,3 +703,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 04:33 UTC: Prüfer 37g abnahmefähig (L1 niedrig, H1–H4; 20-notes „37g“). Zusammengeführt als 1d56b3d.
 - 04:35 UTC: 37g2 fertig (7fa509b auf 5c77195; L1, H1–H4 der Prüfung von 37g; Patch `docs/tasks/patches/37g2-7fa509b.patch`). Ein Prüfer läuft.
 - 04:36 UTC: Prüfer 37g2 abnahmefähig (nur Hinweise; 20-notes „37g2“). Zusammengeführt als 3412723. Keine neuen Agenten mehr bis zum Halt.
+- 04:36 UTC: Auftrag 38 (`docs/tasks/38-nach-m1-nacht4d.md`, Paket 38A: Nr. 129 H1, fail closed bei Links, denen `os.Stat` nicht folgen kann; nur Testcode in `internal/e2e`, ein Prüfer) gestartet. Nicht fertig geprüft bis 05:00 UTC → ungemergt als Patch.
