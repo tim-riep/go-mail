@@ -669,3 +669,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 00:29 UTC: 36B fertig (2e0109e auf 526cb21; FIXB, R01, R04, PATH_MAX-Fall; Dauertausch 1133–2231 → 0 Fehltreffer). Patch `docs/tasks/patches/36b-2e0109e.patch`. Prüfer gestartet.
 - 00:34 UTC: Neustart im selben Container (Scratchpad und Worktrees erhalten). Abgebrochen: Läufe von 36A (WIP cda73e3) und der Prüfung 36B; beide Agenten per Nachricht fortgesetzt.
 - 00:46 UTC: 36B abnahmefähig (nur Hinweise). Quelle `orch/n36` = c8cda58 (Code wie 8ddbed3) + 36B; Volllauf `fr-n36` aus `fr-n34` übernommen, neu nur gofmt, vet und `internal/e2e` (36B ändert nur `internal/e2e/release28b_test.go`).
+- 00:46 UTC: Korrektur: Der erste Teillauf `fr-n36` lief ohne 36B (Patch mit relativem Pfad im neuen Worktree nicht gefunden); angehalten, Patch angewendet (`orch/n36` 0271c96), gofmt, vet und `internal/e2e` neu gestartet.
