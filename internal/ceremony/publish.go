@@ -1367,9 +1367,11 @@ func runPublish(opts PublishOptions) error {
 //
 // store.ErrReplacedMeanwhile in either of the first two states (after
 // the temporary file or the rename failed, the temporary name is not
-// the file written any more, and that entry stays) keeps its state. For
-// every store.ErrReplacedMeanwhile the remedy names the other process:
-// stop it, look at platform/, then run the same publish again.
+// the file written any more, and that entry stays, under that name or
+// moved by store to a new temporary name; the error names where) keeps
+// its state. For every store.ErrReplacedMeanwhile the remedy names the
+// other process: stop it, look at platform/, then run the same publish
+// again.
 //
 // The fsync of platform/ after the rename is not part of it
 // (syncPlatform): the callbacks after the rename report the
@@ -1398,7 +1400,8 @@ func replaceFailedErr(st *store.Store, err error) error {
 // when it is store.ErrReplacedMeanwhile (review of task 33 A, H1):
 // another process changed platform/ while publish wrote n, and the
 // error of store says what is where (an entry that is not the file
-// publish wrote stays where it is). The message names the path of n
+// publish wrote stays where it is, or under the new temporary name that
+// store moved it to). The message names the path of n
 // and the remedy, as errChanged does; nothing is logged. Any other
 // error is returned as it is (the messages before). witnesses.rec comes
 // here only when its replacement was not announced (it was missing),

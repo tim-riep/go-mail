@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -55,6 +56,9 @@ var foreignKinds = []struct {
 }
 
 var errSkipKind = errors.New("kind not possible here")
+
+// tempNameRE is a name of newTempName.
+var tempNameRE = regexp.MustCompile(`^\.tmp-[0-9a-f]{16}$`)
 
 // entryID is the identity of an entry for the test: device and inode
 // of its Lstat, and its type.
@@ -201,14 +205,56 @@ func runSwap(t *testing.T, c swapCase) {
 	if strings.Contains(err.Error(), "new") {
 		t.Fatalf("content in the message: %v", err)
 	}
-	atTmp, okTmp := lstatID(t, tmpPath)
-	atName, okName := lstatID(t, p)
-	// The foreign entry is where the other process put it, or, after a
-	// rename that happened, under name; a link leaves it under the
-	// temporary name as well, and it stays there.
-	if !(okTmp && atTmp == foreign) && !(c.fn != "create" && !okTmp && okName && atName == foreign) {
-		t.Fatalf("the foreign entry %s is gone (tmp %v %v, name %v %v): %v", k.name, okTmp, atTmp, okName, atName, err)
+	// The foreign entry is still there: under name after a rename that
+	// happened, or under the name that the temporary name was moved to
+	// (dropTemp; the message names it), never removed.
+	at := findID(t, dir, foreign)
+	if len(at) == 0 {
+		t.Fatalf("the foreign entry %s is gone: %v", k.name, err)
 	}
+	for _, n := range at {
+		if n != name && n != "other" && !strings.Contains(err.Error(), "moved to "+filepath.Join(dir, n)+", is ") {
+			t.Fatalf("the foreign entry %s is under %s, which the message does not name: %v", k.name, n, err)
+		}
+	}
+	if n, ok := tempWritten(t, dir); ok {
+		t.Fatalf("the temporary name %s, the file written, is left", n)
+	}
+}
+
+// findID returns the names in dir whose entry is id.
+func findID(t *testing.T, dir string, id entryID) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var at []string
+	for _, e := range ents {
+		if got, ok := lstatID(t, filepath.Join(dir, e.Name())); ok && got == id {
+			at = append(at, e.Name())
+		}
+	}
+	return at
+}
+
+// tempWritten returns a temporary name in dir that is a regular file
+// with the content "new", the content the tests write.
+func tempWritten(t *testing.T, dir string) (string, bool) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), tmpPrefix) || !e.Type().IsRegular() {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil && string(b) == "new" {
+			return e.Name(), true
+		}
+	}
+	return "", false
 }
 
 // TestFilesInTempSwapped (task 34 package A points 1 and 3, review of
@@ -274,10 +320,12 @@ func TestFilesInTempRemoved(t *testing.T) {
 // TestCreateFileAtomicInTempGoneAfterLink: the temporary name removed
 // or replaced by another process after the link, before it is looked
 // at again: name is the file written and stays, but the call fails with
-// ErrReplacedMeanwhile, and a FIFO put under the temporary name stays.
+// ErrReplacedMeanwhile. A FIFO put under the temporary name is moved to
+// a name of the call's own (dropTemp, task 36 package A point 1) and
+// stays there; the message names both names.
 func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
-	for _, c := range []struct{ name, what string }{{"removed", "is missing"}, {"fifo", "is not a regular file, not the file written, and stays"}} {
-		t.Run(c.name, func(t *testing.T) {
+	for _, name := range []string{"removed", "fifo"} {
+		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			root := openDotRoot(t, dir)
 			var tmpPath string
@@ -287,7 +335,7 @@ func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
 					if err := os.Remove(tmpPath); err != nil {
 						t.Error(err)
 					}
-					if c.name == "fifo" {
+					if name == "fifo" {
 						if err := syscall.Mkfifo(tmpPath, 0o644); err != nil {
 							t.Error(err)
 						}
@@ -296,18 +344,111 @@ func TestCreateFileAtomicInTempGoneAfterLink(t *testing.T) {
 			})
 			err := callWithin(t, func() error { return CreateFileAtomicIn(root, "w", []byte("new")) })
 			tempInHook = nil
-			if want := "store: " + tmpPath + " " + c.what + ": " + ErrReplacedMeanwhile.Error(); err == nil || err.Error() != want {
+			want := "store: " + tmpPath + " is missing: " + ErrReplacedMeanwhile.Error()
+			if name == "fifo" {
+				fifo := ""
+				ents, _ := os.ReadDir(dir)
+				for _, e := range ents {
+					if e.Type() == fs.ModeNamedPipe {
+						fifo = filepath.Join(dir, e.Name())
+					}
+				}
+				if fifo == "" || fifo == tmpPath {
+					t.Fatalf("the FIFO is gone or not moved: %q", fifo)
+				}
+				want = "store: " + tmpPath + ", moved to " + fifo + ", is not a regular file, not the file written, and stays there: " + ErrReplacedMeanwhile.Error()
+			}
+			if err == nil || err.Error() != want {
 				t.Fatalf("err %v, want %s", err, want)
 			}
 			if b, err := os.ReadFile(filepath.Join(dir, "w")); err != nil || string(b) != "new" {
 				t.Fatalf("name: %q %v", b, err)
 			}
-			if c.name == "fifo" {
-				if fi, err := os.Lstat(tmpPath); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
-					t.Fatalf("the FIFO: %v %v", fi, err)
-				}
-			}
 		})
+	}
+}
+
+// TestFilesInTempChangedAtUnlink (task 36 package A points 2 and 3):
+// the temporary name, moved to a name of its own and found to be the
+// file written there, is removed or replaced by a directory before the
+// unlink (the point "unlink"). The unlink finds the name missing
+// (ENOENT) or a directory (EISDIR): both are ErrReplacedMeanwhile, with
+// fixed messages, and the directory stays. For CreateFileAtomicIn the
+// link succeeded and name is the file written; for ReplaceFileIn the
+// rename failed (a full directory under name), and the error is its
+// *os.LinkError and ErrReplacedMeanwhile (review of task 34 A, H2 of
+// the second reviewer: removeTemp reports it).
+func TestFilesInTempChangedAtUnlink(t *testing.T) {
+	for _, fn := range []string{"create", "replace"} {
+		for _, change := range []string{"removed", "dir"} {
+			t.Run(fn+"/"+change, func(t *testing.T) {
+				dir := t.TempDir()
+				if fn == "replace" {
+					if err := os.MkdirAll(filepath.Join(dir, "w", "x"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				root := openDotRoot(t, dir)
+				var tmpPath, aside string
+				withTempInHook(t, func(_ *os.Root, tmp, pt string) {
+					switch pt {
+					case "opened":
+						tmpPath = filepath.Join(dir, tmp)
+					case "unlink":
+						aside = filepath.Join(dir, tmp)
+						if err := os.Rename(aside, filepath.Join(dir, "away")); err != nil {
+							t.Error(err)
+						}
+						if change == "dir" {
+							if err := os.Mkdir(aside, 0o755); err != nil {
+								t.Error(err)
+							}
+						}
+					}
+				})
+				fds := fdCount(t)
+				var err error
+				if fn == "create" {
+					err = CreateFileAtomicIn(root, "w", []byte("new"))
+				} else {
+					err = ReplaceFileIn(root, "w", []byte("new"))
+				}
+				tempInHook = nil
+				if n := fdCount(t); n != fds {
+					t.Errorf("descriptors %d before, %d after", fds, n)
+				}
+				// A new temporary name of its own: random, like the
+				// temporary name, not one derived from it that another
+				// process could put an entry under before the rename.
+				if aside == "" || aside == tmpPath || !tempNameRE.MatchString(filepath.Base(aside)) || strings.Contains(aside, filepath.Base(tmpPath)) {
+					t.Fatalf("no unlink of a new name of its own: %q %q %v", tmpPath, aside, err)
+				}
+				what := "is missing"
+				if change == "dir" {
+					what = "is not a regular file, not the file written, and stays there"
+				}
+				want := "store: " + tmpPath + ", moved to " + aside + ", " + what + ": " + ErrReplacedMeanwhile.Error()
+				var le *os.LinkError
+				if fn == "create" {
+					if err == nil || err.Error() != want {
+						t.Fatalf("err %v, want %s", err, want)
+					}
+					if b, err := os.ReadFile(filepath.Join(dir, "w")); err != nil || string(b) != "new" {
+						t.Fatalf("name: %q %v", b, err)
+					}
+				} else if !errors.Is(err, ErrReplacedMeanwhile) || !errors.As(err, &le) || !strings.HasSuffix(err.Error(), "; "+want) {
+					t.Fatalf("err %v, want ...; %s", err, want)
+				}
+				if change == "dir" {
+					if fi, err := os.Lstat(aside); err != nil || !fi.IsDir() {
+						t.Fatalf("the directory: %v %v", fi, err)
+					}
+				}
+				if _, err := os.Lstat(tmpPath); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the temporary name is back: %v", err)
+				}
+			})
+		}
 	}
 }
 

@@ -3,15 +3,10 @@
 package store
 
 import (
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 )
-
-// errIsDirIn reports a directory under a name that removeNameIn must
-// remove with unlink.
-var errIsDirIn = errors.New("is a directory")
 
 // removeNameIn is removeName for the name in the directory that root
 // holds, where syscall has no Unlinkat (every system but Linux and AIX,
@@ -44,4 +39,13 @@ func removeNameIn(root *os.Root, name string) error {
 		return &fs.PathError{Op: "unlink", Path: p, Err: underlying(err)}
 	}
 	return nil
+}
+
+// openDirIn opens nothing where removeNameIn has no unlinkat relative to
+// a descriptor (written.dropTemp then calls removeNameIn).
+func openDirIn(*os.Root) (*os.File, error) { return nil, nil }
+
+// removeNameInDir is removeNameIn; d is nil here (openDirIn).
+func removeNameInDir(root *os.Root, _ *os.File, name string) error {
+	return removeNameIn(root, name)
 }

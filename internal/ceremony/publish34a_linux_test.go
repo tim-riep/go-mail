@@ -139,7 +139,7 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
 		// (nil: another file under witnesses.rec), kind the type of the
 		// foreign entry.
 		state string
-		what  func(p, tmp string) string
+		what  func(p, tmp, aside string) string
 		kind  fs.FileMode
 	}{
 		{"dir-name-missing", "rename", func(p, tmp string) error {
@@ -147,7 +147,7 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
 				return err
 			}
 			return toDir(tmp)
-		}, stateNotWritten, func(p, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeDir},
+		}, stateNotWritten, func(p, _, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeDir},
 		{"dir-name-emptydir", "rename", func(p, tmp string) error {
 			if err := os.Remove(p); err != nil {
 				return err
@@ -159,15 +159,15 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
 			// The check of os.Root.Rename refuses a directory under the
 			// new name (EEXIST); renameat(2) would put the directory over
 			// an empty one only in the window after that check.
-		}, stateNotReplaced, func(p, tmp string) string {
-			return "rename " + tmp + " " + p + ": file exists; store: " + tmp + " is not a regular file, not the file written, and stays: " + store.ErrReplacedMeanwhile.Error()
+		}, stateNotReplaced, func(p, tmp, aside string) string {
+			return "rename " + tmp + " " + p + ": file exists; " + asideMsg(tmp, aside, "not a regular file")
 		}, fs.ModeDir},
 		{"fifo-before-close", "written", func(_, tmp string) error {
 			if err := os.Rename(tmp, tmp+"-away"); err != nil {
 				return err
 			}
 			return syscall.Mkfifo(tmp, 0o644)
-		}, stateNotWritten, func(p, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeNamedPipe},
+		}, stateNotWritten, func(p, _, _ string) string { return afterMsg("rename", p, "not a regular file") }, fs.ModeNamedPipe},
 		{"other-after-rename", "renamed", func(p, _ string) error {
 			if err := os.WriteFile(p+"-other", []byte("x"), 0o660); err != nil {
 				return err
@@ -179,8 +179,8 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
 				return err
 			}
 			return os.WriteFile(filepath.Join(tmp, "x"), nil, 0o644)
-		}, stateNotReplaced, func(p, tmp string) string {
-			return "rename " + tmp + " " + p + ": not a directory; store: " + tmp + " is not a regular file, not the file written, and stays: " + store.ErrReplacedMeanwhile.Error()
+		}, stateNotReplaced, func(p, tmp, aside string) string {
+			return "rename " + tmp + " " + p + ": not a directory; " + asideMsg(tmp, aside, "not a regular file")
 		}, fs.ModeDir},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -201,8 +201,15 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
 				t.Fatalf("swap %v, logged %v, calls %d, announced %d, err %v", *done, *logged, calls, announced, err)
 			}
 			what := afterMsg("rename", p, "another file")
+			// The rename failed: store moved the temporary name, the
+			// foreign entry, to a name of its own (task 36 package A
+			// point 1), where it stays.
+			aside := ""
+			if c.state == stateNotReplaced {
+				aside = movedTo(t, err, tmpPath)
+			}
 			if c.what != nil {
-				what = c.what(p, tmpPath)
+				what = c.what(p, tmpPath, aside)
 			}
 			if want := replaceMeanwhileMsg(p, what, c.state); err.Error() != want {
 				t.Fatalf("message\n%q, want\n%q", err.Error(), want)
@@ -212,7 +219,7 @@ func TestPublishWitnessesReplacedMeanwhile(t *testing.T) {
 			}
 			at := p
 			if c.state == stateNotReplaced {
-				at = tmpPath
+				at = aside
 			}
 			fi, lerr := os.Lstat(at)
 			if lerr != nil || fi.Mode().Type() != c.kind {
@@ -250,10 +257,14 @@ func TestPublishExportFileReplacedMeanwhile(t *testing.T) {
 			t.Fatalf("message %q", msg)
 		}
 		p := msg[len("ceremony: writing "):i]
-		if want := meanwhileMsg(p, afterMsg("link", p, "not a regular file")); msg != want {
+		// The FIFO, linked to the name, is moved from the temporary name
+		// to a name of store's own (task 36 package A point 1); the
+		// message names both.
+		aside := movedTo(t, err, tmpPath)
+		if want := meanwhileMsg(p, afterMsg("link", p, "not a regular file")+"; "+asideMsg(tmpPath, aside, "not a regular file")); msg != want {
 			t.Fatalf("message\n%q, want\n%q", msg, want)
 		}
-		for _, at := range []string{p, tmpPath} {
+		for _, at := range []string{p, aside} {
 			if fi, err := os.Lstat(at); err != nil || fi.Mode().Type() != fs.ModeNamedPipe {
 				t.Fatalf("the FIFO under %s: %v %v", at, fi, err)
 			}
@@ -317,18 +328,48 @@ func TestPublishExportFileReplacedMeanwhile(t *testing.T) {
 			t.Fatalf("swap %v, logged %v, err %v", *done, *logged, err)
 		}
 		// A directory is not put over a file: the rename fails, the
-		// directory stays under the temporary name, and admin-1.cert is
-		// the hard link it was.
+		// directory is moved from the temporary name to a name of store's
+		// own and stays there, and admin-1.cert is the hard link it was.
 		var le *os.LinkError
 		if !errors.As(err, &le) {
 			t.Fatalf("no *os.LinkError: %v", err)
 		}
-		if want := meanwhileMsg(p, "rename "+le.Old+" "+p+": not a directory; store: "+le.Old+
-			" is not a regular file, not the file written, and stays: "+store.ErrReplacedMeanwhile.Error()); err.Error() != want {
+		aside := movedTo(t, err, le.Old)
+		if want := meanwhileMsg(p, "rename "+le.Old+" "+p+": not a directory; "+asideMsg(le.Old, aside, "not a regular file")); err.Error() != want {
 			t.Fatalf("message\n%q, want\n%q", err.Error(), want)
 		}
-		if fi, err := os.Lstat(le.Old); err != nil || !fi.IsDir() {
-			t.Fatalf("the directory under %s: %v %v", le.Old, fi, err)
+		if fi, err := os.Lstat(aside); err != nil || !fi.IsDir() {
+			t.Fatalf("the directory under %s: %v %v", aside, fi, err)
 		}
 	})
+}
+
+// movedTo returns the name that store moved the temporary name tmp to
+// when it found something else than the file written under it (task 36
+// package A point 1), as the message of err names it: a new temporary
+// name in the same directory.
+func movedTo(t *testing.T, err error, tmp string) string {
+	t.Helper()
+	msg := err.Error()
+	pre := "store: " + tmp + ", moved to "
+	i := strings.Index(msg, pre)
+	if i < 0 {
+		t.Fatalf("no move of %s in %q", tmp, msg)
+	}
+	rest := msg[i+len(pre):]
+	j := strings.Index(rest, ", is ")
+	if j < 0 {
+		t.Fatalf("no state after the move in %q", msg)
+	}
+	aside := rest[:j]
+	if filepath.Dir(aside) != filepath.Dir(tmp) || !strings.HasPrefix(filepath.Base(aside), ".tmp-") || aside == tmp {
+		t.Fatalf("moved to %q, not a new temporary name next to %q", aside, tmp)
+	}
+	return aside
+}
+
+// asideMsg is the message of store for the temporary name tmp, moved to
+// aside, where it found what instead of the file written.
+func asideMsg(tmp, aside, what string) string {
+	return "store: " + tmp + ", moved to " + aside + ", is " + what + ", not the file written, and stays there: " + store.ErrReplacedMeanwhile.Error()
 }

@@ -21,24 +21,46 @@ func removeNameIn(root *os.Root, name string) error {
 	if err := checkNameIn(root, name); err != nil {
 		return err
 	}
-	unlinkErr := func(err error) error {
-		return &fs.PathError{Op: "unlink", Path: filepath.Join(root.Name(), name), Err: underlying(err)}
-	}
 	d, err := root.Open(".")
 	if err != nil {
-		return unlinkErr(err)
+		return unlinkErrIn(root, name, err)
 	}
 	defer d.Close()
+	return removeNameInDir(root, d, name)
+}
+
+// openDirIn opens the directory that root holds for removeNameInDir, so
+// that a caller can open it before it looks at a name it is to remove
+// (written.dropTemp): the open is then not in the window between that
+// look and the unlink.
+func openDirIn(root *os.Root) (*os.File, error) { return root.Open(".") }
+
+// removeNameInDir is removeNameIn with d, a descriptor of the directory
+// that root holds which the caller opened before (openDirIn) and
+// closes; with d nil it is removeNameIn.
+func removeNameInDir(root *os.Root, d *os.File, name string) error {
+	if d == nil {
+		return removeNameIn(root, name)
+	}
+	if err := checkNameIn(root, name); err != nil {
+		return err
+	}
 	rc, err := d.SyscallConn()
 	if err != nil {
-		return unlinkErr(err)
+		return unlinkErrIn(root, name, err)
 	}
 	var uerr error
 	if err := rc.Control(func(fd uintptr) { uerr = syscall.Unlinkat(int(fd), name) }); err != nil {
-		return unlinkErr(err)
+		return unlinkErrIn(root, name, err)
 	}
 	if uerr != nil {
-		return unlinkErr(uerr)
+		return unlinkErrIn(root, name, uerr)
 	}
 	return nil
+}
+
+// unlinkErrIn is err of removeNameIn for name, with the path as
+// removeName names it.
+func unlinkErrIn(root *os.Root, name string, err error) error {
+	return &fs.PathError{Op: "unlink", Path: filepath.Join(root.Name(), name), Err: underlying(err)}
 }

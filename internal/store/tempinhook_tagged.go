@@ -5,8 +5,9 @@ package store
 import "os"
 
 // SetTempInHook sets the function that ReplaceFileIn, WriteFileAtomicIn
-// and CreateFileAtomicIn call at their points ("written", "rename" or
-// "link", "renamed" or "linked"; tempInHook) and returns a function
+// and CreateFileAtomicIn call at their points ("opened", "written",
+// "rename" or "link", "renamed" or "linked", "unlink"; tempInHook) and
+// returns a function
 // that puts back the one before. It exists only in a build with the tag
 // gomail_test, for the tests of gomail-ceremony publish, which stand
 // for another process that changes the temporary file of witnesses.rec
