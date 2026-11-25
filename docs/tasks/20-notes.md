@@ -611,3 +611,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 
 - **Prüfer** (`scratchpad/rev37g/notes.md`): abnahmefähig. Fakten am Code (b463c4a) und an den Quellen richtig; Nr. 130 vollständig (erledigt/offen, Reste beider Prüfungen von 37A richtig zugeordnet), 8 Striche; Hinweise (1)–(4) aus 36g5 umgesetzt; D93 nur „36A2“ in den Quellen. L1 niedrig: „Kontext endet 10 s vor der Frist des Elternprozesses“ gilt nur bei knapper Restzeit; der Kontext endet 10 s nach dem `-test.timeout` des Kinds (also spätestens 10 s vor der Frist). Hinweise: H1 „am Zeilenanfang (nach dem Einzug)“; H2 die alten Punkte (Ausgabe bei Zeitüberschreitung verloren, Kind läuft weiter) ausdrücklich als erledigt nennen, mit den Proben von Prüfer 2; H3 „übrige 64 Schritte“ neben sechs neu gelaufenen Schritten unklar; H4 Datum nur im HANDOFF-Kopf.
 - **Orchestrator:** zusammengeführt als 1d56b3d; L1 und H1–H4 gehen in den Nachzug 37g2 (oder den nächsten).
+
+### 37g2 (Nacharbeit, nur Doku; 7fa509b auf 5c77195): ein Prüfer
+
+- **Prüfer** (`scratchpad/rev37g2/notes.md`): abnahmefähig, nur Hinweise. L1 (Frist: Kontext 10 s nach dem `-test.timeout` des Kinds, am Code b463c4a geprüft), H1 („nach dem Einzug“), H2 (alte Punkte aus 36A3 erledigt, Proben von Prüfer 2), H3 (neu gelaufene Schritte in `fr-n37a` genannt, „64“ entfernt), H4 (Datum) richtig umgesetzt. Hinweise: die Köpfe nennen „am Zeilenanfang“ ohne „(nach dem Einzug)“ (Zusammenfassung, zulässig); ein Satz liest sich schwer.
+- **Orchestrator:** zusammengeführt als 3412723; die zwei Hinweise bleiben für einen späteren Nachzug.

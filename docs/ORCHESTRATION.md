@@ -702,3 +702,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 04:31 UTC: 37g fertig (c6f470b auf ca74a38; Nr. 130 Teil erledigt mit 37A und neue Reste, AUDIT 6.2, HANDOFF Punkt 7, Quellen D93, Köpfe; Patch `docs/tasks/patches/37g-c6f470b.patch`). Ein Prüfer läuft.
 - 04:33 UTC: Prüfer 37g abnahmefähig (L1 niedrig, H1–H4; 20-notes „37g“). Zusammengeführt als 1d56b3d.
 - 04:35 UTC: 37g2 fertig (7fa509b auf 5c77195; L1, H1–H4 der Prüfung von 37g; Patch `docs/tasks/patches/37g2-7fa509b.patch`). Ein Prüfer läuft.
+- 04:36 UTC: Prüfer 37g2 abnahmefähig (nur Hinweise; 20-notes „37g2“). Zusammengeführt als 3412723. Keine neuen Agenten mehr bis zum Halt.
