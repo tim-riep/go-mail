@@ -163,7 +163,10 @@ var envSelectors = map[string]bool{"Environ": true, "Getenv": true, "LookupEnv":
 // reading fails with fs.ErrNotExist, a regular file *.go that is gone
 // when it is parsed, and a directory named _*, .* or testdata that is
 // gone (or now a dangling link) when skippedTagged fails with
-// fs.ErrNotExist. A real directory of such a name goes to skippedTagged
+// fs.ErrNotExist. A link of such a name that os.Stat finds gone or
+// dangling is not searched; one that cannot be followed for another
+// reason (ELOOP, EACCES, ENAMETOOLONG) fails the walk (task 38 package
+// 38A). A real directory of such a name goes to skippedTagged
 // without os.Stat (only a link is followed first), so one that is
 // renamed away and back during the walk is searched or skipped, but
 // never read as a directory of the module; a link of such a name that is
@@ -214,10 +217,18 @@ func releaseEnvReads(root string) ([]envRead, []string, error) {
 			// the walk below, which would read it as a directory of the
 			// module (task 36 package 36B). Only a symbolic link is
 			// followed with os.Stat; one that dangles, or is gone, or
-			// leads to no directory is not searched.
+			// leads to no directory is not searched. One that cannot be
+			// followed for another reason (a loop, also a chain _l ->
+			// _m -> _l, a target it may not search, a path too long, a
+			// path through a regular file, ENOTDIR) fails the walk, as
+			// skippedTagged fails on a directory at this path that it
+			// cannot read (task 38 packages 38A, 38A2): fail closed.
 			top := d.IsDir()
 			if !top && d.Type()&fs.ModeSymlink != 0 {
 				fi, err := os.Stat(path)
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return err
+				}
 				top = err == nil && fi.IsDir()
 			}
 			if top {
@@ -1411,4 +1422,68 @@ func TestReleaseEnvReadsErrors(t *testing.T) {
 			t.Errorf("releaseEnvReads, %s with a path too long: %q, %q, %v; want the error ENAMETOOLONG", skipped, reads, problems, err)
 		}
 	}
+}
+
+// TestReleaseSwitchesLinkStat (task 38 package 38A): a symbolic link
+// named _*, .* or testdata that os.Stat cannot follow for a reason other
+// than fs.ErrNotExist (also ENOTDIR, a path through a regular file)
+// fails releaseEnvReads, as a directory at that path that cannot be
+// read does; it is not skipped like a dangling link. A loop (a chain
+// _l -> _m -> _l, ELOOP) for each kind of name, and a target below a
+// directory the test may not search (EACCES), which a test run as root
+// cannot make: that case is skipped then, with the reason. A dangling
+// link of such a name is still skipped. For testdata the partner z sorts
+// after it and is neither hidden nor testdata (task 38 package 38A2): the
+// walk reaches the link testdata first, so the check must cover testdata,
+// not only _* and .*.
+func TestReleaseSwitchesLinkStat(t *testing.T) {
+	const mainGo = "package main\n\nfunc main() {}\n"
+	for _, n := range [][2]string{{"_l", "_m"}, {".l", ".m"}, {"testdata", "z"}} {
+		root := filepath.Join(t.TempDir(), "mod")
+		writeTree(t, root, map[string]string{"cmd/a/main.go": mainGo})
+		if err := os.Symlink(n[1], filepath.Join(root, n[0])); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(n[0], filepath.Join(root, n[1])); err != nil {
+			t.Fatal(err)
+		}
+		reads, problems, err := releaseEnvReads(root)
+		if !errors.Is(err, syscall.ELOOP) {
+			t.Errorf("releaseEnvReads, a chain %s -> %s -> %s: %q, %q, %v; want the error ELOOP", n[0], n[1], n[0], reads, problems, err)
+		}
+	}
+
+	root := filepath.Join(t.TempDir(), "mod")
+	writeTree(t, root, map[string]string{"cmd/a/main.go": mainGo})
+	if err := os.Symlink("gone", filepath.Join(root, "_gone")); err != nil {
+		t.Fatal(err)
+	}
+	if reads, problems, err := releaseEnvReads(root); err != nil {
+		t.Errorf("releaseEnvReads, a dangling link _gone: %q, %q, %v; want no error", reads, problems, err)
+	}
+
+	t.Run("EACCES", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("run as root: os.Stat follows a link into a directory without search permission, EACCES cannot be made")
+		}
+		dir := t.TempDir()
+		root := filepath.Join(dir, "mod")
+		locked := filepath.Join(dir, "locked")
+		writeTree(t, root, map[string]string{"cmd/a/main.go": mainGo})
+		writeTree(t, filepath.Join(locked, "x"), map[string]string{"env_tagged.go": taggedEnvFile("GOMAIL_TEST_LOCKED")})
+		if err := os.Symlink(filepath.Join(locked, "x"), filepath.Join(root, "_x")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(locked, 0o755) })
+		if _, err := os.Stat(filepath.Join(root, "_x")); !errors.Is(err, syscall.EACCES) {
+			t.Skipf("os.Stat of the link: %v; this system does not deny the search, EACCES cannot be made", err)
+		}
+		reads, problems, err := releaseEnvReads(root)
+		if !errors.Is(err, syscall.EACCES) {
+			t.Errorf("releaseEnvReads, a link _x into a directory without search permission: %q, %q, %v; want the error EACCES", reads, problems, err)
+		}
+	})
 }
