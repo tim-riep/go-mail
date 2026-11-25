@@ -163,7 +163,12 @@ var envSelectors = map[string]bool{"Environ": true, "Getenv": true, "LookupEnv":
 // reading fails with fs.ErrNotExist, a regular file *.go that is gone
 // when it is parsed, and a directory named _*, .* or testdata that is
 // gone (or now a dangling link) when skippedTagged fails with
-// fs.ErrNotExist. In the checkout of a developer, .git/worktrees and
+// fs.ErrNotExist. A real directory of such a name goes to skippedTagged
+// without os.Stat (only a link is followed first), so one that is
+// renamed away and back during the walk is searched or skipped, but
+// never read as a directory of the module; a link of such a name that is
+// gone is skipped alone, its siblings are still walked (task 36 package
+// 36B). In the checkout of a developer, .git/worktrees and
 // .claude/worktrees change while agents start and end. root itself
 // remains an error. A problem that such a change shows for a moment (a
 // checkout without its go.mod yet) is not skipped here; see
@@ -203,13 +208,30 @@ func releaseEnvReads(root string) ([]envRead, []string, error) {
 		// such a directory all the same: skippedTagged searches it.
 		hidden := strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 		if hidden || name == "testdata" {
-			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+			// A real directory goes to skippedTagged as it is, without
+			// asking os.Stat first: a directory that is gone for a
+			// moment (renamed away and back) must not fall through to
+			// the walk below, which would read it as a directory of the
+			// module (task 36 package 36B). Only a symbolic link is
+			// followed with os.Stat; one that dangles, or is gone, or
+			// leads to no directory is not searched.
+			top := d.IsDir()
+			if !top && d.Type()&fs.ModeSymlink != 0 {
+				fi, err := os.Stat(path)
+				top = err == nil && fi.IsDir()
+			}
+			if top {
 				p, err := skippedTagged(path)
 				if err != nil {
 					// skippedTagged fails with fs.ErrNotExist only when
-					// top itself is gone since os.Stat above (or, a link,
-					// now dangles): as if os.Stat had failed.
+					// top itself is gone (or, a link, now dangles): a
+					// directory is skipped, and a link as well, but
+					// SkipDir on a link would skip its siblings. Any
+					// other error (a path too long) fails the walk.
 					if errors.Is(err, fs.ErrNotExist) {
+						if d.IsDir() {
+							return filepath.SkipDir
+						}
 						return nil
 					}
 					return err
@@ -1095,6 +1117,91 @@ func TestReleaseEnvReadsVanish(t *testing.T) {
 	}
 }
 
+// TestReleaseEnvReadsVanishLink (task 36 package 36B, R01 of the review
+// of 33B2): a symbolic link named _* or testdata to a directory that is
+// gone during the walk is skipped alone; the file after it in the same
+// directory is still read (SkipDir on a link would skip its siblings).
+// In v the link _l is removed when releaseEnvReads visits it (os.Stat
+// fails); in w and u the directory a link points to is removed when
+// skippedTagged visits it (skippedTagged fails). In z a real directory
+// _d removed at its visit is skipped, and its sibling read as well; in k
+// a link _l that stays is searched (its tagged file the only problem,
+// compared as a whole text) and the entries after it are read. Each
+// sibling comes after the entry in the order of WalkDir.
+func TestReleaseEnvReadsVanishLink(t *testing.T) {
+	t.Cleanup(func() { releaseWalkHook = nil })
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "mod")
+	outside := filepath.Join(dir, "outside")
+	writeTree(t, dir, map[string]string{
+		"mod/internal/v/x.go":             taggedEnvFile("GOMAIL_TEST_V"),
+		"mod/internal/w/x.go":             taggedEnvFile("GOMAIL_TEST_W"),
+		"mod/internal/u/x.go":             taggedEnvFile("GOMAIL_TEST_U"),
+		"mod/internal/z/x.go":             taggedEnvFile("GOMAIL_TEST_Z"),
+		"mod/internal/z/_d/env.go":        taggedEnvFile("GOMAIL_TEST_GONE_D"),
+		"outside/v/env_tagged.go":         taggedEnvFile("GOMAIL_TEST_GONE_V"),
+		"outside/w/env_tagged.go":         taggedEnvFile("GOMAIL_TEST_GONE_W"),
+		"outside/u/env_tagged.go":         taggedEnvFile("GOMAIL_TEST_GONE_U"),
+		"outside/kept/env_tagged.go":      taggedEnvFile("GOMAIL_TEST_KEPT"),
+		"mod/internal/k/x.go":             taggedEnvFile("GOMAIL_TEST_K"),
+		"mod/internal/k/zz/env_tagged.go": taggedEnvFile("GOMAIL_TEST_K2"),
+	})
+	for _, l := range []struct{ name, target string }{
+		{"internal/v/_l", filepath.Join(outside, "v")},
+		{"internal/w/_l", filepath.Join(outside, "w")},
+		{"internal/u/testdata", filepath.Join(outside, "u")},
+		// A link that stays: searched, its file a problem, the
+		// siblings read.
+		{"internal/k/_l", filepath.Join(outside, "kept")},
+	} {
+		if err := os.Symlink(l.target, filepath.Join(root, filepath.FromSlash(l.name))); err != nil {
+			t.Skipf("no symbolic links here: %v", err)
+		}
+	}
+	// At the visit of at, gone is removed.
+	cases := map[string]string{
+		filepath.Join(root, "internal", "v", "_l"): filepath.Join(root, "internal", "v", "_l"),
+		filepath.Join(outside, "w"):                filepath.Join(outside, "w"),
+		filepath.Join(outside, "u"):                filepath.Join(outside, "u"),
+		filepath.Join(root, "internal", "z", "_d"): filepath.Join(root, "internal", "z", "_d"),
+	}
+	removed := map[string]bool{}
+	releaseWalkHook = func(path string) {
+		if gone, ok := cases[path]; ok && !removed[gone] {
+			if err := os.RemoveAll(gone); err != nil {
+				t.Error(err)
+			}
+			removed[gone] = true
+		}
+	}
+	reads, problems, err := releaseEnvReads(root)
+	releaseWalkHook = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	for at, gone := range cases {
+		if !removed[gone] {
+			t.Errorf("%s was not removed: the walk did not visit %s", gone, at)
+		}
+	}
+	var names []string
+	for _, r := range reads {
+		names = append(names, r.name)
+	}
+	sort.Strings(names)
+	if got, want := strings.Join(names, " "), "GOMAIL_TEST_K GOMAIL_TEST_K2 GOMAIL_TEST_U GOMAIL_TEST_V GOMAIL_TEST_W GOMAIL_TEST_Z"; got != want {
+		t.Errorf("names read: %s, want %s", got, want)
+	}
+	top := filepath.Join(root, "internal", "k", "_l")
+	want := filepath.Join(top, "env_tagged.go") + ": build constraint names gomail_test; go build ./... skips " + top + ", but a program may import it, this test does not read it"
+	if len(problems) != 1 || problems[0] != want {
+		t.Errorf("problems %q, want only %q", problems, want)
+	}
+}
+
 // TestReleaseSettle (task 33, rework 33B2): settledEnvReads returns the
 // problems that both walks find, each as often as in both, and the reads
 // of the first; it waits and walks again only after problems, and an
@@ -1103,6 +1210,7 @@ func TestReleaseEnvReadsVanish(t *testing.T) {
 // another one that is being removed, and a skipped directory _p with a
 // tagged file. The first walk reports all three; after the wait (which
 // writes the go.mod and removes the other checkout) only _p is left.
+// Each problem is compared as a whole text (task 36 package 36B).
 func TestReleaseSettle(t *testing.T) {
 	type result struct {
 		reads    []envRead
@@ -1157,8 +1265,21 @@ func TestReleaseSettle(t *testing.T) {
 		"_p/env_tagged.go":                           taggedEnvFile("GOMAIL_TEST_P"),
 	})
 	walk := func() ([]envRead, []string, error) { return releaseEnvReads(root) }
-	if _, problems, err := walk(); err != nil || len(problems) != 3 {
-		t.Fatalf("first walk: %q, %v; want 3 problems", problems, err)
+	// problem is the whole text of a problem of skippedTagged: the file
+	// at (below root) under the skipped directory top (task 36 package
+	// 36B, R04 of the review of 33B2: the text is compared whole).
+	problem := func(top, at string) string {
+		top = filepath.Join(root, top)
+		return filepath.Join(top, filepath.FromSlash(at)) + ": build constraint names gomail_test; go build ./... skips " + top + ", but a program may import it, this test does not read it"
+	}
+	// In the order of WalkDir: .claude before _p, gone before new.
+	first := []string{
+		problem(".claude", "worktrees/gone/cmd/a/env_tagged.go"),
+		problem(".claude", "worktrees/new/cmd/a/env_tagged.go"),
+		problem("_p", "env_tagged.go"),
+	}
+	if _, problems, err := walk(); err != nil || strings.Join(problems, "\n") != strings.Join(first, "\n") {
+		t.Fatalf("first walk: %q, %v; want %q", problems, err, first)
 	}
 	reads, problems, err := settledEnvReads(walk, func() {
 		if err := os.WriteFile(filepath.Join(root, ".claude", "worktrees", "new", "go.mod"), []byte("module example.com/mod\n"), 0o644); err != nil {
@@ -1174,9 +1295,8 @@ func TestReleaseSettle(t *testing.T) {
 	if len(reads) != 1 || reads[0].name != "GOMAIL_TEST_A" {
 		t.Errorf("reads %q, want GOMAIL_TEST_A", reads)
 	}
-	want := filepath.Join(root, "_p", "env_tagged.go") + ": build constraint names gomail_test;"
-	if len(problems) != 1 || !strings.HasPrefix(problems[0], want) {
-		t.Errorf("problems %q, want one beginning %q", problems, want)
+	if want := first[2]; len(problems) != 1 || problems[0] != want {
+		t.Errorf("problems %q, want only %q", problems, want)
 	}
 }
 
@@ -1189,8 +1309,11 @@ func TestReleaseSettle(t *testing.T) {
 // skippedTagged reads). A test run as root reads every directory, so the
 // error there is a path too long for the system: a chain of directories
 // whose path exceeds PATH_MAX (4096 bytes on Linux), each made relative
-// to its parent with os.Root. The paths only on Linux, where the limit
-// is known.
+// to its parent with os.Root. Since task 36 (package 36B) also a
+// directory named _x, .x or testdata whose own path is too long while
+// that of its parent is not: skippedTagged gets it without os.Stat, and
+// its error ENAMETOOLONG fails the walk (only fs.ErrNotExist skips it).
+// The paths only on Linux, where the limit is known.
 func TestReleaseEnvReadsErrors(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "mod")
 	writeTree(t, root, map[string]string{"cmd/a/main.go": "package main\n\nfunc main() {}\n", "cmd/a/bad.go": "package (\n"})
@@ -1239,6 +1362,53 @@ func TestReleaseEnvReadsErrors(t *testing.T) {
 		reads, problems, err := releaseEnvReads(root)
 		if !errors.Is(err, syscall.ENAMETOOLONG) {
 			t.Errorf("releaseEnvReads, a path too long under %s: %q, %q, %v; want the error ENAMETOOLONG", under, reads, problems, err)
+		}
+	}
+
+	// A directory named _*, .* or testdata whose own path is too long,
+	// in a directory whose path is not (task 36 package 36B): the walk
+	// reads the parent and finds it; skippedTagged cannot search it and
+	// the walk fails, it is not skipped like one that is gone.
+	for _, skipped := range []string{"_x", ".x", "testdata"} {
+		root := filepath.Join(t.TempDir(), "mod")
+		writeTree(t, root, map[string]string{"cmd/a/main.go": "package main\n\nfunc main() {}\n", "internal/long/x.go": "package long\n"})
+		parent := filepath.Join(root, "internal", "long")
+		r, err := os.OpenRoot(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// parent grows to 4094 or 4095 bytes: readable, but each entry
+		// in it is longer than PATH_MAX allows (4096 with its NUL).
+		for len(parent) < 4094 {
+			name := strings.Repeat("d", min(200, 4094-len(parent)-1))
+			if len(name) < 1 {
+				name = "d"
+			}
+			if err := r.Mkdir(name, 0o755); err != nil {
+				r.Close()
+				t.Fatal(err)
+			}
+			next, err := r.OpenRoot(name)
+			r.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, parent = next, filepath.Join(parent, name)
+		}
+		err = r.Mkdir(skipped, 0o755)
+		if err == nil {
+			err = r.WriteFile(skipped+"/env_tagged.go", []byte(taggedEnvFile("GOMAIL_TEST_LONG")), 0o644)
+		}
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(filepath.Join(parent, skipped)); len(parent) > 4095 || n < 4096 {
+			t.Fatalf("%s: %d bytes, %s: %d bytes; want at most 4095 and at least 4096", parent, len(parent), skipped, n)
+		}
+		reads, problems, err := releaseEnvReads(root)
+		if !errors.Is(err, syscall.ENAMETOOLONG) {
+			t.Errorf("releaseEnvReads, %s with a path too long: %q, %q, %v; want the error ENAMETOOLONG", skipped, reads, problems, err)
 		}
 	}
 }
