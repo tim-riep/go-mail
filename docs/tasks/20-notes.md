@@ -616,3 +616,8 @@ Eingeordnet am Stand 3e06f23 in `docs/tasks/20-triage.md` (Auftrag 20c): jeder P
 
 - **Prüfer** (`scratchpad/rev37g2/notes.md`): abnahmefähig, nur Hinweise. L1 (Frist: Kontext 10 s nach dem `-test.timeout` des Kinds, am Code b463c4a geprüft), H1 („nach dem Einzug“), H2 (alte Punkte aus 36A3 erledigt, Proben von Prüfer 2), H3 (neu gelaufene Schritte in `fr-n37a` genannt, „64“ entfernt), H4 (Datum) richtig umgesetzt. Hinweise: die Köpfe nennen „am Zeilenanfang“ ohne „(nach dem Einzug)“ (Zusammenfassung, zulässig); ein Satz liest sich schwer.
 - **Orchestrator:** zusammengeführt als 3412723; die zwei Hinweise bleiben für einen späteren Nachzug.
+
+### Auftrag 38, Paket 38A (Nr. 129 H1; 4dbb3a4 auf df4bd58): ein Prüfer
+
+- **Prüfer** (`scratchpad/rev38a/notes.md`): Verhalten richtig (nur `return err` für Fehler von `os.Stat` außer `fs.ErrNotExist` beim Folgen eines Links; hängende/verschwundene Links, echte Verzeichnisse und FIXB unverändert; keine Links im echten Baum außerhalb von `.git`, dort unter übersprungenen Ordnern). **Mittel:** Der Fall `{"testdata", "_m"}` von `TestReleaseSwitchesLinkStat` erreicht `testdata` nie (`_m` sortiert davor und scheitert schon); Mutant „Prüfung nur für `_*` und `.*`“ übersteht. Niedrig/Hinweis: `ENOTDIR` (Ziel durch eine Datei) scheitert jetzt auch, nicht genannt; „like a directory of the same path“ ungenau. Läufe: race mit Tags grün; eigener Mutant (ELOOP als Skip) gefangen.
+- **Orchestrator:** mittel offen → nicht zusammengeführt; Nacharbeit 38A2 in neuem Agenten.
