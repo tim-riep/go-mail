@@ -37,3 +37,7 @@ Ausgangspunkt: aktueller Arbeitsbranch (053e9cc oder später). Ergebnis: ein Com
 4. **Zählzeile** der Liste fortschreiben (Nr. 130 mit 36g4 aus den Prüfungen von 36A3).
 
 Keine Änderung an Code, Skripten, Tests oder Vektoren; keine neuen D-Einträge (Nachträge an D93 erlaubt).
+
+## Nacharbeit 36g5 (25.11.2026)
+
+Ausgangspunkt: aktueller Arbeitsbranch (5547125 oder später). Ergebnis: ein Commit, nur Dokumentation, mit `Task: docs/tasks/36g-docs.md (Nacharbeit 36g5)`. Notizen `scratchpad/impl36g5/notes.md`. Umzusetzen: die Funde L1 und L2 und die Hinweise H1 bis H4 der Prüfung von 36g4 (20-notes „36g4“; Textvorschläge wörtlich in `scratchpad/rev36g4/notes.md`). Bei H2 nur Reihenfolge und Quellen im Kopf von D93 Nachtrag 36 A ändern. In den Köpfen (HANDOFF, AUDIT, Liste) je ein kurzer Satz „Mit der Nacharbeit 36g5 …“; 36g4 als 29719f1 zusammengeführt, von einem Prüfer abnahmefähig. Sonst nichts.
