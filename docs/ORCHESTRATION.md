@@ -695,3 +695,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 03:59 UTC: 36g4 fertig (7f9c7df auf ba9f910, nur HANDOFF, AUDIT, DECISIONS (Nachtrag D93, eine Berichtigung „`aside` gab es nie“ → „die geschriebene Datei lag nie unter `aside`“), Liste mit neuer Nr. 130); Patch `docs/tasks/patches/36g4-7f9c7df.patch`. Ein Prüfer läuft.
 - 04:04 UTC: Prüfer 36g4 abnahmefähig (L1, L2 niedrig; H1–H4; 20-notes „36g4“). Zusammengeführt als 29719f1; Funde für den nächsten Doku-Nachzug.
 - 04:09 UTC: 36g5 fertig (bb5c7ce auf 783d6eb; je eine bis zwei Zeilen in HANDOFF, AUDIT, DECISIONS, Liste; Patch `docs/tasks/patches/36g5-bb5c7ce.patch`). Ein Prüfer läuft.
+- 04:11 UTC: Prüfer 36g5 abnahmefähig (nur Hinweise; 20-notes „36g5“). Zusammengeführt als e48f225.
