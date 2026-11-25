@@ -673,3 +673,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 00:51 UTC: **36B zusammengeführt** (8024b51; nur `internal/e2e/release28b_test.go`). Teillauf `fr-n36` auf 0271c96: gofmt, vet, `internal/e2e` grün, übrige 64 Schritte aus `fr-n34` (Code bis auf die Testdatei gleich); 67/67 bis 00:51 UTC. Code gleich `orch/n36`.
 - 01:13 UTC: 36A fertig (558ce2b auf c8cda58; Patch gesichert). Nr. 128 ergibt einen **neuen Haltepunkt**: `WriteAccept` ohne Postfachsperre; eine Prüfung nach dem rename dort wäre eine Verhaltensänderung → Entscheidung des Auftraggebers (20-notes „36A“). Zwei Prüfer gestartet.
 - 01:13 UTC: Volllauf `fr-n36a` auf c3867c0 (= 8024b51-Code + 36A) gestartet; Doku-Nachzug 36g (`docs/tasks/36g-docs.md`) gestartet, parallel zur Prüfung von 36A.
+- 01:20 UTC: 36A Prüfer 1: abnahmefähig, nur niedrig; Nr. 128 (`WriteAccept`) am Code bestätigt. Prüfer 2 läuft.
