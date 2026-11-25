@@ -708,3 +708,40 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 04:41 UTC: Prüfer 38A: ein mittlerer Fund (Fall `testdata` prüft nichts; 20-notes „Auftrag 38“). Nicht zusammengeführt; Nacharbeit 38A2 gestartet (Frist knapp vor dem Halt; sonst bleibt 38A ungemergt).
 - 04:42 UTC: 38A2 fertig (11de09a auf df4bd58; Partner `z` statt `_m` für `testdata`, Mutant „nur versteckte Namen“ scheitert jetzt; `ENOTDIR` im Kommentar); Patch `docs/tasks/patches/38a2-11de09a.patch`. Nachprüfung und Schritte `internal/e2e` auf `src-n38a2` laufen.
 - 04:47 UTC: 38A2 abnahmefähig (Nachprüfung, nichts über Info); `internal/e2e` grün auf `src-n38a2`. **Zusammengeführt** als 2671814 (Code gleich `src-n38a2`), Vektoren unverändert. Der Teillauf `fr-n38a` auf der alten Fassung wurde abgebrochen (überholt). Keine neuen Agenten mehr bis zum Halt.
+
+## 15. Stand beim Anhalten (25.11.2026, 06:00 Uhr MEZ, auf Anweisung des Auftraggebers)
+
+Keine Agenten laufen, kein Volllauf läuft. Der stündliche Check-in ist gelöscht. Der Container wurde einmal ersetzt (24.11., 22:10 UTC; Scratchpad und unveröffentlichte Commits verloren, darunter 29B 9c6a373 und der Volllauf `fr-n29b`) und startete einmal neu (25.11., 00:34 UTC; alles fortgesetzt). Seitdem gilt die Patch-Regel: Jeder geprüfte, nicht zusammengeführte Commit liegt als `docs/tasks/patches/<name>-<hash>.patch` auf dem Branch.
+
+**M1 A–F:** unverändert, A, B, C, D und F erfüllt, E bedingt (Zwei-Maschinen-Test über NFSv4 hier nicht möglich; HANDOFF „M1-Kriterien“).
+
+**Seit dem letzten Bericht (18.11., 06:00 MEZ) zusammengeführt:**
+- Auftrag 33: 33A 35f05bc (`publish`, Nr. 118 und Nr. 95), 33B 5d1cf0c (Release-Prüfung, mit 33B2), 33C e2c971f (Test-Hilfen, Nr. 121); 33D war eine Messung (Bericht in 20-notes). Dokumente 33g f8b8434 (mit 33g2).
+- Auftrag 35: 35A 526cb21 (`TestRelayBrokenPipe` unter `-json`, Nr. 126).
+- Auftrag 34: 34A 8ddbed3 (`store`/`publish`: Prüfung des Namens nach Umbenennen bzw. Link, `held`, `ErrReplacedMeanwhile`; Nr. 124); Dokumente 34g 3732791.
+- Auftrag 36: 36B 8024b51 (`TestReleaseSwitches`, FIXB, Nr. 125); 36A bde271b (Temp-Name vor dem Entfernen beiseite, Fenster 2 geschlossen solange das Umbenennen gelingt; mit 36A2 Rückfall auf das geprüfte Entfernen und 36A3 Kindprozess im Test; Nr. 127 zum Teil); Untersuchung Nr. 128 ohne Code. Dokumente 36g mit 36g2 b7822a2, 36g3 95c688d, 36g4 29719f1, 36g5 e48f225.
+- Auftrag 37: 37A b463c4a (Testgerüst von `TestWriteTempInErrorSwapped`, Nr. 130 zum Teil: Wächter, Frist und `Pdeathsig` des Kinds, Marke mit Zufallstoken, Abdeckung; zwei Prüfer, je ein niedriger Fund); Dokumente 37g 1d56b3d, 37g2 3412723.
+- Auftrag 38: 38A 2671814 (mit Nacharbeit 38A2; `TestReleaseSwitches`: ein Link `_*`, `.*` oder `testdata`, dem `os.Stat` nicht folgen kann, ist ein Fehler des Durchlaufs, Nr. 129 H1; ein Prüfer, erste Runde mit mittlerem Fund, Nachprüfung ohne Fund). Doku dazu steht noch aus.
+- Volläufe: `fr-n33` 67/67 (22:08 UTC), `fr-n34` 67/67 (00:24 UTC), `fr-n36` 67/67 (00:51 UTC), für 36A `fr-n36a` 63/67 plus eine Wiederholung des PTY-Schritts plus die drei Store-Schritte nach 36A3 (`fr-n36a3`) = 67/67 (03:48 UTC); für 37A die Store-Schritte, vet und gofmt neu (`fr-n37a`, grün), für 38A gofmt, vet und `internal/e2e` neu (`fr-n38a2`, grün), die übrigen aus `fr-n36a`. Code nach jedem Merge gleich der geprüften Quelle, Phase-0-Vektoren unverändert.
+
+**Offen:**
+- **29B (Client, Nr. 111/112/114):** mit dem Container verloren; wartet auf die Entscheidung zu H1 (Abschnitt 13) und muss danach neu umgesetzt werden (`docs/tasks/29-nach-m1-nacht3.md`, „Nacharbeit 29B3“; 20-notes „29B3“).
+- **Doku-Nachzug zu 38A** (Nr. 129 H1 erledigt; offen: `EACCES` nur als root übersprungen, `ENAMETOOLONG` ohne eigenen Fall, H2 von Nr. 129) und die zwei Hinweise aus 37g2 (20-notes „37g2“, „Auftrag 38“, „38A2“).
+- Liste nach M1: bis Nr. 130 (neu Nr. 123 bis 130 in dieser Nacht; Nr. 117 frei für 29B). Kandidaten ohne Haltepunkt für die nächste Nacht: Rest von Nr. 130 (SKIP ohne Marke, `atexit_sleep_ms`, `WaitDelay`), Nr. 129 H2 (deterministischer Test für FIXB), Rest von Nr. 127 (Testabhängigkeit von `mke2fs`, Kommentarlänge), Nr. 128 ohne `WriteAccept` (Pfad-Varianten von `store`).
+- Korrektur zum Eintrag 03:35 UTC in Abschnitt 14: Die Ursache war nicht ein nicht zurückgesetztes Limit, sondern das Schreiben des Testprotokolls von `go test` während des Fensters mit `RLIMIT_FSIZE` 0 (20-notes „Volllauf fr-n36a“).
+
+**Entscheidungen des Auftraggebers (neu):**
+- **Nr. 128, `store.WriteAccept`:** läuft ohne Postfachsperre; zwei Geräte desselben Benutzers können gleichzeitig annehmen, heute gewinnt der letzte (beide Fassungen gültig). Eine Prüfung der Identität nach dem Umbenennen lehnte den rechtmäßigen Verlierer ab. Wege: (a) die Annahme unter die Postfachsperre legen; (b) dort nur den Typ prüfen (reguläre Datei, kein Verzeichnis). Empfehlung der Prüfung: (b), weil Ed25519 deterministisch signiert und „letzter gewinnt“ bei gleichem Inhalt harmlos ist.
+- **V2 aus 33D:** Argon2 in Testbuilds zwischenspeichern (etwa −38 % CPU der Testläufe) berührt `internal/keys` (Phase 0) und braucht die ausdrückliche Erlaubnis.
+- Weiter offen: **29B H1** (Löschregel des Markers, Abschnitt 13, Wege a–c) und aus 27g Nr. 7, 40, 88, 92, 98, 99, 100.
+
+**Entscheidungen des Orchestrators in dieser Nacht (zur Prüfung):**
+- Nach dem Verlust des Containers die Patch-Regel eingeführt; 34A und 33g neu umsetzen lassen statt auf Wiederherstellung zu warten.
+- Testhaken `SetTempInHook` nur mit Tag `gomail_test`.
+- 36A trotz zweier abnahmefähiger Runden nicht zusammengeführt, solange der Volllauf rot war (Ablehnung bei `ENOSPC` → 36A2; Testprotokoll unter `RLIMIT_FSIZE` → 36A3).
+- PTY-Fehler `TestPTYSignals/Ctrl-backslash_shown` als Last eingeordnet (je 5 Läufe mit und ohne 36A grün) und einmal wiederholt.
+- Für 36A3 nur die drei Store-Schritte neu, weil nur eine Testdatei von `internal/store` geändert ist.
+- Für 37A (nur Testcode in `internal/store`) zwei Prüfer, für 38A (nur Testcode in `internal/e2e`) einer; 38A erst nach der Nacharbeit 38A2 zusammengeführt (mittlerer Fund der ersten Runde). Für 37A und 38A nur die Schritte des berührten Pakets neu.
+- Niedrige Funde und Hinweise in die Liste bzw. den nächsten Doku-Nachzug statt weiterer Runden (Gründe je in 20-notes).
+
+**Wie es weitergeht:** (1) Entscheidungen zu Nr. 128, V2 und 29B H1; danach 29B neu umsetzen, Volllauf, Merge, Doku. (2) Offene Entscheidungen aus 27g. (3) Weitere Punkte der Liste ohne Haltepunkt (oben).
