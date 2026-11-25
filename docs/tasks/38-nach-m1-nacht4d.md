@@ -17,3 +17,7 @@ Basis: aktueller Arbeitsbranch.
 ## Fertig
 
 Genau ein Commit, nicht pushen; Patch nach `scratchpad/patches/38a-<hash>.patch`; Bericht mit Läufen, Mutanten, Offenem.
+
+## Nacharbeit 38A2
+
+Ausgangspunkt 4dbb3a4 (`docs/tasks/patches/38a-4dbb3a4.patch` auf df4bd58). Ergebnis: genau ein Commit auf df4bd58 mit 38A insgesamt. Fund der Prüfung (mittel, `scratchpad/rev38a/notes.md`): Der Fall `{"testdata", "_m"}` in `TestReleaseSwitchesLinkStat` erreicht den Link `testdata` nie, weil `_m` vorher besucht wird und schon scheitert; ein Mutant, der die Prüfung nur für `_*` und `.*` anwendet, übersteht. Abhilfe: Partner, der nach `testdata` sortiert und weder versteckt noch `testdata` ist (etwa `z`), und ein Beleg, dass der Mutant nun scheitert. Dazu die Hinweise: `ENOTDIR` (Ziel durch eine Datei) im Kommentar nennen; „like a directory of the same path“ → „of the same path length“ bzw. genauer. Läufe wie in Paket 38A.
