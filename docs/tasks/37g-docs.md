@@ -16,3 +16,7 @@ Es gelten die festen Vorgaben aus `docs/tasks/00-vorgaben.md` wörtlich. Ausnahm
 ## Fertig
 
 Ein Commit, nicht pushen; Patch mit `git format-patch -1` nach `scratchpad/patches/37g-<hash>.patch`; Bericht mit geänderten Stellen.
+
+## Nacharbeit 37g2 (25.11.2026)
+
+Ausgangspunkt: aktueller Arbeitsbranch (801865d oder später). Ergebnis: ein Commit, nur Dokumentation, mit `Task: docs/tasks/37g-docs.md (Nacharbeit 37g2)`. Umzusetzen: L1 und H1 bis H4 der Prüfung von 37g (20-notes „37g“, Textvorschläge in `scratchpad/rev37g/notes.md`). Bei H3 genau sagen, welche Schritte in `fr-n37a` neu liefen (die drei Store-Schritte, vet mit und ohne Tags für `internal/store`, gofmt für `internal/store`) und dass die übrigen Schritte des Volllaufs aus `fr-n36a` gelten. In den Köpfen 37g je „37g zusammengeführt als 1d56b3d, ein Prüfer“ ergänzen. Sonst nichts.
