@@ -696,3 +696,4 @@ Keine Agenten laufen. Der Volllauf `fr-n29b` (Quelle `scratchpad/orch/src-n29b`,
 - 04:04 UTC: Prüfer 36g4 abnahmefähig (L1, L2 niedrig; H1–H4; 20-notes „36g4“). Zusammengeführt als 29719f1; Funde für den nächsten Doku-Nachzug.
 - 04:09 UTC: 36g5 fertig (bb5c7ce auf 783d6eb; je eine bis zwei Zeilen in HANDOFF, AUDIT, DECISIONS, Liste; Patch `docs/tasks/patches/36g5-bb5c7ce.patch`). Ein Prüfer läuft.
 - 04:11 UTC: Prüfer 36g5 abnahmefähig (nur Hinweise; 20-notes „36g5“). Zusammengeführt als e48f225.
+- 04:12 UTC: Auftrag 37 (`docs/tasks/37-nach-m1-nacht4c.md`, Paket 37A: Testgerüst von `TestWriteTempInErrorSwapped`, Nr. 130; nur Testcode in `internal/store`, zwei Prüfer) gestartet. Ist er um 05:00 UTC nicht fertig geprüft, bleibt er ungemergt (Patch).
